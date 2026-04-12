@@ -495,8 +495,12 @@ def step3_generate_report(
         lines.append("---\n")
 
     report_content = "\n".join(lines)
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report_content)
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report_content)
+    except IOError as e:
+        logger.error(f"报告写入失败: {report_path}, {e}")
+        return ""
 
     logger.info(f"Step 3 完成: 报告已写入 {report_path}")
     return report_path

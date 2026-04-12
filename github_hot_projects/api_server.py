@@ -28,6 +28,7 @@ API 接口：
 import logging
 import os
 import glob
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -54,18 +55,40 @@ class ChatResponse(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════
-# 会话管理（内存版；后续可替换为 Redis/DB）
+# 会话管理（内存版 + TTL；后续可替换为 Redis/DB）
 # ══════════════════════════════════════════════════════════════
 
-_sessions: dict[str, HotProjectAgent] = {}
+_SESSION_TTL = 3600  # 会话过期时间（秒），默认 1 小时
+_MAX_SESSIONS = 100  # 最大会话数，防止内存泄漏
+
+_sessions: dict[str, tuple[HotProjectAgent, float]] = {}  # {sid: (agent, last_access_time)}
+
+
+def _cleanup_expired_sessions() -> None:
+    """清理过期会话。"""
+    now = time.time()
+    expired = [sid for sid, (_, ts) in _sessions.items() if now - ts > _SESSION_TTL]
+    for sid in expired:
+        del _sessions[sid]
+        logger.info(f"会话过期已清理: {sid}")
 
 
 def get_agent(session_id: str) -> HotProjectAgent:
-    """获取或创建 Agent 实例（按 session_id 隔离）。"""
-    if session_id not in _sessions:
-        _sessions[session_id] = HotProjectAgent()
-        logger.info(f"创建新会话: {session_id}")
-    return _sessions[session_id]
+    """获取或创建 Agent 实例（按 session_id 隔离，自带 TTL 清理）。"""
+    _cleanup_expired_sessions()
+    if session_id in _sessions:
+        agent, _ = _sessions[session_id]
+        _sessions[session_id] = (agent, time.time())
+        return agent
+    if len(_sessions) >= _MAX_SESSIONS:
+        # 淘汰最久未访问的会话
+        oldest_sid = min(_sessions, key=lambda k: _sessions[k][1])
+        del _sessions[oldest_sid]
+        logger.info(f"会话数达上限，淘汰最旧: {oldest_sid}")
+    agent = HotProjectAgent()
+    _sessions[session_id] = (agent, time.time())
+    logger.info(f"创建新会话: {session_id}")
+    return agent
 
 
 # ══════════════════════════════════════════════════════════════
@@ -147,8 +170,11 @@ async def get_report(name: str):
     path = os.path.join(REPORT_DIR, name)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="报告不存在")
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except IOError:
+        raise HTTPException(status_code=500, detail="无法读取报告")
     return {"name": name, "content": content}
 
 

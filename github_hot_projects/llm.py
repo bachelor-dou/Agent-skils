@@ -70,12 +70,16 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
         try:
             resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=60)
             if resp.status_code == 200:
-                content = (
-                    resp.json()
-                    .get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                )
+                try:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if not choices:
+                        logger.warning(f"LLM 返回无 choices: {repo_name}")
+                        continue
+                    content = choices[0].get("message", {}).get("content", "")
+                except (ValueError, KeyError, IndexError) as e:
+                    logger.warning(f"LLM 响应解析失败: {repo_name}, {e}")
+                    continue
                 if content.strip():
                     return content.strip()
             else:

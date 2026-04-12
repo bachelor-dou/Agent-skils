@@ -74,8 +74,12 @@ def search_github_repos(
             )
             if resp.status_code == 200:
                 token_mgr.release_token(token_idx, resp)
-                return resp.json().get("items", [])
-            elif resp.status_code == 403:
+                try:
+                    return resp.json().get("items", [])
+                except (ValueError, KeyError):
+                    logger.error(f"搜索响应 JSON 解析失败: query='{q}', page={page}")
+                    return []
+            elif resp.status_code in (403, 429):
                 token_mgr.handle_rate_limit(resp, token_idx)
                 continue
             elif resp.status_code == 422:
@@ -117,8 +121,12 @@ def get_search_total_count(token_mgr: TokenManager, query: str) -> int:
             )
             if resp.status_code == 200:
                 token_mgr.release_token(token_idx, resp)
-                return resp.json().get("total_count", 0)
-            elif resp.status_code == 403:
+                try:
+                    return resp.json().get("total_count", 0)
+                except (ValueError, KeyError):
+                    logger.error(f"total_count 响应 JSON 解析失败: query='{query}'")
+                    return 0
+            elif resp.status_code in (403, 429):
                 token_mgr.handle_rate_limit(resp, token_idx)
                 continue
             else:
@@ -202,8 +210,12 @@ def get_stargazers_page(
             )
             if resp.status_code == 200:
                 token_mgr.release_token(token_idx, resp)
-                return resp.json()
-            elif resp.status_code == 403:
+                try:
+                    return resp.json()
+                except ValueError:
+                    logger.error(f"stargazers 响应 JSON 解析失败: {owner}/{repo} page={page}")
+                    return None
+            elif resp.status_code in (403, 429):
                 token_mgr.handle_rate_limit(resp, token_idx)
                 continue
             elif resp.status_code == 422:
@@ -282,7 +294,16 @@ def graphql_stargazers_batch(
             )
             if resp.status_code == 200:
                 token_mgr.release_token(token_idx, resp)
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    logger.error(f"GraphQL 响应 JSON 解析失败: {owner}/{repo}")
+                    return [], None
+
+                if "errors" in data:
+                    logger.warning(f"GraphQL 返回错误: {owner}/{repo}, {data['errors']}")
+                    return [], None
+
                 repo_data = data.get("data", {}).get("repository")
                 if not repo_data:
                     return [], None
@@ -299,7 +320,7 @@ def graphql_stargazers_batch(
                         first_cursor = e.get("cursor")
 
                 return timestamps, first_cursor
-            elif resp.status_code == 403:
+            elif resp.status_code in (403, 429):
                 token_mgr.handle_rate_limit(resp, token_idx)
                 continue
             else:

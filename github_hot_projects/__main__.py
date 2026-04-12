@@ -25,5 +25,13 @@ logging.basicConfig(
     ],
 )
 
+logger = logging.getLogger("discover_hot")
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("用户中断，退出。")
+    except Exception as e:
+        logger.error(f"Pipeline 执行失败: {e}", exc_info=True)
+        sys.exit(1)
