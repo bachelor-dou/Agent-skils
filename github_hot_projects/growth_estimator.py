@@ -91,6 +91,7 @@ def estimate_star_growth_binary(
     # ── 二分法查找窗口边界页 ──
     lo, hi = 1, total_pages
     actual_depth = 0
+    consecutive_failures = 0
 
     for depth in range(MAX_BINARY_SEARCH_DEPTH):
         if lo >= hi:
@@ -106,14 +107,27 @@ def estimate_star_growth_binary(
             return estimate_by_sampling(token_mgr, owner, repo)
 
         if not page_data:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                logger.info(
+                    f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 页空数据，降级为采样外推。"
+                )
+                return estimate_by_sampling(token_mgr, owner, repo)
             lo = mid + 1
             continue
 
         first_entry_time = parse_starred_at_from_entry(page_data[0])
         if first_entry_time is None:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                logger.info(
+                    f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 次无法解析时间戳，降级为采样外推。"
+                )
+                return estimate_by_sampling(token_mgr, owner, repo)
             lo = mid + 1
             continue
 
+        consecutive_failures = 0
         if first_entry_time >= cutoff:
             hi = mid   # 整页最老的都在窗口内 → 边界在更前面
         else:
@@ -220,7 +234,7 @@ def estimate_by_sampling(token_mgr: TokenManager, owner: str, repo: str) -> int:
         median_rate = sorted_rates[len(sorted_rates) // 2]
         max_rate = sorted_rates[-1]
 
-        if len(segment_rates) >= 3 and max_rate > median_rate * 3:
+        if len(segment_rates) >= 2 and max_rate > median_rate * 3:
             rate_per_second = median_rate
             logger.info(
                 f"  [GROWTH] {owner}/{repo} 检测到异常段速率 "

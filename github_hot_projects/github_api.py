@@ -77,8 +77,8 @@ def search_github_repos(
                 try:
                     return resp.json().get("items", [])
                 except (ValueError, KeyError):
-                    logger.error(f"搜索响应 JSON 解析失败: query='{q}', page={page}")
-                    return []
+                    logger.error(f"搜索响应 JSON 解析失败: query='{q}', page={page}, attempt={attempt + 1}")
+                    continue
             elif resp.status_code in (403, 429):
                 token_mgr.handle_rate_limit(resp, token_idx)
                 continue
@@ -124,8 +124,8 @@ def get_search_total_count(token_mgr: TokenManager, query: str) -> int:
                 try:
                     return resp.json().get("total_count", 0)
                 except (ValueError, KeyError):
-                    logger.error(f"total_count 响应 JSON 解析失败: query='{query}'")
-                    return 0
+                    logger.error(f"total_count 响应 JSON 解析失败: query='{query}', attempt={attempt + 1}")
+                    continue
             elif resp.status_code in (403, 429):
                 token_mgr.handle_rate_limit(resp, token_idx)
                 continue

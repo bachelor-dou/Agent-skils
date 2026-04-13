@@ -101,7 +101,7 @@ def _parse_trending_html(html: str, since: str = "daily") -> list[dict]:
             continue
         full_name = name_match.group(1).strip().strip("/")
         # 确保是 owner/repo 格式（排除 /stargazers 等子路径）
-        parts = full_name.split("/")
+        parts = full_name.split("/", 1)
         if len(parts) != 2:
             continue
 

@@ -19,6 +19,7 @@
   - main()                         — 入口编排
 """
 
+import json
 import logging
 import os
 import time
@@ -26,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from .config import (
+    CHECKPOINT_FILE_PATH,
     GITHUB_TOKENS,
     HOT_PROJECT_COUNT,
     LLM_API_URL,
@@ -136,7 +138,14 @@ def collect_from_star_range(
     raw_repos: dict[str, dict],
 ) -> None:
     """
-    Star 范围扫描收集：自动分段 + 逐子区间搜索，汇入 raw_repos。
+    Star 范围扫描收集：自动分段 + 多线程并发逐子区间搜索，汇入 raw_repos。
+
+    线程安全说明：
+    - 分段阶段串行（递归依赖上一步结果）
+    - 扫描阶段按 Token 数并行，每个 worker 收集到本地 list（无共享写）
+    - 结果在主线程通过 as_completed 逐个合并到 raw_repos（单线程写，无需加锁）
+    - 去重：子区间互不重叠，不会产生跨线程重复；与关键词搜索阶段的去重在主线程合并时完成
+    - Token：acquire_token() 内部 round-robin 分配不同 token 给不同线程，限流自动等待恢复
     """
     logger.info(f"Star 范围扫描 ({STAR_RANGE_MIN}..{STAR_RANGE_MAX}) 开始")
 
@@ -146,9 +155,13 @@ def collect_from_star_range(
         + ", ".join(f"[{lo}..{hi}]" for lo, hi in segments)
     )
 
-    for seg_idx, (low, high) in enumerate(segments, 1):
+    total_segments = len(segments)
+
+    def _scan_segment(seg_idx: int, low: int, high: int) -> list[dict]:
+        """Worker：扫描单个子区间，返回收集到的仓库列表。"""
         query = f"stars:{low}..{high}"
-        logger.info(f"  子区间 {seg_idx}/{len(segments)}: {query}")
+        logger.info(f"  子区间 {seg_idx}/{total_segments}: {query}")
+        collected: list[dict] = []
 
         for page in range(1, 11):
             items = search_github_repos(
@@ -158,17 +171,43 @@ def collect_from_star_range(
                 break
             for repo_item in items:
                 full_name = repo_item.get("full_name", "")
-                if not full_name or full_name in raw_repos:
+                if not full_name:
                     continue
                 current_star = repo_item.get("stargazers_count", 0)
                 if current_star < MIN_STAR_FILTER:
                     continue
-                raw_repos[full_name] = {
+                collected.append({
+                    "full_name": full_name,
                     "star": current_star,
                     "repo_item": repo_item,
                     "created_at": repo_item.get("created_at", ""),
-                }
+                })
             time.sleep(SEARCH_REQUEST_INTERVAL)
+
+        return collected
+
+    workers = min(len(GITHUB_TOKENS), len(segments))
+    logger.info(f"Star 范围扫描: {total_segments} 个子区间, {workers} 个并行 worker")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_scan_segment, seg_idx, low, high): seg_idx
+            for seg_idx, (low, high) in enumerate(segments, 1)
+        }
+        for f in as_completed(futures):
+            seg_idx = futures[f]
+            try:
+                collected = f.result()
+                for repo in collected:
+                    fn = repo["full_name"]
+                    if fn not in raw_repos:
+                        raw_repos[fn] = {
+                            "star": repo["star"],
+                            "repo_item": repo["repo_item"],
+                            "created_at": repo["created_at"],
+                        }
+            except Exception as e:
+                logger.error(f"  子区间 {seg_idx} 扫描异常: {e}")
 
     logger.info(f"Star 范围扫描完成: raw_repos 累计 {len(raw_repos)} 个。")
 
@@ -258,6 +297,44 @@ def collect_from_trending(
 
 
 # ══════════════════════════════════════════════════════════════
+# 断点续传：Checkpoint 辅助
+# ══════════════════════════════════════════════════════════════
+
+
+def _load_checkpoint() -> dict:
+    """加载断点续传文件。返回 {full_name: {"growth": int, "star": int}} 或空字典。"""
+    if not os.path.exists(CHECKPOINT_FILE_PATH):
+        return {}
+    try:
+        with open(CHECKPOINT_FILE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        logger.info(f"检测到断点续传文件: {len(data)} 个已计算项目。")
+        return data
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def _save_checkpoint(completed: dict) -> None:
+    """增量保存已完成的增长计算结果到断点文件。"""
+    try:
+        temp_path = CHECKPOINT_FILE_PATH + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(completed, f, ensure_ascii=False)
+        os.replace(temp_path, CHECKPOINT_FILE_PATH)
+    except IOError as e:
+        logger.warning(f"断点文件保存失败: {e}")
+
+
+def _remove_checkpoint() -> None:
+    """流程完整成功后删除断点文件。"""
+    try:
+        if os.path.exists(CHECKPOINT_FILE_PATH):
+            os.remove(CHECKPOINT_FILE_PATH)
+    except IOError:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════
 # Phase 2: 统一批量增长计算
 # ══════════════════════════════════════════════════════════════
 
@@ -273,9 +350,13 @@ def batch_growth_calc(
 
     DB 差值法仓库在主线程处理（无 IO），其余提交线程池。
     已在 candidate_map 中的仓库跳过（如 Trending 直接入选的）。
+    支持断点续传：已计算结果保存在 checkpoint 文件，崩溃重跑自动跳过。
     """
     db_valid = db.get("valid", False)
     db_projects = db.get("projects", {})
+
+    # 加载断点续传数据
+    checkpoint = _load_checkpoint()
 
     # 过滤掉已在候选中的仓库
     pending = {
@@ -283,7 +364,29 @@ def batch_growth_calc(
         if fn not in candidate_map
     }
 
-    logger.info(f"批量增长计算: {len(pending)} 个仓库待计算（跳过已入选 {len(raw_repos) - len(pending)} 个）。")
+    # 从 checkpoint 恢复已完成的项目
+    resumed_count = 0
+    for fn in list(pending.keys()):
+        if fn in checkpoint:
+            cp = checkpoint[fn]
+            growth = cp["growth"]
+            current_star = cp["star"]
+            created_at = pending[fn].get("created_at", "")
+            repo_item = pending[fn]["repo_item"]
+            update_db_project(db_projects, fn, current_star, repo_item)
+            if growth >= STAR_GROWTH_THRESHOLD:
+                _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
+            del pending[fn]
+            resumed_count += 1
+
+    if resumed_count:
+        logger.info(f"断点续传: 恢复 {resumed_count} 个已计算项目。")
+        save_db(db)
+
+    logger.info(f"批量增长计算: {len(pending)} 个仓库待计算（跳过已入选 {len(raw_repos) - len(pending) - resumed_count} 个, 续传 {resumed_count} 个）。")
+
+    checkpoint_dirty = False  # 标记 checkpoint 是否有未写入的变更
+    CHECKPOINT_BATCH_SIZE = 10  # 每完成 N 个项目落盘一次
 
     with ThreadPoolExecutor(max_workers=len(GITHUB_TOKENS)) as executor:
         futures = {}
@@ -297,6 +400,8 @@ def batch_growth_calc(
                 saved_star = db_projects[full_name].get("star", 0)
                 growth = current_star - saved_star
                 update_db_project(db_projects, full_name, current_star, repo_item)
+                checkpoint[full_name] = {"growth": growth, "star": current_star}
+                checkpoint_dirty = True
                 if growth >= STAR_GROWTH_THRESHOLD:
                     _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
             else:
@@ -305,19 +410,50 @@ def batch_growth_calc(
                 )
                 futures[f] = (full_name, created_at, repo_item)
 
+        # DB 差值法完成后保存一次 checkpoint
+        if checkpoint_dirty:
+            _save_checkpoint(checkpoint)
+            checkpoint_dirty = False
+
+        completed_since_save = 0
         for f in as_completed(futures):
             full_name, created_at, repo_item = futures[f]
             try:
                 _, growth, current_star = f.result()
             except Exception as e:
                 logger.error(f"  增长计算异常: {full_name}, {e}")
+                fallback_star = repo_item.get("stargazers_count", 0)
+                if fallback_star:
+                    update_db_project(db_projects, full_name, fallback_star, repo_item)
+                    checkpoint[full_name] = {"growth": -1, "star": fallback_star}
+                    checkpoint_dirty = True
+                    completed_since_save += 1
                 continue
             if growth < 0:
+                checkpoint[full_name] = {"growth": growth, "star": current_star}
+                checkpoint_dirty = True
+                completed_since_save += 1
+                if completed_since_save >= CHECKPOINT_BATCH_SIZE:
+                    _save_checkpoint(checkpoint)
+                    checkpoint_dirty = False
+                    completed_since_save = 0
                 continue
             # DB 更新在主线程完成（线程安全）
             update_db_project(db_projects, full_name, current_star, repo_item)
+            checkpoint[full_name] = {"growth": growth, "star": current_star}
+            checkpoint_dirty = True
+            completed_since_save += 1
             if growth >= STAR_GROWTH_THRESHOLD:
                 _upsert_candidate(candidate_map, full_name, growth, current_star, created_at)
+
+            if completed_since_save >= CHECKPOINT_BATCH_SIZE:
+                _save_checkpoint(checkpoint)
+                checkpoint_dirty = False
+                completed_since_save = 0
+
+        # 最后一批未满 BATCH_SIZE 的也要落盘
+        if checkpoint_dirty:
+            _save_checkpoint(checkpoint)
 
     logger.info(f"批量增长计算完成: 候选总数 {len(candidate_map)} 个。")
 
@@ -587,14 +723,11 @@ def main() -> None:
     # ── Phase 2: 统一批量增长计算 ──
     batch_growth_calc(token_mgr, raw_repos, db, candidate_map)
 
-    # ── 中间落盘 ──
-    save_db(db)
-    logger.info("Phase 2 后中间落盘完成。")
-
     if not candidate_map:
         logger.warning("未找到任何满足增长阈值的候选项目。")
         db["valid"] = True
         save_db(db)
+        _remove_checkpoint()
         elapsed = time.time() - start_time
         logger.info(f"无候选项目，DB 基线已更新。耗时: {elapsed:.1f}s")
         return
@@ -608,6 +741,7 @@ def main() -> None:
     # ── 5. 最终落盘 ──
     db["valid"] = True
     save_db(db)
+    _remove_checkpoint()
 
     # ── 6. 统计摘要 ──
     elapsed = time.time() - start_time

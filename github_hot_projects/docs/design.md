@@ -213,6 +213,7 @@ score = (growth_score + rate_score) × discount
 | `TIME_WINDOW_DAYS` | 10 | 增长计算的时间窗口 |
 | `NEW_PROJECT_DAYS` | 45 | hot_new 模式新项目判定窗口 |
 | `DATA_EXPIRE_DAYS` | 11 | DB 数据过期天数（>11天 → DB差值不可信） |
+| `CHECKPOINT_FILE_PATH` | `.pipeline_checkpoint.json` | 断点续传中间文件路径 |
 | `DEFAULT_SCORE_MODE` | comprehensive | 默认评分模式 |
 | `STAR_RANGE_MIN` / `MAX` | 2000 / 45000 | Star 范围扫描区间 |
 | `MAX_BINARY_SEARCH_DEPTH` | 20 | 二分法最大迭代深度 |
@@ -307,8 +308,16 @@ auto_split_star_range(2000, 45000)
 | 函数 | 说明 |
 |------|------|
 | `load_db() → dict` | 加载 `Github_DB.json`，距上次更新 > 11 天则 `valid=false` |
-| `save_db(db)` | 保存并更新 `date` 字段为今天 |
+| `save_db(db)` | 保存并更新 `date` 字段为今天（线程安全 + 原子写入） |
 | `update_db_project(db_projects, full_name, current_star, repo_item)` | 更新 star / forks / created_at 等字段 |
+
+线程安全机制：
+- **`_db_lock`**：全局 `threading.Lock()` 保护 `save_db()` 并发写入
+- **原子写入**：先写 `.tmp` 文件，再 `os.replace()` 原子替换，防止崩溃导致 JSON 损坏
+
+事务性设计：
+- **全局 `date` + `valid`**：只在完整流程成功后才更新 `valid=true` 并刷新 `date`
+- **中途崩溃不污染**：未完成的运行不会刷新 `date`，下次运行通过断点续传恢复已计算结果
 
 DB 结构：
 ```json
@@ -344,12 +353,26 @@ DB 结构：
 | `collect_from_keyword_search(token_mgr, raw_repos)` | Phase 1 | 遍历 SEARCH_KEYWORDS，逐关键词搜前 3 页 |
 | `collect_from_star_range(token_mgr, raw_repos)` | Phase 1 | 自动分段 + 逐子区间搜索 |
 | `collect_from_trending(raw_repos, candidate_map)` | Phase 1 | weekly 直接入选 / 其余进 raw_repos |
-| `batch_growth_calc(token_mgr, raw_repos, db, candidate_map)` | Phase 2 | 统一增长计算（详见 §2.3） |
+| `batch_growth_calc(token_mgr, raw_repos, db, candidate_map)` | Phase 2 | 统一增长计算 + 断点续传（详见 §2.3） |
 | `_process_repo_growth(token_mgr, full_name, current_star, repo_item)` | Phase 2 | Worker：单仓库增长计算（不写 DB） |
+| `_load_checkpoint() → dict` | Phase 2 | 加载断点续传文件 `.pipeline_checkpoint.json` |
+| `_save_checkpoint(completed)` | Phase 2 | 原子写入已完成的增长计算结果（每 10 个项目批量落盘） |
+| `_remove_checkpoint()` | Phase 2 | 流程完整成功后删除断点文件 |
 | `_upsert_candidate(candidate_map, full_name, growth, ...)` | — | 候选更新/插入（取 growth 最大值） |
 | `step2_rank_and_select(candidate_map, mode) → list[tuple]` | Phase 3 | 评分排序（详见 §2.4） |
 | `step3_generate_report(top_projects, db) → str` | Phase 4 | LLM 描述 + Markdown 报告 |
 | `main()` | 全部 | 完整流水线入口 |
+
+**断点续传机制**：
+```
+正常流程:
+  Phase 2 开始 → 每完成 10 个项目写 checkpoint → 全部完成
+  → save_db(valid=True) → 删除 checkpoint
+
+崩溃重跑:
+  Phase 2 开始 → 读 checkpoint → 跳过已计算项目 + DB 更新
+  → 只重算未完成项目 → 成功 → save_db → 删 checkpoint
+```
 
 ### 3.9 agent_tools.py — 10 个 Agent Tool
 
@@ -450,7 +473,10 @@ DB 结构：
 |------|------|
 | `_process_repo_growth()` 不写 DB | Worker 线程只做 API 调用和计算，返回结果 |
 | `update_db_project()` 仅在主线程 | `as_completed` 循环中逐个更新，避免并发写冲突 |
-| `TokenManager` 全操作加锁 | `acquire_token` / `release_token` 通过 `threading.Lock` 保护 |
+| `TokenManager` 全操作加锁 | `acquire_token` / `release_token` 通过 `threading.Lock` 保护；限流等待用 `Condition.wait()` 代替手工 release/acquire |
+| `save_db()` 线程安全 | `_db_lock` 全局锁 + 原子写入（`.tmp` + `os.replace()`） |
+| `api_server._sessions` 加锁 | `_sessions_lock` 保护会话字典的所有读写操作 |
+| `_save_checkpoint()` 原子写入 | 先写 `.tmp` 再 `os.replace()`，防止半写入损坏 |
 
 ## 5. 数据流全景图
 
@@ -483,16 +509,18 @@ DB 结构：
 │  raw_repos ──→ batch_growth_calc()                                              │
 │                                                                                 │
 │  ┌─────────────────────────────────────────────────────────────────────┐        │
-│  │  DB valid + 已存在?                                                 │        │
-│  │  ├─ Yes → 路径A: current - db_star (主线程)                         │        │
-│  │  └─ No  → 线程池 → _process_repo_growth()                          │        │
-│  │                    ├─ 路径B: estimate_star_growth_binary()           │        │
-│  │                    └─ 422 → 路径C: estimate_by_sampling()           │        │
-│  │                                                                     │        │
-│  │  结果 → 主线程: update_db_project() + growth≥800 → candidate_map   │        │
+│  │  1. 加载 checkpoint → 恢复已计算项目 → save_db()                    │        │
+│  │  2. DB valid + 已存在?                                              │        │
+│  │     ├─ Yes → 路径A: current - db_star (主线程)                      │        │
+│  │     └─ No  → 线程池 → _process_repo_growth()                       │        │
+│  │                       ├─ 路径B: estimate_star_growth_binary()        │        │
+│  │                       └─ 422 → 路径C: estimate_by_sampling()        │        │
+│  │  3. 每完成 10 个项目 → _save_checkpoint() (原子写入)                │        │
+│  │  4. 结果 → 主线程: update_db_project() + growth≥800 → candidate_map│        │
 │  └─────────────────────────────────────────────────────────────────────┘        │
 │                                                                                 │
-│  Github_DB.json ←──── save_db()                                                │
+│  Github_DB.json ←──── save_db()  (仅在完整流程成功后更新 valid=true + date)     │
+│  .pipeline_checkpoint.json ←──── 流程成功后删除                                 │
 └─────────────────────────────────────────────────┬───────────────────────────────┘
                                                   │
                                                   ↓

@@ -29,6 +29,7 @@ import logging
 import os
 import glob
 import time
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -62,10 +63,11 @@ _SESSION_TTL = 3600  # 会话过期时间（秒），默认 1 小时
 _MAX_SESSIONS = 100  # 最大会话数，防止内存泄漏
 
 _sessions: dict[str, tuple[HotProjectAgent, float]] = {}  # {sid: (agent, last_access_time)}
+_sessions_lock = threading.Lock()
 
 
 def _cleanup_expired_sessions() -> None:
-    """清理过期会话。"""
+    """清理过期会话。调用者需持有 _sessions_lock。"""
     now = time.time()
     expired = [sid for sid, (_, ts) in _sessions.items() if now - ts > _SESSION_TTL]
     for sid in expired:
@@ -74,21 +76,22 @@ def _cleanup_expired_sessions() -> None:
 
 
 def get_agent(session_id: str) -> HotProjectAgent:
-    """获取或创建 Agent 实例（按 session_id 隔离，自带 TTL 清理）。"""
-    _cleanup_expired_sessions()
-    if session_id in _sessions:
-        agent, _ = _sessions[session_id]
+    """获取或创建 Agent 实例（按 session_id 隔离，自带 TTL 清理，线程安全）。"""
+    with _sessions_lock:
+        _cleanup_expired_sessions()
+        if session_id in _sessions:
+            agent, _ = _sessions[session_id]
+            _sessions[session_id] = (agent, time.time())
+            return agent
+        if len(_sessions) >= _MAX_SESSIONS:
+            # 淘汰最久未访问的会话
+            oldest_sid = min(_sessions, key=lambda k: _sessions[k][1])
+            del _sessions[oldest_sid]
+            logger.info(f"会话数达上限，淘汰最旧: {oldest_sid}")
+        agent = HotProjectAgent()
         _sessions[session_id] = (agent, time.time())
+        logger.info(f"创建新会话: {session_id}")
         return agent
-    if len(_sessions) >= _MAX_SESSIONS:
-        # 淘汰最久未访问的会话
-        oldest_sid = min(_sessions, key=lambda k: _sessions[k][1])
-        del _sessions[oldest_sid]
-        logger.info(f"会话数达上限，淘汰最旧: {oldest_sid}")
-    agent = HotProjectAgent()
-    _sessions[session_id] = (agent, time.time())
-    logger.info(f"创建新会话: {session_id}")
-    return agent
 
 
 # ══════════════════════════════════════════════════════════════
@@ -128,9 +131,11 @@ app.add_middleware(
 @app.get("/api/status")
 async def status():
     """服务状态检查。"""
+    with _sessions_lock:
+        active = len(_sessions)
     return {
         "status": "running",
-        "active_sessions": len(_sessions),
+        "active_sessions": active,
         "data_dir": DATA_DIR,
     }
 
@@ -181,9 +186,10 @@ async def get_report(name: str):
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
     """清除指定会话（释放内存）。"""
-    if session_id in _sessions:
-        del _sessions[session_id]
-        return {"message": f"会话 {session_id} 已清除"}
+    with _sessions_lock:
+        if session_id in _sessions:
+            del _sessions[session_id]
+            return {"message": f"会话 {session_id} 已清除"}
     raise HTTPException(status_code=404, detail="会话不存在")
 
 

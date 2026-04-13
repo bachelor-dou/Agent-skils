@@ -27,11 +27,14 @@ DB 结构：
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 
 from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH
 
 logger = logging.getLogger("discover_hot")
+
+_db_lock = threading.Lock()
 
 
 def load_db() -> dict:
@@ -82,11 +85,14 @@ def load_db() -> dict:
 
 
 def save_db(db: dict) -> None:
-    """保存 DB 到磁盘，自动更新 date 为今天。"""
+    """保存 DB 到磁盘，自动更新 date 为今天。线程安全 + 原子写入。"""
     db["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        with open(DB_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(db, f, ensure_ascii=False, indent=2)
+        with _db_lock:
+            temp_path = DB_FILE_PATH + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, DB_FILE_PATH)
         logger.info(f"DB 已保存: {len(db.get('projects', {}))} 个项目。")
     except IOError as e:
         logger.error(f"DB 保存失败: {e}")

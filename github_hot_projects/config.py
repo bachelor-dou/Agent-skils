@@ -27,7 +27,6 @@ LLM_API_URL: str = os.environ.get(
 )
 LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL: str = os.environ.get(
-    # "LLM_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507"
     "LLM_MODEL", "Qwen/Qwen3.5-397B-A17B"
 )
 
@@ -69,6 +68,7 @@ RATE_LIMIT_WAIT_INTERVAL: int = 300    # 限流后轮询恢复间隔（秒）
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR: str = os.environ.get("DATA_DIR", PACKAGE_DIR)
 DB_FILE_PATH = os.path.join(DATA_DIR, "Github_DB.json")
+CHECKPOINT_FILE_PATH = os.path.join(DATA_DIR, ".pipeline_checkpoint.json")
 REPORT_DIR = os.path.join(DATA_DIR, "report")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 

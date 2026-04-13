@@ -362,8 +362,12 @@ def tool_full_discovery(token_mgr: TokenManager) -> dict:
     依次执行搜索 → 增长筛选 → 排序 → 报告。
     """
     from .pipeline import main as pipeline_main
-    pipeline_main()
-    return {"status": "completed"}
+    try:
+        pipeline_main()
+        return {"status": "completed"}
+    except Exception as e:
+        logger.error(f"完整发现流程执行失败: {e}")
+        return {"status": "failed", "error": str(e)}
 
 
 def tool_fetch_trending(

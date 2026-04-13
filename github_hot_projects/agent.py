@@ -170,9 +170,9 @@ class HotProjectAgent:
 
             if not tool_calls:
                 # LLM 直接回复用户
-                content = message.get("content", "")
+                content = message.get("content", "") or ""
                 self.state.conversation.append({"role": "assistant", "content": content})
-                return content
+                return content if content else "（Agent 未生成回复，请重试或换个问法。）"
 
             # 有 Tool 调用 → 执行每个 Tool
             self.state.conversation.append({

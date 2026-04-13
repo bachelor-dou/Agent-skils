@@ -3,13 +3,12 @@
 ## 1. 环境准备
 
 ```bash
-pip install requests           # 核心依赖
-pip install fastapi uvicorn    # API 服务模式（可选）
+pip install -r requirements.txt
 ```
 
 通过环境变量配置密钥（必须）：
 ```bash
-export GITHUB_TOKENS="ghp_token1,ghp_token2"   # 至少 1 个，多个用逗号分隔
+export GITHUB_TOKENS="ghp_token1,ghp_token2"   # 多个用逗号分隔
 export LLM_API_KEY="sk-xxx"                     # LLM 接口密钥（不配置则跳过描述生成）
 ```
 
