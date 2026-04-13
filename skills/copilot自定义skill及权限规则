@@ -1,0 +1,198 @@
+## VS Code Copilot 的自定义 Skill 机制
+
+你的 [SKILL.md](vscode-file://vscode-app/d:/APP/VS Code/cfbea10c5f/resources/app/out/vs/code/electron-browser/workbench/workbench.html) 使用的正是 **GitHub Copilot Chat 的自定义 Prompt Instructions（Skills）** 机制。这是 VS Code Copilot 扩展（`github.copilot-chat`）原生支持的功能，核心规则如下：
+
+- **约定目录**：`.github/skills/<技能名>/SKILL.md` 为一个skill路径。或者
+
+  根据官方文档，skill 的合法存放位置是：
+
+  | 路径                        | 作用域 |
+  | --------------------------- | ------ |
+  | `.github/skills/<name>/`    | 项目级 |
+  | `.agents/skills/<name>/`    | 项目级 |
+  | `.claude/skills/<name>/`    | 项目级 |
+  | `~/.copilot/skills/<name>/` | 个人级 |
+  | `~/.agents/skills/<name>/`  | 个人级 |
+  | `~/.claude/skills/<name>/`  | 个人级 |
+
+- **YAML frontmatter** 中的 `name`、`description`、`argument-hint` 用于技能发现、匹配和 UI 展示
+
+  ​	`name `字段必须与上面技能名目录一致，`argument-hint` 可忽略
+
+- **调用方式：**` /name` 即可调用
+
+- **SKILL.md:** 就是给 Copilot 的系统级指令，Copilot 读取后按其中的规则执行
+
+
+
+## 权限操作白名单
+
+```json
+// VS Code Copilot 终端命令自动审批配置
+// 使用方法: 将以下内容合并到 VS Code 的 settings.json 中
+// 文章说明: https://deguiliu.github.io/tech-notes/posts/misc/copilot_terminal_auto_approve/
+//
+// 设计原则: 白名单分层策略，默认拒绝所有未列出的操作
+// - 第一层: 全局安全关键词 (Substring Match)
+// - 第二层: 通用操作白名单 (Regex Match, 行首 + 管道链)
+// - 第三层: 本地脚本执行
+// - 第四层: 安全删除规则 (仅允许构建产物/缓存/临时文件)
+// - 第五层: 兜底拒绝 (所有未匹配的 rm 操作)
+{
+  "chat.tools.terminal.autoApprove": {
+    // ================================================================
+    // 第一层: 全局安全关键词 (Substring Match)
+    // 只要命令中包含这些字符串即允许, 适用于无副作用的只读命令
+    // ================================================================
+    "/(\\/dev\\/null|grep|egrep|fgrep|awk|sed|sort|uniq|wc|make|cmake|scons|ninja|maven|gradle|npm|yarn|pnpm|pip|git|echo|printf|cat|less|more|head|tail|which|whereis|whoami)/": {
+      "approve": true,
+      "matchCommandLine": false
+    },
+
+    // ================================================================
+    // 第二层: 通用操作超级白名单 (Regex Match)
+    // 匹配行首, 或管道(|)/逻辑与(&&)/分号(;)之后的命令
+    // 涵盖: 文件管理、系统监控、网络工具、编译器、脚本解释器
+    // ================================================================
+    "/^(\\s*|.*[\\|\\&\\;]\\s*)(cd|ls|ll|la|dir|pwd|cp|mv|mkdir|touch|tree|find|locate|stat|file|du|df|mount|umount|chmod|chown|ln|alias|export|source|\\.|exit|clear|history|ps|top|htop|free|uptime|jobs|fg|bg|kill|killall|shutdown|reboot|curl|wget|ping|telnet|netstat|ss|ifconfig|ip|ssh|scp|rsync|tar|zip|unzip|gzip|gunzip|bzip2|xz|7z|gcc|g\\+\\+|clang|clang\\+\\+|nm|ld|gdb|valgrind|strace|ltrace|python|python3|ruby|perl|php|node|deno|go|rustc|cargo|java|javac|docker|podman|kubectl)(\\s+.*)?$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+
+    // ================================================================
+    // 第三层: 本地脚本执行
+    // 允许运行当前目录或相对路径下的脚本 (如 ./build.sh, ../test.py)
+    // ================================================================
+    "/^(\\s*|.*[\\|\\&\\;]\\s*)(\\.\\/|\\.\\.\\/|bash|sh|zsh|csh|fish)\\s+.*$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+
+    // ================================================================
+    // 第四层: 安全删除规则
+    // 仅允许删除: 构建目录、依赖缓存、临时文件、编译产物
+    // ================================================================
+    "/^(\\s*|.*[\\|\\&\\;]\\s*)rm\\s+(-rf\\s+|-r\\s+|-f\\s+)?(\\*|\\.\\/\\*|build.*|out|output|dist|target|obj|bin|lib|Debug|Release|x64|x86|__pycache__|\\.pytest_cache|\\.venv|venv|node_modules|\\.gradle|\\.m2|\\.cargo|\\.npm|.*\\.(tmp|log|bak|cache|swp|swo|old|orig)|.*\\.(o|a|so|dylib|dll|exe|d|elf|map|bin|hex|lst|dump|pdb|idb|ilk|exp)|.*\\.(cmake|ninja|ninja_deps|ninja_log)|CMakeCache\\.txt|build\\.ninja|compile_commands\\.json|Makefile|\\.DS_Store|Thumbs\\.db|\\/tmp\\/.*)(\\s.*)?$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+
+    // ================================================================
+    // 第五层: 兜底拒绝
+    // 禁止任何未明确允许的删除操作, 防止 rm -rf / 或删除源代码
+    // ================================================================
+    "rm": false,
+    "/^(\\s*|.*[\\|\\&\\;]\\s*)rm\\s+.*$/": {
+      "approve": false,
+      "matchCommandLine": true
+    }
+  }
+}
+
+```
+
+> VS Code 的 **`chat.tools.terminal.autoApprove`** 配置项，用来控制 **Copilot Agent 在终端中执行命令时**，哪些命令可以自动通过（无需用户手动点"允许"），哪些必须拒绝。
+>
+> 就是你每次看到 Copilot 弹出"是否允许运行此命令？"对话框时的那个控制机制。
+>
+> ##### `approve` 字段
+>
+> | 值      | 含义                                             |
+> | ------- | ------------------------------------------------ |
+> | `true`  | 当命令匹配该规则时，**自动批准**执行，不弹确认框 |
+> | `false` | 当命令匹配该规则时，**自动拒绝**，直接阻止执行   |
+>
+> 如果一个命令没有匹配到任何规则，则走默认行为——弹出确认框让你手动决定。
+>
+> ------
+>
+> ##### `matchCommandLine` 字段
+>
+> 这个字段决定 **匹配的目标是什么**：
+>
+> | 值      | 匹配目标                | 说明                                                         |
+> | ------- | ----------------------- | ------------------------------------------------------------ |
+> | `false` | **仅匹配命令名/关键词** | 类似"是否包含这个词"。不关心命令的完整写法，只要命令行中出现该字符串就算匹配 |
+> | `true`  | **匹配完整命令行**      | 正则从 `^` 到 `$` 匹配整行，可以精确控制命令在行首还是管道之后、带什么参数等 |
+>
+> ------
+>
+> ##### 结合你配置中的两个场景对比
+>
+> **第一层**（`matchCommandLine: false`）：
+>
+> → 只要命令行里**任何位置**出现 `grep`、`git` 等词就批准。比如 `echo hello | grep world` 会匹配到 `grep`，也会匹配到 `echo`。简单粗暴，适用于确认安全的只读命令。
+>
+> **第二层**（`matchCommandLine: true`）：
+>
+> → 必须整行匹配正则。通过 `^` 和 `$` 锚定，确保命令出现在行首或管道/`&&`/`;` 之后的位置——更精确，防止误匹配参数中的关键词。
+>
+> ------
+>
+> ### 五层白名单策略分解
+>
+> 整体设计采用**白名单分层 + 默认拒绝**原则：
+>
+> #### 第一层：全局安全关键词（Substring Match）
+>
+> **白名单命令**：`grep`、`awk`、`sed`、`sort`、`wc`、`make`、`cmake`、`npm`、`pip`、`git`、`echo`、`cat`、`head`、`tail`、`which` 等
+>
+> **逻辑**：这些都是无副作用的只读/构建/查询命令，只要命令行中**包含**这些关键词就自动批准。
+>
+> ------
+>
+> #### 第二层：通用操作超级白名单（Regex Match）
+>
+> **正则逻辑**：`^(\s*|.*[\|\&\;]\s*)(cd|ls|ll|cp|mv|mkdir|...)(\\s+.*)?$`
+>
+> - `^(\s*|.*[\|\&\;]\s*)` — 命令在行首，或在管道 `|`、逻辑与 `&&`、分号 `;` 之后
+> - 中间是具体命令名列表（涵盖文件管理、系统监控、网络工具、编译器、脚本解释器、容器工具等）
+> - `(\s+.*)?$` — 允许带任意参数
+>
+> **覆盖范围**：
+>
+> | 类别     | 命令示例                                                     |
+> | -------- | ------------------------------------------------------------ |
+> | 文件管理 | `cd`, `ls`, `cp`, `mv`, `mkdir`, `touch`, `tree`, `find`, `stat` |
+> | 系统监控 | `ps`, `top`, `htop`, `free`, `uptime`, `kill`                |
+> | 网络工具 | `curl`, `wget`, `ping`, `ssh`, `scp`, `rsync`                |
+> | 压缩解压 | `tar`, `zip`, `unzip`, `gzip`, `xz`, `7z`                    |
+> | 编译器   | `gcc`, `g++`, `clang`, `gdb`, `valgrind`                     |
+> | 脚本语言 | `python`, `python3`, `node`, `go`, `rustc`, `cargo`, `java`  |
+> | 容器     | `docker`, `podman`, `kubectl`                                |
+>
+> #### 第三层：本地脚本执行
+>
+> 允许运行当前目录或相对路径下的脚本，以及通过 `bash`/`sh`/`zsh`/`fish` 显式调用的脚本。
+>
+> ------
+>
+> #### 第四层：安全删除规则
+>
+> 允许删除的目标（白名单）：
+>
+> | 类别         | 示例                                                         |
+> | ------------ | ------------------------------------------------------------ |
+> | 构建目录     | `build*`, `out`, `dist`, `target`, `obj`, `bin`, `Debug`, `Release` |
+> | 依赖缓存     | `node_modules`, [.venv](vscode-file://vscode-app/d:/APP/VS Code/cfbea10c5f/resources/app/out/vs/code/electron-browser/workbench/workbench.html), `venv`, `.gradle`, `.m2`, `.cargo`, `.npm` |
+> | Python缓存   | `__pycache__`, `.pytest_cache`                               |
+> | 临时文件     | `*.tmp`, `*.log`, `*.bak`, `*.cache`, `*.swp`                |
+> | 编译产物     | `*.o`, `*.a`, `*.so`, `*.dll`, `*.exe`, `*.pdb`              |
+> | 构建系统产物 | `CMakeCache.txt`, `build.ninja`, `compile_commands.json`     |
+> | 系统垃圾     | `.DS_Store`, `Thumbs.db`, `/tmp/*`                           |
+>
+> ------
+>
+> #### 第五层：兜底拒绝
+>
+> **任何未被第四层白名单匹配的 `rm` 操作都会被拒绝**。这是最关键的安全兜底，防止 `rm -rf /` 或误删源代码。
+>
+> ------
+>
+> ### 匹配优先级
+>
+> 规则按声明顺序从上到下匹配，**第一个匹配到的规则生效**。所以：
+>
+> ### 一句话总结
+>
+> 这是一套"允许只读/构建/开发命令 + 仅允许删除构建产物和缓存 + 拒绝所有其他删除"的 Copilot 终端安全策略。
