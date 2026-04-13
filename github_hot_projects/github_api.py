@@ -7,7 +7,8 @@ GitHub API 封装
   - Stargazers 分页查询（REST，返回 starred_at）
   - Stargazers 批量查询（GraphQL，游标翻页）
 
-所有函数均为线程安全（通过 TokenManager 管理并发 token）。
+所有函数接收 token_idx 参数（由 Worker 绑定），不再内部 acquire/release。
+限流（403/429）和 Token 失效（401）通过抛异常交由 Worker 处理。
 """
 
 import logging
@@ -21,6 +22,7 @@ from .config import (
     SEARCH_REQUEST_INTERVAL,
 )
 from .token_manager import TokenManager
+from .worker_pool import RateLimitError, TokenInvalidError
 
 logger = logging.getLogger("discover_hot")
 
@@ -33,6 +35,20 @@ _SEGMENT_MIN_STAR_SPAN = 50           # 最小星数跨度，避免过度细分
 
 
 # ══════════════════════════════════════════════════════════════
+# 内部工具：检查响应状态并抛异常
+# ══════════════════════════════════════════════════════════════
+
+
+def _check_response(resp: requests.Response, token_idx: int) -> None:
+    """检查响应状态码，401/403/429 抛出对应异常。"""
+    if resp.status_code == 401:
+        raise TokenInvalidError(token_idx, f"HTTP 401: {resp.text[:200]}")
+    if resp.status_code in (403, 429):
+        reset_str = resp.headers.get("X-RateLimit-Reset", "0")
+        raise RateLimitError(token_idx, float(reset_str))
+
+
+# ══════════════════════════════════════════════════════════════
 # 仓库搜索
 # ══════════════════════════════════════════════════════════════
 
@@ -40,63 +56,52 @@ _SEGMENT_MIN_STAR_SPAN = 50           # 最小星数跨度，避免过度细分
 def search_github_repos(
     token_mgr: TokenManager,
     query: str,
+    token_idx: int,
     page: int = 1,
     per_page: int = 100,
     sort: str = "stars",
     order: str = "desc",
     auto_star_filter: bool = True,
-) -> list[dict]:
+) -> list[dict] | None:
     """
-    调用 GitHub Search API 搜索仓库（线程安全，3 次重试）。
-
-    Args:
-        token_mgr:        TokenManager 实例
-        query:            搜索关键词或完整查询字符串
-        page:             页码（1-based）
-        per_page:         每页结果数（最大 100）
-        sort:             排序字段 ("stars" | "updated" | "forks")
-        order:            排序方向 ("desc" | "asc")
-        auto_star_filter: 是否自动追加 stars:>={MIN_STAR_FILTER}
+    调用 GitHub Search API 搜索仓库（3 次重试）。
 
     Returns:
-        仓库列表 [{"full_name": ..., "stargazers_count": ..., ...}, ...]
+        仓库列表，成功但无数据返回 []，3 次网络异常全失败返回 None。
+
+    Raises:
+        TokenInvalidError: Token 失效 (401)
+        RateLimitError:    Token 限流 (403/429)
     """
     q = f"{query} stars:>={MIN_STAR_FILTER}" if auto_star_filter else query
     url = "https://api.github.com/search/repositories"
     params = {"q": q, "sort": sort, "order": order, "per_page": per_page, "page": page}
+    headers = token_mgr.get_rest_headers(token_idx)
 
     for attempt in range(3):
-        token_idx = token_mgr.acquire_token()
         try:
-            resp = requests.get(
-                url, headers=token_mgr.get_rest_headers(token_idx),
-                params=params, timeout=30,
-            )
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            _check_response(resp, token_idx)
             if resp.status_code == 200:
-                token_mgr.release_token(token_idx, resp)
                 try:
                     return resp.json().get("items", [])
                 except (ValueError, KeyError):
                     logger.error(f"搜索响应 JSON 解析失败: query='{q}', page={page}, attempt={attempt + 1}")
                     continue
-            elif resp.status_code in (403, 429):
-                token_mgr.handle_rate_limit(resp, token_idx)
-                continue
             elif resp.status_code == 422:
-                token_mgr.release_token(token_idx)
                 logger.warning(f"搜索参数无效: query='{q}', page={page}, status=422")
                 return []
             else:
-                token_mgr.release_token(token_idx)
                 logger.warning(f"搜索异常: query='{q}', status={resp.status_code}")
                 time.sleep(5)
+        except (TokenInvalidError, RateLimitError):
+            raise
         except requests.RequestException as e:
-            token_mgr.release_token(token_idx)
             logger.error(f"搜索请求异常: query='{q}', error={e}")
             time.sleep(5)
 
     logger.warning(f"搜索 '{q}' page={page} 经 3 次重试仍失败，跳过。")
-    return []
+    return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -104,36 +109,32 @@ def search_github_repos(
 # ══════════════════════════════════════════════════════════════
 
 
-def get_search_total_count(token_mgr: TokenManager, query: str) -> int:
+def get_search_total_count(token_mgr: TokenManager, query: str, token_idx: int) -> int:
     """
-    获取搜索查询的 total_count（不拉取 items），
-    用于判断区间内仓库数是否超过 API 返回上限。
+    获取搜索查询的 total_count（不拉取 items）。
+
+    Raises:
+        TokenInvalidError, RateLimitError
     """
     url = "https://api.github.com/search/repositories"
     params = {"q": query, "per_page": 1, "page": 1}
+    headers = token_mgr.get_rest_headers(token_idx)
 
     for attempt in range(3):
-        token_idx = token_mgr.acquire_token()
         try:
-            resp = requests.get(
-                url, headers=token_mgr.get_rest_headers(token_idx),
-                params=params, timeout=30,
-            )
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            _check_response(resp, token_idx)
             if resp.status_code == 200:
-                token_mgr.release_token(token_idx, resp)
                 try:
                     return resp.json().get("total_count", 0)
                 except (ValueError, KeyError):
                     logger.error(f"total_count 响应 JSON 解析失败: query='{query}', attempt={attempt + 1}")
                     continue
-            elif resp.status_code in (403, 429):
-                token_mgr.handle_rate_limit(resp, token_idx)
-                continue
             else:
-                token_mgr.release_token(token_idx)
                 time.sleep(3)
+        except (TokenInvalidError, RateLimitError):
+            raise
         except requests.RequestException:
-            token_mgr.release_token(token_idx)
             time.sleep(3)
 
     logger.warning(f"获取 total_count 失败: query='{query}'，视为 0。")
@@ -144,6 +145,7 @@ def auto_split_star_range(
     token_mgr: TokenManager,
     low: int,
     high: int,
+    token_idx: int,
     max_results: int = _SEGMENT_MAX_RESULTS,
     min_span: int = _SEGMENT_MIN_STAR_SPAN,
 ) -> list[tuple[int, int]]:
@@ -151,16 +153,16 @@ def auto_split_star_range(
     递归自动分段：将 [low, high] 星数范围拆成若干子区间，
     使每个子区间的 total_count <= max_results。
 
-    策略：
-      1. 查询区间 total_count，若 <= max_results → 不再细分
-      2. 若 > max_results 且跨度 > min_span → 从中点劈开，递归
-      3. 若跨度 <= min_span → 不再细分（防止无限递归）
+    在 WorkerPool 启动前由主线程调用，使用固定 token_idx。
+
+    Raises:
+        TokenInvalidError, RateLimitError（主线程需处理）
     """
     if high - low <= min_span:
         return [(low, high)]
 
     query = f"stars:{low}..{high}"
-    total = get_search_total_count(token_mgr, query)
+    total = get_search_total_count(token_mgr, query, token_idx)
     time.sleep(SEARCH_REQUEST_INTERVAL)
 
     if total <= max_results:
@@ -172,8 +174,8 @@ def auto_split_star_range(
         f"  区间 stars:{low}..{high} → total_count={total}，"
         f"细分 → [{low}..{mid}] + [{mid + 1}..{high}]"
     )
-    left = auto_split_star_range(token_mgr, low, mid, max_results, min_span)
-    right = auto_split_star_range(token_mgr, mid + 1, high, max_results, min_span)
+    left = auto_split_star_range(token_mgr, low, mid, token_idx, max_results, min_span)
+    right = auto_split_star_range(token_mgr, mid + 1, high, token_idx, max_results, min_span)
     return left + right
 
 
@@ -187,50 +189,43 @@ def get_stargazers_page(
     owner: str,
     repo: str,
     page: int,
+    token_idx: int,
     per_page: int = 100,
 ) -> list[dict] | None:
     """
-    获取指定仓库 stargazers 的第 page 页（线程安全，3 次重试）。
-
-    使用 star media type，返回含 starred_at 时间戳的列表。
-    stargazers 按 starred_at 升序排列（page 1 最老，page N 最新）。
+    获取指定仓库 stargazers 的第 page 页（3 次重试）。
 
     Returns:
-        [{"starred_at": "2026-04-01T...", "user": {...}}, ...] 或 None（失败/不可访问）
+        [{"starred_at": ..., "user": {...}}, ...] 或 None（失败/不可访问）
+
+    Raises:
+        TokenInvalidError, RateLimitError
     """
     url = f"https://api.github.com/repos/{owner}/{repo}/stargazers"
     params = {"per_page": per_page, "page": page}
+    headers = token_mgr.get_star_headers(token_idx)
 
     for attempt in range(3):
-        token_idx = token_mgr.acquire_token()
         try:
-            resp = requests.get(
-                url, headers=token_mgr.get_star_headers(token_idx),
-                params=params, timeout=30,
-            )
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            _check_response(resp, token_idx)
             if resp.status_code == 200:
-                token_mgr.release_token(token_idx, resp)
                 try:
                     return resp.json()
                 except ValueError:
                     logger.error(f"stargazers 响应 JSON 解析失败: {owner}/{repo} page={page}")
                     return None
-            elif resp.status_code in (403, 429):
-                token_mgr.handle_rate_limit(resp, token_idx)
-                continue
             elif resp.status_code == 422:
-                # 超大仓库分页限制，返回 None 触发降级
-                token_mgr.release_token(token_idx)
                 return None
             else:
-                token_mgr.release_token(token_idx)
                 logger.debug(
                     f"stargazers 请求失败: {owner}/{repo} page={page}, "
                     f"status={resp.status_code}"
                 )
                 time.sleep(2)
+        except (TokenInvalidError, RateLimitError):
+            raise
         except requests.RequestException as e:
-            token_mgr.release_token(token_idx)
             logger.debug(f"stargazers 请求异常: {owner}/{repo} page={page}, {e}")
             time.sleep(2)
 
@@ -246,26 +241,15 @@ def graphql_stargazers_batch(
     token_mgr: TokenManager,
     owner: str,
     repo: str,
+    token_idx: int,
     last: int = 100,
     before: str | None = None,
 ) -> tuple[list[datetime], str | None]:
     """
     单次 GraphQL 请求获取一批 stargazers（从最新往前翻页）。
 
-    使用 GraphQL 变量参数化查询，避免注入风险。
-    通过 last + before 游标实现从新到老翻页。
-
-    Args:
-        token_mgr: TokenManager 实例
-        owner:     仓库所有者
-        repo:      仓库名
-        last:      每批获取条数（最大 100）
-        before:    上一页的游标（None 表示从最新开始）
-
-    Returns:
-        (timestamps 列表, 上一页游标)
-        timestamps 按时间升序排列（单批次内有序，跨批次需 .sort()）
-        失败时返回 ([], None)
+    Raises:
+        TokenInvalidError, RateLimitError
     """
     query_str = """
     query($owner: String!, $name: String!, $last: Int!, $before: String) {
@@ -283,17 +267,18 @@ def graphql_stargazers_batch(
     if before:
         variables["before"] = before
 
+    headers = token_mgr.get_graphql_headers(token_idx)
+
     for attempt in range(3):
-        token_idx = token_mgr.acquire_token()
         try:
             resp = requests.post(
                 "https://api.github.com/graphql",
-                headers=token_mgr.get_graphql_headers(token_idx),
+                headers=headers,
                 json={"query": query_str, "variables": variables},
                 timeout=30,
             )
+            _check_response(resp, token_idx)
             if resp.status_code == 200:
-                token_mgr.release_token(token_idx, resp)
                 try:
                     data = resp.json()
                 except ValueError:
@@ -320,14 +305,11 @@ def graphql_stargazers_batch(
                         first_cursor = e.get("cursor")
 
                 return timestamps, first_cursor
-            elif resp.status_code in (403, 429):
-                token_mgr.handle_rate_limit(resp, token_idx)
-                continue
             else:
-                token_mgr.release_token(token_idx)
                 time.sleep(3)
+        except (TokenInvalidError, RateLimitError):
+            raise
         except requests.RequestException:
-            token_mgr.release_token(token_idx)
             time.sleep(3)
 
     return [], None

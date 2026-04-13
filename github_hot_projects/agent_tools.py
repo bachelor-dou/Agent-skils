@@ -83,7 +83,7 @@ def tool_search_hot_projects(
     for category, keywords in keywords_dict.items():
         for keyword in keywords:
             for page in range(1, max_pages + 1):
-                items = search_github_repos(token_mgr, keyword, page=page)
+                items = search_github_repos(token_mgr, keyword, token_idx=0, page=page)
                 if not items:
                     break
                 for item in items:
@@ -132,14 +132,14 @@ def tool_scan_star_range(
     if seen_repos is None:
         seen_repos = set()
 
-    segments = auto_split_star_range(token_mgr, min_star, max_star)
+    segments = auto_split_star_range(token_mgr, min_star, max_star, token_idx=0)
     repos: list[dict] = []
 
     for seg_idx, (low, high) in enumerate(segments, 1):
         query = f"stars:{low}..{high}"
         for page in range(1, 11):
             items = search_github_repos(
-                token_mgr, query, page=page, sort="updated", auto_star_filter=False
+                token_mgr, query, token_idx=0, page=page, sort="updated", auto_star_filter=False
             )
             if not items:
                 break
@@ -190,7 +190,7 @@ def tool_check_repo_growth(
 
     # 先获取当前 star 数
     items = search_github_repos(
-        token_mgr, f"repo:{repo}", page=1, per_page=1, auto_star_filter=False
+        token_mgr, f"repo:{repo}", token_idx=0, page=1, per_page=1, auto_star_filter=False
     )
     if not items:
         return {"error": f"未找到仓库: {repo}"}
@@ -203,7 +203,7 @@ def tool_check_repo_growth(
         growth = current_star - saved_star
         method = "DB差值法"
     else:
-        growth = estimate_star_growth_binary(token_mgr, owner, repo_name, current_star)
+        growth = estimate_star_growth_binary(token_mgr, owner, repo_name, current_star, token_idx=0)
         method = "二分法/采样外推"
 
     return {
@@ -225,16 +225,17 @@ def tool_batch_check_growth(
     """
     Tool 4: 批量计算仓库增长并筛选候选。
 
-    复用 pipeline.batch_growth_calc 的逻辑，保持一致性。
+    使用 TokenWorkerPool + CalcGrowthTask 并行计算。
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
         db:               DB 字典
         growth_threshold: 增长阈值
     """
-    from .pipeline import batch_growth_calc
+    from .pipeline import _submit_growth_tasks, _save_checkpoint
+    from .worker_pool import TokenWorkerPool
 
-    # 构建 raw_repos 格式（batch_growth_calc 的输入）
+    # 构建 raw_repos 格式
     raw_repos: dict[str, dict] = {}
     for r in repos:
         fn = r["full_name"]
@@ -248,7 +249,28 @@ def tool_batch_check_growth(
         }
 
     candidate_map: dict[str, dict] = {}
-    batch_growth_calc(token_mgr, raw_repos, db, candidate_map)
+
+    pool = TokenWorkerPool(token_mgr.tokens)
+    pool.start()
+    try:
+        growth_ctx = {
+            "checkpoint": None,
+            "pending_created_at": {},
+            "db_projects": db.get("projects", {}),
+            "candidate_map": candidate_map,
+            "checkpoint_dirty": [False],
+            "completed_since_save": [0],
+        }
+        checkpoint = _submit_growth_tasks(
+            pool, token_mgr, raw_repos, db, candidate_map, growth_ctx
+        )
+        pool.wait_all_done()
+        pool.drain_results()
+
+        if growth_ctx["checkpoint_dirty"][0]:
+            _save_checkpoint(checkpoint)
+    finally:
+        pool.shutdown()
 
     return {
         "candidates": candidate_map,
