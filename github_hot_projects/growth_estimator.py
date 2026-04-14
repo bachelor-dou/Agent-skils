@@ -46,10 +46,10 @@ def estimate_star_growth_binary(
       1. 快速检查：取最后一页，看该页最老记录
          - 最老记录不在窗口内 → 窗口边界在该页内，直接精确计数（1 次请求）
          - 在窗口内 → 需向前找，进入二分
-      2. 二分法：lo=1, hi=total_pages
-         - 取 mid 页首条 starred_at 与 cutoff 比较
-         - >= cutoff → hi=mid   （边界在更前面）
-         - < cutoff  → lo=mid+1 （边界在更后面）
+        2. 二分法：lo=1, hi=total_pages
+            - 取 mid 页末条 starred_at 与 cutoff 比较
+            - >= cutoff → hi=mid   （该页已触及窗口，边界在 mid 或更前）
+            - < cutoff  → lo=mid+1 （整页都在窗口外，边界在更后）
          - 最大深度 MAX_BINARY_SEARCH_DEPTH(20)
       3. growth = (total_pages - boundary_page) × 100 + 边界页内窗口期计数
       4. 降级：REST 返回 422 → 采样外推法
@@ -117,8 +117,8 @@ def estimate_star_growth_binary(
             lo = mid + 1
             continue
 
-        first_entry_time = parse_starred_at_from_entry(page_data[0])
-        if first_entry_time is None:
+        last_entry_time = parse_starred_at_from_entry(page_data[-1])
+        if last_entry_time is None:
             consecutive_failures += 1
             if consecutive_failures >= 3:
                 logger.info(
@@ -129,8 +129,8 @@ def estimate_star_growth_binary(
             continue
 
         consecutive_failures = 0
-        if first_entry_time >= cutoff:
-            hi = mid   # 整页最老的都在窗口内 → 边界在更前面
+        if last_entry_time >= cutoff:
+            hi = mid   # 该页已出现窗口内记录 → 边界在 mid 或更前面
         else:
             lo = mid + 1
 

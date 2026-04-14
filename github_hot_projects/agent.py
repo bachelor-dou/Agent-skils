@@ -302,6 +302,8 @@ class HotProjectAgent:
                 state.last_candidates,
                 top_n=args.get("top_n", HOT_PROJECT_COUNT),
                 mode=args.get("mode", "comprehensive"),
+                token_mgr=state.token_mgr,
+                db=state.db,
             )
             state.last_ranked = result.pop("_ordered_tuples", [])
             return result
@@ -326,7 +328,14 @@ class HotProjectAgent:
             )
 
         elif name == "full_discovery":
-            return tool_full_discovery(state.token_mgr)
+            result = tool_full_discovery(state.token_mgr)
+            if result.get("status") == "completed":
+                state.db = load_db()
+                state.last_search_repos = []
+                state.last_candidates = {}
+                state.last_ranked = []
+                state.seen_repos = set()
+            return result
 
         elif name == "fetch_trending":
             result = tool_fetch_trending(

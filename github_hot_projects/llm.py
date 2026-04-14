@@ -42,16 +42,15 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
     if topics := repo_info.get("topics", []):
         info_parts.append(f"标签: {', '.join(topics)}")
     if readme_url := repo_info.get("readme_url", ""):
-        info_parts.append(f"README: {readme_url}")
+        info_parts.append(f"README链接（仅供标识，不能视为已读取内容）: {readme_url}")
 
     prompt = (
         f"请对以下 GitHub 开源项目进行详细介绍。\n"
         f"要求：\n"
-        f"1. 综合利用下方提供的项目信息（官方简介、编程语言、标签、README 链接等），"
-        f"同时结合你对该项目的已有知识进行补充\n"
-        f"2. 重点说明：核心功能与解决的问题、关键技术特点、典型应用场景\n"
-        f"3. 200-400 字，使用中文\n"
-        f"4. 不要编造不确定的信息\n\n"
+        f"1. 只能基于下方明确提供的信息写介绍，不要把项目地址或 README 链接当作已读取内容。\n"
+        f"2. 不要补充未在输入中出现、且无法确认的外部知识；信息不足时使用保守表述。\n"
+        f"3. 优先说明已知的核心功能、解决的问题、技术方向和适用场景；没有依据的细节直接省略。\n"
+        f"4. 180-320 字，使用中文，避免空话和宣传语。\n\n"
         + "\n".join(info_parts) + "\n"
     )
 
@@ -62,7 +61,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
     payload = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5,
+        "temperature": 0.2,
         "max_tokens": 1024,
     }
 

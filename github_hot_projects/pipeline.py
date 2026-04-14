@@ -221,6 +221,7 @@ class CalcGrowthTask(Task):
         db_projects = self._ctx["db_projects"]
         candidate_map = self._ctx["candidate_map"]
         pending_created_at = self._ctx["pending_created_at"]
+        growth_threshold = self._ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
 
         _, growth, current_star = result
         created_at = pending_created_at.get(self.full_name, "")
@@ -231,7 +232,7 @@ class CalcGrowthTask(Task):
 
         if growth >= 0:
             update_db_project(db_projects, self.full_name, current_star, self.repo_item)
-            if growth >= STAR_GROWTH_THRESHOLD:
+            if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
 
         if self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
@@ -404,6 +405,7 @@ def _submit_growth_tasks(
     """
     db_valid = db.get("valid", False)
     db_projects = db.get("projects", {})
+    growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
 
     checkpoint = _load_checkpoint()
     growth_ctx["checkpoint"] = checkpoint
@@ -423,7 +425,7 @@ def _submit_growth_tasks(
             created_at = pending[fn].get("created_at", "")
             repo_item = pending[fn]["repo_item"]
             update_db_project(db_projects, fn, current_star, repo_item)
-            if growth >= STAR_GROWTH_THRESHOLD:
+            if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
             del pending[fn]
             resumed_count += 1
@@ -449,7 +451,7 @@ def _submit_growth_tasks(
             checkpoint[full_name] = {"growth": growth, "star": current_star}
             checkpoint_dirty = True
             db_count += 1
-            if growth >= STAR_GROWTH_THRESHOLD:
+            if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
             del pending[full_name]
 
@@ -482,16 +484,74 @@ def _submit_growth_tasks(
 # ══════════════════════════════════════════════════════════════
 
 
+def _hydrate_candidate_created_at(
+    candidate_map: dict[str, dict],
+    db: dict | None,
+    token_mgr: TokenManager | None,
+) -> None:
+    """为缺失 created_at 的候选补充创建时间，优先使用 DB，其次请求仓库详情。"""
+    if not candidate_map:
+        return
+
+    db_projects = db.get("projects", {}) if db else {}
+
+    for full_name, info in candidate_map.items():
+        if info.get("created_at"):
+            continue
+
+        db_created_at = db_projects.get(full_name, {}).get("created_at", "")
+        if db_created_at:
+            info["created_at"] = db_created_at
+            continue
+
+        if token_mgr is None:
+            continue
+
+        try:
+            items = search_github_repos(
+                token_mgr,
+                f"repo:{full_name}",
+                token_idx=0,
+                page=1,
+                per_page=1,
+                auto_star_filter=False,
+            )
+        except Exception as e:
+            logger.warning(f"补全创建时间失败: {full_name}, {e}")
+            continue
+        time.sleep(SEARCH_REQUEST_INTERVAL)
+        if not items:
+            continue
+
+        repo_item = next(
+            (item for item in items if item.get("full_name") == full_name),
+            items[0],
+        )
+        created_at = repo_item.get("created_at", "")
+        if not created_at:
+            continue
+
+        info["created_at"] = created_at
+        update_db_project(
+            db_projects,
+            full_name,
+            info.get("star", repo_item.get("stargazers_count", 0)),
+            repo_item,
+        )
+
+
 def step2_rank_and_select(
     candidate_map: dict[str, dict],
     mode: str = DEFAULT_SCORE_MODE,
+    db: dict | None = None,
+    token_mgr: TokenManager | None = None,
 ) -> list[tuple[str, dict]]:
     """
     Step 2: 评分排序 + 截取 Top N。
 
     评分模式：
       comprehensive — 综合排名：log(增长量) + log(增长率)，新项目平滑折扣
-      hot_new       — 新项目专榜：仅创建时间 <= NEW_PROJECT_DAYS 天的项目，按增长量排序
+    hot_new       — 新项目专榜：优先用 DB 补全创建时间，必要时按仓库名补查后再按增长量排序
 
     Returns:
         [(full_name, {"growth": int, "star": int, ...}), ...] 按 score 降序，最多 HOT_PROJECT_COUNT 个。
@@ -538,6 +598,7 @@ def step2_rank_and_select(
             return False
 
     if mode == "hot_new":
+        _hydrate_candidate_created_at(candidate_map, db, token_mgr)
         # 新项目专榜：仅筛选创建时间 <= 45 天的新项目
         new_projects = {
             name: info for name, info in candidate_map.items()
@@ -583,11 +644,11 @@ def step3_generate_report(
     """
     Step 3: 为 Top N 项目生成 LLM 描述 + 输出 Markdown 报告。
 
-    流程：
-      1. 筛选 desc 为空的项目
-      2. ThreadPoolExecutor 并行调用 LLM
-      3. LLM 描述写回 DB projects[repo].desc
-      4. 写入 report/YYYY-MM-DD.md
+        流程：
+            1. 筛选 desc 为空的项目
+            2. 串行调用 LLM 生成缺失描述
+            3. LLM 描述写回 DB projects[repo].desc
+            4. 写入 report/YYYY-MM-DD.md
 
     Returns:
         报告文件路径。
@@ -597,7 +658,7 @@ def step3_generate_report(
     report_path = os.path.join(REPORT_DIR, f"{today}.md")
     db_projects = db.get("projects", {})
 
-    # ── 并行 LLM 调用 ──
+    # ── 串行 LLM 调用 ──
     need_llm: list[tuple[int, str, str, dict]] = []
     desc_results: dict[str, str] = {}
 
@@ -611,23 +672,16 @@ def step3_generate_report(
             need_llm.append((idx + 1, full_name, html_url, saved))
 
     if need_llm:
-        logger.info(f"Step 3: 需要生成描述 {len(need_llm)} 个项目，并行调用 LLM...")
-
-        def _llm_worker(task: tuple) -> tuple[str, str]:
-            idx, full_name, html_url, saved = task
+        logger.info(f"Step 3: 需要生成描述 {len(need_llm)} 个项目，按顺序调用 LLM...")
+        for idx, full_name, html_url, saved in need_llm:
             logger.info(f"[{idx}/{len(top_projects)}] LLM 生成描述: {full_name}")
             desc = call_llm_describe(full_name, saved, html_url)
-            return full_name, desc
-
-        workers = min(len(GITHUB_TOKENS), len(need_llm))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for full_name, desc in executor.map(_llm_worker, need_llm):
-                if desc:
-                    desc_results[full_name] = desc
-                    if full_name in db_projects:
-                        db_projects[full_name]["desc"] = desc
-                else:
-                    desc_results.setdefault(full_name, "")
+            if desc:
+                desc_results[full_name] = desc
+                if full_name in db_projects:
+                    db_projects[full_name]["desc"] = desc
+            else:
+                desc_results.setdefault(full_name, "")
 
     # ── 生成报告 ──
     lines: list[str] = [f"# GitHub 热门项目 — {today}\n"]
@@ -791,6 +845,7 @@ def main() -> None:
             "pending_created_at": {},
             "db_projects": db.get("projects", {}),
             "candidate_map": candidate_map,
+            "growth_threshold": STAR_GROWTH_THRESHOLD,
             "checkpoint_dirty": [False],  # 用 list 包装使子任务可修改
             "completed_since_save": [0],
         }
@@ -820,7 +875,7 @@ def main() -> None:
         return
 
     # ── Phase 3: 排序取 Top N ──
-    top_projects = step2_rank_and_select(candidate_map)
+    top_projects = step2_rank_and_select(candidate_map, db=db, token_mgr=token_mgr)
 
     # ── Phase 4: 生成报告 ──
     report_path = step3_generate_report(top_projects, db)

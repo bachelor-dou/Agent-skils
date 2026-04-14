@@ -258,6 +258,7 @@ def tool_batch_check_growth(
             "pending_created_at": {},
             "db_projects": db.get("projects", {}),
             "candidate_map": candidate_map,
+            "growth_threshold": growth_threshold,
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
         }
@@ -285,6 +286,8 @@ def tool_rank_candidates(
     candidates: dict[str, dict],
     top_n: int = HOT_PROJECT_COUNT,
     mode: str = DEFAULT_SCORE_MODE,
+    token_mgr: TokenManager | None = None,
+    db: dict | None = None,
 ) -> dict:
     """
     Tool 5: 对候选列表评分排序。
@@ -296,7 +299,10 @@ def tool_rank_candidates(
     """
     from .pipeline import step2_rank_and_select
 
-    top = step2_rank_and_select(candidates, mode=mode)[:top_n]
+    top = step2_rank_and_select(candidates, mode=mode, db=db, token_mgr=token_mgr)[:top_n]
+
+    if mode == "hot_new" and db is not None:
+        save_db(db)
 
     ranked = []
     for i, (name, info) in enumerate(top, 1):
