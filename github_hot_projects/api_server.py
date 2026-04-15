@@ -100,6 +100,10 @@ _MAX_SESSIONS = 100  # 最大会话数，防止内存泄漏
 _sessions: dict[str, tuple[HotProjectAgent, float]] = {}  # {sid: (agent, last_access_time)}
 _sessions_lock = threading.Lock()
 
+# 待发回复缓冲：WebSocket 断开期间产生的回复，重连后推送
+_pending_replies: dict[str, list[str]] = {}
+_pending_replies_lock = threading.Lock()
+
 
 def _cleanup_expired_sessions() -> None:
     """清理过期会话。调用者需持有 _sessions_lock。"""
@@ -162,11 +166,15 @@ def _render_report_html(name: str, markdown_text: str) -> str:
         sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*>.*?</\1>', '', markdown_text, flags=re.DOTALL | re.IGNORECASE)
         sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*/?\s*>', '', sanitized_text, flags=re.IGNORECASE)
         sanitized_text = re.sub(r'\bon\w+\s*=', '', sanitized_text, flags=re.IGNORECASE)
-        article_html = markdown.markdown(
-                sanitized_text,
+
+        md = markdown.Markdown(
                 extensions=["extra", "sane_lists", "toc", "nl2br"],
                 output_format="html5",
         )
+        article_html = md.convert(sanitized_text)
+        toc_html = getattr(md, "toc", "")
+        if not toc_html.strip():
+            toc_html = '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
 
         safe_title = escape(title)
         safe_summary = escape(summary)
@@ -179,8 +187,8 @@ def _render_report_html(name: str, markdown_text: str) -> str:
     <title>{safe_title}</title>
     <style>
         :root {{
-            --bg: #f3ece0;
-            --paper: rgba(255, 250, 243, 0.94);
+            --bg: #eef5ea;
+            --paper: rgba(244, 249, 240, 0.97);
             --ink: #1f2329;
             --muted: #6b7280;
             --brand: #18344e;
@@ -194,9 +202,9 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Noto Sans SC", sans-serif;
             color: var(--ink);
             background:
-                radial-gradient(circle at top left, rgba(215, 232, 251, 0.72), transparent 26%),
-                radial-gradient(circle at top right, rgba(248, 216, 176, 0.76), transparent 24%),
-                linear-gradient(180deg, #f6efe5 0%, #ede4d7 100%);
+                radial-gradient(circle at top left, rgba(212, 229, 214, 0.82), transparent 28%),
+                radial-gradient(circle at top right, rgba(240, 229, 206, 0.72), transparent 24%),
+                linear-gradient(180deg, #eef5ea 0%, #e4ede0 100%);
             line-height: 1.75;
             padding: 24px 16px 40px;
         }}
@@ -226,21 +234,23 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             color: rgba(255, 255, 255, 0.88);
             font-size: 14px;
         }}
-        .toolbar {{ display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 0; }}
+        .toolbar {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0 0; }}
         .toolbar a {{
             display: inline-flex;
             align-items: center;
             justify-content: center;
             min-height: 42px;
-            padding: 0 14px;
+            width: 100%;
+            padding: 0 16px;
             border-radius: 999px;
             text-decoration: none;
             font-weight: 700;
+            font-size: 14px;
+            letter-spacing: 0.02em;
             color: #fff;
             background: rgba(255, 255, 255, 0.12);
             border: 1px solid rgba(255, 255, 255, 0.14);
         }}
-        .toolbar a.secondary {{ background: rgba(255, 255, 255, 0.06); }}
         .content {{
             margin-top: 18px;
             padding: 26px 22px;
@@ -253,7 +263,7 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             text-rendering: optimizeLegibility;
             -webkit-font-smoothing: antialiased;
         }}
-        .content h1, .content h2, .content h3 {{ color: var(--brand); line-height: 1.25; }}
+        .content h1, .content h2, .content h3 {{ color: var(--brand); line-height: 1.25; scroll-margin-top: 24px; }}
         .content h1 {{ font-size: 34px; margin-top: 0; }}
         .content h2 {{ margin-top: 28px; font-size: 24px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }}
         .content h3 {{ margin-top: 20px; font-size: 19px; }}
@@ -294,10 +304,46 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             body {{ padding: 12px 10px 28px; }}
             .hero {{ padding: 22px 18px; border-radius: 24px; }}
             .content {{ padding: 20px 16px; border-radius: 24px; }}
-            .toolbar a {{ flex: 1 1 auto; }}
             .content h2 {{ font-size: 22px; }}
             .content {{ font-size: 16px; line-height: 1.82; }}
         }}
+        .toc-overlay {{
+            position: fixed;
+            inset: 0;
+            z-index: 999;
+            background: rgba(15, 23, 42, 0.45);
+            backdrop-filter: blur(8px);
+            display: none;
+        }}
+        .toc-overlay.active {{ display: flex; justify-content: center; align-items: flex-start; padding-top: 60px; }}
+        .toc-panel {{
+            background: linear-gradient(180deg, rgba(250, 253, 247, 0.98), rgba(244, 248, 240, 0.98));
+            border: 1px solid rgba(24, 52, 78, 0.10);
+            border-radius: 26px;
+            padding: 24px 20px;
+            max-width: 540px;
+            width: 90%;
+            max-height: 70vh;
+            overflow-y: auto;
+            box-shadow: var(--shadow);
+        }}
+        .toc-panel h3 {{ margin: 0; font-size: 18px; color: var(--brand); }}
+        .toc-subtitle {{ margin: 8px 0 16px; color: var(--muted); font-size: 13px; line-height: 1.6; }}
+        .toc-empty {{ margin: 0; color: var(--muted); line-height: 1.7; }}
+        .toc-panel ul {{ list-style: none; padding: 0; margin: 0; }}
+        .toc-panel .toc > ul {{ display: grid; gap: 10px; }}
+        .toc-panel .toc > ul > li {{
+            margin: 0;
+            padding: 12px 14px;
+            border-radius: 18px;
+            background: rgba(216, 229, 214, 0.55);
+            border: 1px solid rgba(24, 52, 78, 0.08);
+        }}
+        .toc-panel li ul {{ margin-top: 8px; padding-left: 12px; border-left: 2px solid rgba(24, 52, 78, 0.12); }}
+        .toc-panel li li {{ margin: 4px 0 0; padding-left: 0; }}
+        .toc-panel a {{ color: #111827; text-decoration: underline; text-decoration-color: rgba(17, 24, 39, 0.35); text-underline-offset: 3px; font-size: 15px; font-weight: 700; line-height: 1.6; display: block; padding: 6px 8px; border-radius: 12px; transition: background 160ms ease, text-decoration-color 160ms ease; }}
+        .toc-panel li li a {{ font-size: 14px; font-weight: 600; color: #1f2937; }}
+        .toc-panel a:hover {{ color: #111827; background: rgba(17, 24, 39, 0.04); text-decoration-color: rgba(17, 24, 39, 0.65); }}
     </style>
 </head>
 <body>
@@ -306,10 +352,18 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             <h1>{safe_title}</h1>
             <div class="summary">{safe_summary or '这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。'}</div>
             <div class="toolbar">
-                <a href="/chat">返回聊天页</a>
-                <a class="secondary" href="/api/reports/{safe_name}">查看原始 Markdown</a>
+                <a href="/chat">返回聊天</a>
+                <a href="#toc" id="toc-trigger">目录导航</a>
             </div>
         </header>
+
+        <div class="toc-overlay" id="toc-overlay" aria-hidden="true">
+            <div class="toc-panel">
+                <h3>报告目录</h3>
+                <p class="toc-subtitle">点击目录项可直接跳到正文，对应浏览器返回会先回到目录视图。</p>
+                {toc_html}
+            </div>
+        </div>
 
         <article class="content">
             {article_html}
@@ -317,6 +371,49 @@ def _render_report_html(name: str, markdown_text: str) -> str:
 
         <div class="footer">GitHub Hot Projects · Mobile Report View</div>
     </div>
+    <script>
+        (function setupTocNavigation() {{
+            const tocOverlay = document.getElementById("toc-overlay");
+            const tocTrigger = document.getElementById("toc-trigger");
+            const tocHash = "#toc";
+
+            function setOverlayVisible(visible) {{
+                tocOverlay.classList.toggle("active", visible);
+                tocOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
+            }}
+
+            function syncFromHash() {{
+                setOverlayVisible(window.location.hash === tocHash);
+            }}
+
+            tocTrigger.addEventListener("click", function(event) {{
+                event.preventDefault();
+                if (window.location.hash !== tocHash) {{
+                    history.pushState({{ toc: true }}, "", tocHash);
+                }}
+                syncFromHash();
+            }});
+
+            tocOverlay.addEventListener("click", function(event) {{
+                if (event.target !== tocOverlay) {{
+                    return;
+                }}
+                if (window.location.hash === tocHash) {{
+                    history.replaceState(null, "", window.location.pathname + window.location.search);
+                }}
+                syncFromHash();
+            }});
+
+            tocOverlay.querySelectorAll('a[href^="#"]').forEach(function(link) {{
+                link.addEventListener("click", function() {{
+                    setOverlayVisible(false);
+                }});
+            }});
+
+            window.addEventListener("hashchange", syncFromHash);
+            syncFromHash();
+        }})();
+    </script>
 </body>
 </html>
 """
@@ -442,10 +539,19 @@ def chat(req: ChatRequest):
 async def list_reports():
     """获取已生成的报告列表。"""
     os.makedirs(REPORT_DIR, exist_ok=True)
-    files = sorted(glob.glob(os.path.join(REPORT_DIR, "*.md")), reverse=True)
+    files = sorted(
+        glob.glob(os.path.join(REPORT_DIR, "*.md")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
     return {
         "reports": [
-            {"name": os.path.basename(f), "path": f, "size": os.path.getsize(f)}
+            {
+                "name": os.path.basename(f),
+                "path": f,
+                "size": os.path.getsize(f),
+                "modified_at": datetime.fromtimestamp(os.path.getmtime(f)).isoformat(),
+            }
             for f in files
         ]
     }
@@ -482,15 +588,28 @@ async def delete_session(session_id: str):
 @app.websocket("/ws/chat/{session_id}")
 async def ws_chat(websocket: WebSocket, session_id: str):
     """
-    WebSocket 实时对话（预留接口）。
+    WebSocket 实时对话。
 
     当前实现：接收消息 → 调用 Agent → 返回完整回复。
     使用 asyncio.to_thread 避免阻塞事件循环。
     全局互斥锁防止多会话同时占用 GitHub Token。
-    未来：LLM 流式输出时逐 token 推送。
+    支持重连后推送断开期间的待发回复。
     """
     await websocket.accept()
     logger.info("WebSocket 已连接: %s", session_id)
+
+    # 推送断开期间缓存的待发回复
+    with _pending_replies_lock:
+        pending = _pending_replies.pop(session_id, [])
+    for reply in pending:
+        try:
+            await websocket.send_text(reply)
+            logger.info("WebSocket 推送待发回复: session=%s, reply_len=%s", session_id, len(reply))
+        except Exception:
+            # 推送失败时放回缓冲
+            with _pending_replies_lock:
+                _pending_replies.setdefault(session_id, []).append(reply)
+            break
 
     def _chat_with_lock(message: str) -> str:
         agent = get_agent(session_id)
@@ -509,7 +628,14 @@ async def ws_chat(websocket: WebSocket, session_id: str):
                 logger.error("WebSocket Agent 执行异常: session=%s, error=%s", session_id, e)
                 reply = f"处理消息时出现错误：{e}"
             logger.info("WebSocket 回复完成: session=%s, reply_len=%s", session_id, len(reply or ""))
-            await websocket.send_text(reply)
+            try:
+                await websocket.send_text(reply)
+            except Exception:
+                # WebSocket 已断开，缓存回复供重连后推送
+                logger.info("WebSocket 发送失败，缓存待发回复: session=%s", session_id)
+                with _pending_replies_lock:
+                    _pending_replies.setdefault(session_id, []).append(reply)
+                break
     except WebSocketDisconnect:
         logger.info(f"WebSocket 断开: {session_id}")
 

@@ -93,3 +93,82 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
 
     logger.warning(f"LLM 3 次重试均失败，跳过描述: {repo_name}")
     return ""
+
+
+def batch_condense_descriptions(repos: list[dict], max_chars: int = 60) -> list[str]:
+    """
+    用 LLM 批量浓缩项目描述，每个不超过 max_chars 字。
+
+    Args:
+        repos: [{"full_name": "owner/repo", "description": "..."}]
+        max_chars: 每条描述的最大字符数
+
+    Returns:
+        与 repos 等长的浓缩描述列表；LLM 失败时回退截断原文。
+    """
+    if not LLM_API_URL or not LLM_API_KEY:
+        return [r.get("description", "")[:max_chars] for r in repos]
+
+    if not repos:
+        return []
+
+    lines = []
+    for i, r in enumerate(repos):
+        desc = r.get("description", "").strip()
+        if desc:
+            lines.append(f"{i+1}. {r['full_name']}: {desc}")
+        else:
+            lines.append(f"{i+1}. {r['full_name']}: (无描述)")
+
+    prompt = (
+        f"请将以下 {len(repos)} 个 GitHub 项目的描述各浓缩为不超过{max_chars}字的中文简介。\n"
+        f"要求：保留核心功能和用途，去掉修饰语，每行格式为「序号. 浓缩描述」，不要项目名。\n\n"
+        + "\n".join(lines) + "\n"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "enable_thinking": False,
+    }
+
+    import re
+    for attempt in range(2):
+        try:
+            resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=120)
+            if resp.status_code == 200:
+                data = resp.json()
+                choices = data.get("choices", [])
+                if choices:
+                    content = choices[0].get("message", {}).get("content", "")
+                    if content.strip():
+                        # 解析 "序号. 描述" 格式
+                        result = [""] * len(repos)
+                        for line in content.strip().splitlines():
+                            m = re.match(r"(\d+)\.\s*(.+)", line.strip())
+                            if m:
+                                idx = int(m.group(1)) - 1
+                                if 0 <= idx < len(repos):
+                                    result[idx] = m.group(2).strip()[:max_chars]
+                        # 检查是否大部分都解析成功
+                        filled = sum(1 for r in result if r)
+                        if filled >= len(repos) * 0.5:
+                            # 补全未解析的
+                            for i, r in enumerate(result):
+                                if not r:
+                                    result[i] = repos[i].get("description", "")[:max_chars]
+                            logger.info(f"LLM 批量浓缩完成: {filled}/{len(repos)} 条")
+                            return result
+            logger.warning(f"LLM 批量浓缩失败: status={resp.status_code}, attempt={attempt+1}")
+        except requests.RequestException as e:
+            logger.error(f"LLM 批量浓缩请求异常: attempt={attempt+1}, {e}")
+        time.sleep(1)
+
+    logger.warning("LLM 批量浓缩失败，回退截断")
+    return [r.get("description", "")[:max_chars] for r in repos]

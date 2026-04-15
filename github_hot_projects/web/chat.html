@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>GitHub Hot Projects</title>
-  <link rel="stylesheet" href="/web/chat.css?v=20260415-2128">
+  <link rel="stylesheet" href="/web/chat.css?v=20260416-session">
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
@@ -21,14 +21,10 @@
       </header>
 
       <section class="status-strip">
-        <div class="stat-card">
-          <span>连接状态</span>
-          <strong id="transport-status">连接中</strong>
-        </div>
-        <div class="stat-card">
-          <span>报告数量</span>
-          <strong id="report-count">0</strong>
-        </div>
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-text" id="transport-status">连接中</span>
+        <span class="status-sep">·</span>
+        <span class="status-text">报告 <strong id="report-count">0</strong></span>
       </section>
 
       <section class="messages" id="messages"></section>
@@ -54,14 +50,17 @@
         <h2>报告列表</h2>
       </header>
 
-      <div class="report-actions">
-        <button id="refresh-reports" type="button">刷新报告列表</button>
-        <button id="open-latest" type="button">打开最新报告</button>
-      </div>
-
       <section class="report-list" id="report-list"></section>
     </aside>
   </main>
+
+  <!-- 全屏阅读 overlay -->
+  <div class="fullscreen-overlay" id="fullscreen-overlay" hidden>
+    <header class="fullscreen-header">
+      <button type="button" id="fullscreen-close">&larr; 返回对话</button>
+    </header>
+    <article class="fullscreen-body" id="fullscreen-body"></article>
+  </div>
 
   <script>
     const SESSION_STORAGE_KEY = "gh-hot-session-id";
@@ -72,8 +71,9 @@
     const reportListEl = document.getElementById("report-list");
     const reportCountEl = document.getElementById("report-count");
     const transportStatusEl = document.getElementById("transport-status");
-    const refreshReportsButton = document.getElementById("refresh-reports");
-    const openLatestButton = document.getElementById("open-latest");
+    const statusDotEl = document.getElementById("status-dot");
+
+    const CHAT_HISTORY_KEY = "gh-hot-chat-history";
 
     let sessionId = getOrCreateSessionId();
 
@@ -83,18 +83,24 @@
     let wsReconnectTimer = null;
     let wsReconnectDelay = 1000; // 初始重连间隔 1s，指数退避最大 30s
     const WS_MAX_RECONNECT_DELAY = 30000;
+    let chatHistory = []; // {role, content, isHtml}
 
-    renderSessionIntro(false);
+    restoreMessages();
 
     setupComposer();
     setupQuickActions();
-    setupReportActions();
     setupSessionActions();
     connectWebSocket();
     loadReports();
 
     function createSessionId() {
       return `mobile-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function updateConnectionStatus(text, state) {
+      // state: "connected" | "connecting" | "disconnected"
+      transportStatusEl.textContent = text;
+      statusDotEl.className = "status-dot" + (state ? " " + state : "");
     }
 
     function getOrCreateSessionId() {
@@ -115,10 +121,64 @@
     function renderSessionIntro(keepHistory, introText) {
       if (!keepHistory) {
         messagesEl.innerHTML = "";
+        chatHistory = [];
       }
       addMessage("agent", introText || "欢迎，你可以点击快捷按钮生成综合榜、新项目榜、查看 Trending，也可以输入框自定义参数（如类别、数量、增长阈值等）。", {
         asHtml: false,
       });
+    }
+
+    function saveChatHistory() {
+      try {
+        localStorage.setItem(CHAT_HISTORY_KEY + "-" + sessionId, JSON.stringify(chatHistory));
+      } catch (e) {
+        // localStorage 满时静默失败
+      }
+    }
+
+    function restoreMessages() {
+      try {
+        const saved = localStorage.getItem(CHAT_HISTORY_KEY + "-" + sessionId);
+        if (saved) {
+          const items = JSON.parse(saved);
+          if (Array.isArray(items) && items.length > 0) {
+            chatHistory = items;
+            messagesEl.innerHTML = "";
+            items.forEach(entry => {
+              const item = document.createElement("article");
+              item.className = `message ${entry.role}`;
+              if (entry.role !== "system") {
+                const label = document.createElement("div");
+                label.className = "label";
+                label.textContent = entry.role === "user" ? "You" : "Agent";
+                item.appendChild(label);
+              }
+              const body = document.createElement("div");
+              if (entry.isHtml) {
+                body.className = "md-body";
+                body.innerHTML = entry.content;
+              } else {
+                body.textContent = entry.content;
+              }
+              item.appendChild(body);
+              messagesEl.appendChild(item);
+            });
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            return;
+          }
+        }
+      } catch (e) {
+        // 解析失败时忽略
+      }
+      // 无历史记录，显示欢迎消息
+      renderSessionIntro(false);
+    }
+
+    function clearChatHistory() {
+      chatHistory = [];
+      try {
+        localStorage.removeItem(CHAT_HISTORY_KEY + "-" + sessionId);
+      } catch (e) {}
     }
 
     function setupComposer() {
@@ -139,17 +199,6 @@
           autoResize();
           sendMessage();
         });
-      });
-    }
-
-    function setupReportActions() {
-      refreshReportsButton.addEventListener("click", loadReports);
-      openLatestButton.addEventListener("click", () => {
-        if (!latestReports.length) {
-          addMessage("system", "当前还没有报告可打开，先生成一份日报。", { asHtml: false });
-          return;
-        }
-        window.open(getReportHtmlUrl(latestReports[0].name), "_blank", "noopener");
       });
     }
 
@@ -187,6 +236,13 @@
       item.appendChild(body);
       messagesEl.appendChild(item);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+
+      // 持久化（跳过 typing 指示器）
+      if (!options.typing) {
+        chatHistory.push({ role, content: text, isHtml: !!options.asHtml });
+        saveChatHistory();
+      }
+
       return item;
     }
 
@@ -197,8 +253,13 @@
     function updateTypingIndicator(el, finalText) {
       const body = el.lastElementChild;
       body.className = "md-body";
-      body.innerHTML = enhanceReply(finalText);
+      const html = enhanceReply(finalText);
+      body.innerHTML = html;
       body.classList.remove("typing");
+
+      // 持久化最终回复
+      chatHistory.push({ role: "agent", content: html, isHtml: true });
+      saveChatHistory();
     }
 
     async function sendMessage() {
@@ -231,7 +292,7 @@
       const previousSessionId = sessionId;
       endSessionButton.disabled = true;
       closeSocket(false);
-      transportStatusEl.textContent = "切换中";
+      updateConnectionStatus("切换中", "connecting");
 
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(previousSessionId)}`, {
@@ -244,16 +305,17 @@
         addMessage("system", `结束旧会话时出现提示：${error.message}` , { asHtml: false });
       }
 
+      clearChatHistory();
       const nextSessionId = createSessionId();
       updateSessionId(nextSessionId);
-      renderSessionIntro(false, "已经为你清空当前对话，你可以直接开始新的提问。\n\n生成完成后，下方会出现可点开的 HTML 报告入口。");
+      renderSessionIntro(false, "已经为你清空当前对话，你可以直接开始新的提问。");
       connectWebSocket();
       setSending(false);
       endSessionButton.disabled = false;
       inputEl.focus();
     }
 
-    function closeSocket(updateStatus) {F
+    function closeSocket(updateStatus) {
       const currentSocket = socket;
       socket = null;
       socketReady = false;
@@ -262,7 +324,7 @@
         wsReconnectTimer = null;
       }
       if (updateStatus) {
-        transportStatusEl.textContent = "普通模式";
+        updateConnectionStatus("普通模式", "disconnected");
       }
       if (currentSocket && (currentSocket.readyState === WebSocket.OPEN || currentSocket.readyState === WebSocket.CONNECTING)) {
         currentSocket.close(1000, "session-reset");
@@ -284,7 +346,7 @@
       }
       socket = null;
       socketReady = false;
-      transportStatusEl.textContent = "连接中";
+      updateConnectionStatus("连接中", "connecting");
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const currentSessionId = sessionId;
       const url = `${protocol}//${window.location.host}/ws/chat/${encodeURIComponent(currentSessionId)}`;
@@ -293,7 +355,7 @@
         socket = new WebSocket(url);
       } catch (error) {
         socketReady = false;
-        transportStatusEl.textContent = "普通模式";
+        updateConnectionStatus("普通模式", "disconnected");
         scheduleReconnect();
         return;
       }
@@ -304,7 +366,22 @@
         }
         socketReady = true;
         wsReconnectDelay = 1000; // 连接成功，重置退避
-        transportStatusEl.textContent = "已连接";
+        updateConnectionStatus("已连接", "connected");
+      });
+
+      // 处理服务端待发缓冲区中的回复（重连后自动推送）
+      socket.addEventListener("message", (event) => {
+        if (currentSessionId !== sessionId) return;
+        // 若当前没有在等待回复（无 pending send），则这是缓冲的待发回复
+        if (!socket._hasActiveRequest) {
+          addMessage("agent", "", { asHtml: true, typing: false });
+          const msg = messagesEl.lastElementChild;
+          const body = msg.lastElementChild;
+          body.className = "md-body";
+          body.innerHTML = enhanceReply(event.data);
+          chatHistory.push({ role: "agent", content: body.innerHTML, isHtml: true });
+          saveChatHistory();
+        }
       });
 
       socket.addEventListener("close", (event) => {
@@ -312,7 +389,7 @@
           return;
         }
         socketReady = false;
-        transportStatusEl.textContent = "普通模式";
+        updateConnectionStatus("普通模式", "disconnected");
         // 非主动关闭时自动重连
         if (event.code !== 1000) {
           scheduleReconnect();
@@ -324,7 +401,7 @@
           return;
         }
         socketReady = false;
-        transportStatusEl.textContent = "普通模式";
+        updateConnectionStatus("普通模式", "disconnected");
         scheduleReconnect();
       });
     }
@@ -336,8 +413,10 @@
           return;
         }
 
+        socket._hasActiveRequest = true;
         const handleMessage = (event) => {
           socket.removeEventListener("message", handleMessage);
+          socket._hasActiveRequest = false;
           resolve(event.data);
         };
 
@@ -391,15 +470,13 @@
         return;
       }
 
-      reportListEl.innerHTML = reports.map((report, index) => {
-        const label = index === 0 ? '<div class="report-chip">Latest</div>' : "";
+      reportListEl.innerHTML = reports.map((report) => {
         return `
           <a class="report-card" href="${getReportHtmlUrl(report.name)}" target="_blank" rel="noopener">
-            ${label}
             <strong>${escapeHtml(report.name)}</strong>
             <div class="report-meta">
+              <span>${formatReportTime(report.modified_at)}</span>
               <span>${formatSize(report.size)}</span>
-              <span>HTML 渲染预览</span>
             </div>
           </a>
         `;
@@ -448,6 +525,17 @@
       return `${(size / (1024 * 1024)).toFixed(1)} MB`;
     }
 
+    function formatReportTime(value) {
+      if (!value) {
+        return "时间未知";
+      }
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return "时间未知";
+      }
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+    }
+
     function escapeHtml(text) {
       return String(text)
         .replace(/&/g, "&amp;")
@@ -457,6 +545,46 @@
         .replace(/'/g, "&#39;");
     }
 
+    // ── 双击消息全屏查看 ──
+    (function setupFullscreen() {
+      const overlay = document.getElementById("fullscreen-overlay");
+      const body = document.getElementById("fullscreen-body");
+      const closeBtn = document.getElementById("fullscreen-close");
+      const viewportMeta = document.querySelector('meta[name="viewport"]');
+      const originalViewport = viewportMeta ? viewportMeta.getAttribute("content") : "";
+
+      messagesEl.addEventListener("dblclick", (e) => {
+        const msg = e.target.closest(".message.agent");
+        if (!msg) return;
+        const content = msg.querySelector(".md-body") || msg.lastElementChild;
+        if (!content) return;
+        body.innerHTML = content.innerHTML;
+        overlay.hidden = false;
+        document.body.style.overflow = "hidden";
+        // 允许缩放
+        if (viewportMeta) {
+          viewportMeta.setAttribute("content", "width=device-width, initial-scale=1.0, minimum-scale=0.1, maximum-scale=10.0, user-scalable=yes");
+        }
+      });
+
+      function closeFullscreen() {
+        overlay.hidden = true;
+        document.body.style.overflow = "";
+        // 恢复原始 viewport
+        if (viewportMeta && originalViewport) {
+          viewportMeta.setAttribute("content", originalViewport);
+        }
+      }
+
+      closeBtn.addEventListener("click", closeFullscreen);
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) closeFullscreen();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !overlay.hidden) closeFullscreen();
+      });
+    })();
+
     // ── 手机端 Tab 切换 ──
     (function setupMobileTabs() {
       const tabsBar = document.getElementById("mobile-tabs");
@@ -464,17 +592,52 @@
       const reportPanel = document.querySelector(".report-panel");
       if (!tabsBar || !chatPanel || !reportPanel) return;
 
+      const TAB_KEY = "gh-hot-active-tab";
       const buttons = tabsBar.querySelectorAll("button[data-tab]");
       const mobileQuery = window.matchMedia("(max-width: 640px)");
+      const validTabs = new Set(["chat", "report"]);
 
-      function switchTab(target) {
+      function getPreferredTab() {
+        const hashTab = window.location.hash.replace(/^#/, "");
+        if (validTabs.has(hashTab)) {
+          return hashTab;
+        }
+        try {
+          const savedTab = localStorage.getItem(TAB_KEY);
+          if (validTabs.has(savedTab)) {
+            return savedTab;
+          }
+        } catch (error) {
+        }
+        return "chat";
+      }
+
+      function persistTab(target) {
+        try {
+          localStorage.setItem(TAB_KEY, target);
+        } catch (error) {
+        }
+        const nextHash = `#${target}`;
+        if (window.location.hash !== nextHash) {
+          history.replaceState(null, "", nextHash);
+        }
+      }
+
+      function switchTab(target, options = {}) {
+        const normalizedTarget = validTabs.has(target) ? target : "chat";
         buttons.forEach(btn => btn.classList.toggle("active", btn.dataset.tab === target));
-        if (target === "chat") {
+        if (normalizedTarget === "chat") {
           chatPanel.hidden = false;
           reportPanel.hidden = true;
         } else {
           chatPanel.hidden = true;
           reportPanel.hidden = false;
+          if (options.refreshReports !== false) {
+            loadReports();
+          }
+        }
+        if (options.persist !== false) {
+          persistTab(normalizedTarget);
         }
       }
 
@@ -482,10 +645,20 @@
         btn.addEventListener("click", () => switchTab(btn.dataset.tab));
       });
 
+      window.addEventListener("hashchange", () => {
+        if (!mobileQuery.matches) {
+          return;
+        }
+        const hashTab = window.location.hash.replace(/^#/, "");
+        if (validTabs.has(hashTab)) {
+          switchTab(hashTab, { persist: true, refreshReports: hashTab === "report" });
+        }
+      });
+
       function syncTabLayout() {
         if (mobileQuery.matches) {
-          const activeButton = tabsBar.querySelector("button.active") || buttons[0];
-          switchTab(activeButton?.dataset.tab || "chat");
+          const target = getPreferredTab();
+          switchTab(target);
         } else {
           chatPanel.hidden = false;
           reportPanel.hidden = false;

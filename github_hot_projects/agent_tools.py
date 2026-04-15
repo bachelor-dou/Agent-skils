@@ -673,6 +673,12 @@ def tool_fetch_trending(
             spoken_language=spoken_language,
         )
 
+    period_label = {"daily": "今日增长", "weekly": "本周增长", "monthly": "本月增长"}
+
+    # 用 LLM 批量浓缩描述（最多60字），失败时回退截断
+    from .common.llm import batch_condense_descriptions
+    condensed = batch_condense_descriptions(repos, max_chars=60)
+
     if include_all_periods:
         display_repos = [
             {
@@ -681,22 +687,23 @@ def tool_fetch_trending(
                 "forks": r["forks"],
                 "periods": r.get("periods", []),
                 "stars_by_period": r.get("stars_by_period", {}),
-                "description": r["description"][:200],
+                "description": condensed[i],
                 "language": r["language"],
             }
-            for r in repos
+            for i, r in enumerate(repos)
         ]
     else:
+        growth_field = period_label.get(normalized_since, "增长")
         display_repos = [
             {
                 "full_name": r["full_name"],
                 "star": r["star"],
                 "forks": r["forks"],
-                "stars_today": r["stars_today"],
-                "description": r["description"][:200],
+                growth_field: r["stars_today"],
+                "description": condensed[i],
                 "language": r["language"],
             }
-            for r in repos
+            for i, r in enumerate(repos)
         ]
 
     result = {
