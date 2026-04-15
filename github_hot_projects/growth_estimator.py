@@ -7,7 +7,7 @@ Star 增长估算器
   B. REST 二分法 — 新仓库/DB 无效 → stargazers 分页二分查找窗口边界（~5-10 次请求）
   C. 采样外推法  — REST 返回 422 → GraphQL 采 2000 条 + 分段加权速率外推（~20 次请求）
 
-本模块实现路径 B 和 C。路径 A 在 pipeline.py 中直接计算。
+本模块实现路径 B 和 C。路径 A 在 tasks.py 的 _submit_growth_tasks 中直接计算。
 """
 
 import logging
@@ -15,19 +15,21 @@ import math
 import time
 from datetime import datetime, timedelta, timezone
 
-from .config import (
+from .common.config import (
     MAX_BINARY_SEARCH_DEPTH,
     STAR_GROWTH_THRESHOLD,
     TIME_WINDOW_DAYS,
 )
-from .github_api import (
+from .common.github_api import (
     get_stargazers_page,
     graphql_stargazers_batch,
     parse_starred_at_from_entry,
 )
-from .token_manager import TokenManager
+from .common.token_manager import TokenManager
 
 logger = logging.getLogger("discover_hot")
+
+GROWTH_ESTIMATION_UNRESOLVED = -2
 
 
 def estimate_star_growth_binary(
@@ -194,7 +196,11 @@ def estimate_by_sampling(
         time.sleep(0.5)
 
     if len(all_timestamps) < 2:
-        return 0
+        logger.warning(
+            f"  [GROWTH] {owner}/{repo} 采样数据不足: "
+            f"仅获得 {len(all_timestamps)} 条有效时间戳，跳过本轮增长写入。"
+        )
+        return GROWTH_ESTIMATION_UNRESOLVED
 
     all_timestamps.sort()
 

@@ -29,6 +29,7 @@ import logging
 import os
 import glob
 import time
+import asyncio
 import threading
 from contextlib import asynccontextmanager
 
@@ -37,7 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent import HotProjectAgent
-from .config import DATA_DIR, LOG_DIR, REPORT_DIR
+from .common.config import DATA_DIR, LOG_DIR, REPORT_DIR
 
 logger = logging.getLogger("discover_hot")
 
@@ -94,6 +95,10 @@ def get_agent(session_id: str) -> HotProjectAgent:
         return agent
 
 
+# ── 全局 Tool 执行锁：防止多会话同时创建 TokenWorkerPool 导致 Token 竞争 ──
+_tool_execution_lock = threading.Lock()
+
+
 # ══════════════════════════════════════════════════════════════
 # FastAPI App
 # ══════════════════════════════════════════════════════════════
@@ -141,15 +146,19 @@ async def status():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+def chat(req: ChatRequest):
     """
     对话接口：发送消息给 Agent，返回回复。
+
+    使用同步 def（非 async）：FastAPI 自动将其放入线程池执行，
+    避免阻塞事件循环。全局互斥锁防止多会话同时占用 GitHub Token。
 
     - session_id: 会话标识，同一 session_id 共享对话上下文
     - message:    用户消息（自然语言）
     """
     agent = get_agent(req.session_id)
-    reply = agent.chat(req.message)
+    with _tool_execution_lock:
+        reply = agent.chat(req.message)
     return ChatResponse(session_id=req.session_id, reply=reply)
 
 
@@ -203,15 +212,21 @@ async def ws_chat(websocket: WebSocket, session_id: str):
     WebSocket 实时对话（预留接口）。
 
     当前实现：接收消息 → 调用 Agent → 返回完整回复。
+    使用 asyncio.to_thread 避免阻塞事件循环。
+    全局互斥锁防止多会话同时占用 GitHub Token。
     未来：LLM 流式输出时逐 token 推送。
     """
     await websocket.accept()
     agent = get_agent(session_id)
 
+    def _chat_with_lock(message: str) -> str:
+        with _tool_execution_lock:
+            return agent.chat(message)
+
     try:
         while True:
             data = await websocket.receive_text()
-            reply = agent.chat(data)
+            reply = await asyncio.to_thread(_chat_with_lock, data)
             await websocket.send_text(reply)
     except WebSocketDisconnect:
         logger.info(f"WebSocket 断开: {session_id}")

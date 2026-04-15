@@ -17,35 +17,45 @@ Agent CLI 交互入口
 
 import logging
 import os
-import sys
+from datetime import datetime
 
-from .config import LOG_DIR
+try:
+    import readline
+except ImportError:  # pragma: no cover - Linux 通常可用，兜底给极简环境
+    readline = None
+
+from .common.config import LOG_DIR
 from .agent import HotProjectAgent
 
 
-def setup_logging() -> None:
-    """配置日志：文件 + 控制台。"""
+def setup_logging() -> str:
+    """配置日志：仅落盘，避免污染交互输入区域。"""
     os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(
+        LOG_DIR,
+        f"agent-{datetime.now().strftime('%Y-%m-%d')}.log",
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(
-                os.path.join(LOG_DIR, "agent.log"), encoding="utf-8"
-            ),
-        ],
+        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        force=True,
     )
+    return log_path
 
 
 def main() -> None:
     """CLI 交互主循环。"""
-    setup_logging()
+    log_path = setup_logging()
+
+    if readline is not None:
+        readline.set_history_length(200)
 
     print("=" * 60)
     print("  GitHub 热门项目发现 Agent（ReAct 模式）")
     print("  输入自然语言指令，Agent 会自主规划并执行")
     print("  输入 quit / exit / q 退出")
+    print(f"  日志文件: {log_path}")
     print("=" * 60)
     print()
 

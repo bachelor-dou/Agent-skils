@@ -20,6 +20,9 @@ import requests
 
 logger = logging.getLogger("discover_hot")
 
+TRENDING_PERIODS = ("daily", "weekly", "monthly")
+DEFAULT_TRENDING_SINCE = "weekly"
+
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -27,7 +30,7 @@ _USER_AGENT = (
 
 
 def fetch_trending(
-    since: str = "daily",
+    since: str = DEFAULT_TRENDING_SINCE,
     language: str = "",
     spoken_language: str = "",
 ) -> list[dict]:
@@ -35,7 +38,7 @@ def fetch_trending(
     爬取 GitHub Trending 仓库列表。
 
     Args:
-        since:           时间范围 ("daily" | "weekly" | "monthly")
+        since:           时间范围 ("daily" | "weekly" | "monthly")，默认 weekly
         language:        编程语言筛选，如 "python"，"" 表示全部
         spoken_language: 自然语言代码，如 "zh"，"" 表示全部
 
@@ -47,10 +50,12 @@ def fetch_trending(
           "description": str,
           "language": str}, ...]
     """
+    normalized_since = since if since in TRENDING_PERIODS else DEFAULT_TRENDING_SINCE
+
     url = "https://github.com/trending"
     params: dict[str, str] = {}
-    if since:
-        params["since"] = since
+    if normalized_since:
+        params["since"] = normalized_since
     if language:
         params["language"] = language.lower()
     if spoken_language:
@@ -68,7 +73,66 @@ def fetch_trending(
         logger.error(f"Trending 页面请求失败: {e}")
         return []
 
-    return _parse_trending_html(resp.text, since)
+    return _parse_trending_html(resp.text, normalized_since)
+
+
+def fetch_trending_all(
+    language: str = "",
+    spoken_language: str = "",
+) -> list[dict]:
+    """
+    抓取 daily / weekly / monthly 三个时间维度的 Trending，按仓库去重汇总。
+
+    主要用于综合/新项目工作流中的候选补充阶段。
+    """
+    merged: dict[str, dict] = {}
+
+    for since in TRENDING_PERIODS:
+        repos = fetch_trending(
+            since=since,
+            language=language,
+            spoken_language=spoken_language,
+        )
+        for repo in repos:
+            full_name = repo["full_name"]
+            existing = merged.get(full_name)
+            if existing is None:
+                merged[full_name] = {
+                    **repo,
+                    "periods": [since],
+                    "stars_by_period": {since: repo.get("stars_today", 0)},
+                }
+                continue
+
+            if since not in existing["periods"]:
+                existing["periods"].append(since)
+                existing["periods"].sort(key=TRENDING_PERIODS.index)
+
+            stars_by_period = existing.setdefault("stars_by_period", {})
+            stars_by_period[since] = repo.get("stars_today", 0)
+            existing["stars_today"] = max(existing.get("stars_today", 0), repo.get("stars_today", 0))
+            existing["star"] = max(existing.get("star", 0), repo.get("star", 0))
+            existing["forks"] = max(existing.get("forks", 0), repo.get("forks", 0))
+            if not existing.get("description") and repo.get("description"):
+                existing["description"] = repo["description"]
+            if not existing.get("language") and repo.get("language"):
+                existing["language"] = repo["language"]
+
+    repos = list(merged.values())
+    repos.sort(
+        key=lambda item: (
+            len(item.get("periods", [])),
+            item.get("star", 0),
+            item.get("stars_today", 0),
+        ),
+        reverse=True,
+    )
+    logger.info(
+        "Trending 汇总完成: %d 个去重仓库 (periods=%s)",
+        len(repos),
+        ",".join(TRENDING_PERIODS),
+    )
+    return repos
 
 
 def _parse_trending_html(html: str, since: str = "daily") -> list[dict]:

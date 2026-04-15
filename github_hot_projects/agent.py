@@ -24,11 +24,13 @@ from dataclasses import dataclass, field
 
 import requests
 
-from .config import (
+from .common.config import (
     LLM_API_KEY,
     LLM_API_URL,
     LLM_MODEL,
     SEARCH_KEYWORDS,
+    STAR_RANGE_MIN,
+    STAR_RANGE_MAX,
     TIME_WINDOW_DAYS,
     STAR_GROWTH_THRESHOLD,
     HOT_PROJECT_COUNT,
@@ -44,11 +46,10 @@ from .agent_tools import (
     tool_describe_project,
     tool_generate_report,
     tool_get_db_info,
-    tool_full_discovery,
     tool_fetch_trending,
 )
-from .db import load_db, save_db
-from .token_manager import TokenManager
+from .common.db import load_db, save_db
+from .common.token_manager import TokenManager
 
 logger = logging.getLogger("discover_hot")
 
@@ -59,50 +60,81 @@ MAX_TOOL_CALLS_PER_TURN = 15
 SYSTEM_PROMPT = f"""你是一个 GitHub 热门项目发现助手。你可以帮用户搜索、分析和发现近期增长最快的开源项目。
 
 你拥有以下能力（通过 Tool 调用实现）：
-1. **搜索项目**：按关键词类别搜索，或按 star 范围扫描
-2. **增长分析**：计算单个仓库或批量仓库近期 star 增长
+1. **搜索项目**：按关键词类别搜索（search_hot_projects）或按 star 范围扫描（scan_star_range）
+2. **增长分析**：单个仓库增长详情（check_repo_growth）或批量筛选（batch_check_growth）
 3. **排序筛选**：两种评分模式 — comprehensive（综合排名）/ hot_new（新项目专榜）
-4. **GitHub Trending**：获取 Trending 页面热门仓库
-5. **描述生成**：调用 LLM 为项目生成详细中文描述
-6. **报告输出**：生成 Markdown 格式的热门项目报告
-7. **数据库查询**：查询历史数据和仓库信息
+4. **GitHub Trending**：获取 Trending 页面热门仓库（fetch_trending）
+5. **描述生成**：调用 LLM 为项目生成详细中文描述（describe_project）
+6. **报告输出**：生成 Markdown 格式的热门项目报告（generate_report）
+7. **数据库查询**：查询历史数据和仓库信息（get_db_info）
 
-当前配置：
+## 当前默认配置
 - 时间窗口：{TIME_WINDOW_DAYS} 天
 - 增长阈值：>= {STAR_GROWTH_THRESHOLD} stars
 - 默认 Top N：{HOT_PROJECT_COUNT}
+- 新项目窗口：创建时间 <= {NEW_PROJECT_DAYS} 天
 - 可搜索类别：{list(SEARCH_KEYWORDS.keys())}
 
-## 三大核心工作流
+## 用户可自定义的参数（以下均有默认值，用户不指定则使用默认值）
+| 参数 | Tool | 说明 |
+|------|------|------|
+| top_n | rank_candidates | 返回前 N 个项目（“前50”、“前20”） |
+| growth_threshold | batch_check_growth | 增长阈值（“增长 >= 300”） |
+| min_stars | search_hot_projects | 最低 star 过滤线（"至少 2000 star"） |
+| min_star / max_star | scan_star_range | star 范围扫描区间（"5000-20000 star"） |
+| new_project_days | search_hot_projects / scan_star_range / batch_check_growth / rank_candidates | 新项目判定窗口（“近一个月的新项目”=30天），搜索/扫描阶段即前置 created:>=date 过滤 |
+| categories | search_hot_projects | 搜索类别（"AI Agent"、"Database"等） |
+| since / language / spoken_language / include_all_periods | fetch_trending | Trending 时间范围、语言与多时间维度补源 |
+
+## 两大核心工作流
 
 ### 工作流 1 — 综合热门排名（默认）
-全量收集所有数据源，评出近期增长最快的项目综合排行。
-步骤：search_hot_projects → fetch_trending → batch_check_growth → rank_candidates(mode="comprehensive") → generate_report
-说明：默认搜索全部类别 + 自动包含 Trending 仓库 + comprehensive 评分（综合增长量和增长率，对数压缩，新项目平滑折扣）。
-快捷方式：full_discovery（一键执行全部步骤含报告生成）。
+用户意图示例："帮我查近期GitHub热门项目"、"热门榜前50"
+数据源：search_hot_projects(所有类别) + scan_star_range + fetch_trending，三源互补全量覆盖。
+步骤：
+  1. search_hot_projects → 关键词搜索全部类别
+  2. scan_star_range → star 范围扫描补充覆盖
+    3. fetch_trending(include_all_periods=true) → 抓取 daily / weekly / monthly 三档 Trending 去重补充
+  4. batch_check_growth → 批量计算增长，筛选候选
+  5. rank_candidates(mode="comprehensive") → 综合评分排序
+  6. generate_report（可选）→ 输出 Markdown 报告
 
-### 工作流 2 — 新项目排名
-发现最近新冒出来的爆款项目（创建时间 <= {NEW_PROJECT_DAYS} 天）。
-步骤：search_hot_projects → fetch_trending → batch_check_growth → rank_candidates(mode="hot_new")
-说明：以 star 范围扫描为主要发现手段（scan_star_range），关键词搜索和 Trending 作为补充。hot_new 模式仅筛选新项目，按增长量纯降序排列。
+### 工作流 2 — 新项目热度排名
+用户意图示例："最近有什么新项目比较火"、"近一个月的新项目排名"
+数据源与工作流 1 相同（三源全量收集），但在搜索/扫描阶段即前置过滤创建时间，只采集窗口期内创建的仓库（GitHub API created:>=date）。搜索和扫描的 star 范围统一使用默认值（STAR_RANGE_MIN={STAR_RANGE_MIN}），用户指定则用用户的。
+步骤：
+  1. search_hot_projects(new_project_days=N) → 关键词搜索，附加 created:>=date 过滤
+  2. scan_star_range(new_project_days=N) → star 范围扫描，同样附加 created:>=date 过滤
+    3. fetch_trending(include_all_periods=true) → 抓取 daily / weekly / monthly 三档 Trending 去重补充
+  4. batch_check_growth(new_project_days=N) → 对采集到的新项目批量计算增长（仍会二次校验创建时间）
+  5. rank_candidates(mode="hot_new", new_project_days=N) → 按增长量排序
+说明：new_project_days 贯穿搜索、扫描、增长计算、排名全链路。"近一个月"=30天，"近两周"=14天，不指定则默认 {NEW_PROJECT_DAYS} 天。
 
 ### 工作流 3 — Trending 浏览
-直接查看 GitHub Trending 页面上的当前热门项目。
-步骤：fetch_trending(since="daily/weekly/monthly", language=可选, spoken_language=可选) → 直接展示结果
-说明：不做增长计算和评分，直接展示 Trending 页面数据（含 stars_today）。
+用户意图示例："看看 GitHub Trending"、"今日热门 Python 项目"
+步骤：fetch_trending(since="weekly" unless user explicitly requests daily/weekly/monthly, language / spoken_language) → 直接展示
+说明：不做增长计算，直接展示 Trending 页面数据。用户未明确指定周期时，默认返回 weekly。
 
 ## 辅助功能
 
-- **查看类别/项目增长**：check_repo_growth(repo="owner/repo") 查询单个仓库近 {TIME_WINDOW_DAYS} 天增长
-- **LLM 项目介绍**：describe_project(repo="owner/repo") 生成 200-400 字中文详细描述
-- **数据库查询**：get_db_info(repo=可选) 查询 DB 状态或特定仓库历史信息
+### 单项目信息查询
+用户意图示例："查一下 vllm-project/vllm 的情况"、"这个项目最近增长怎么样"
+- check_repo_growth(repo="owner/repo") → 返回实时 star、近期增长、项目基本信息及 LLM 生成的详细描述
+- get_db_info(repo="owner/repo") → 查询本地 DB 中该仓库的历史信息
+
+### 项目描述
+- describe_project(repo="owner/repo") → LLM 生成 200-400 字中文详细描述（README 浓缩摘要）
+
+### 数据库概览
+- get_db_info() → DB 状态、项目总数、更新日期
 
 ## 注意事项
-- 搜索和增长计算需要时间，请告知用户正在处理
+- 搜索和增长计算需要较长时间，请告知用户正在处理
 - 结果以结构化方式呈现，重点突出增长数据
 - 对话中保持上下文，用户可以基于上次搜索结果继续操作
-- 如果用户意图不明确（比如没说清楚要哪种排名、哪些类别、多少个），请先跟用户确认再执行
-- 当你不确定用户说的"新项目"是指什么范围时，说明本系统的定义：创建时间 <= {NEW_PROJECT_DAYS} 天
+- 如果用户意图不明确（比如没说清楚排名模式、类别、数量），请先确认再执行
+- 用户直接查看 Trending 而未指定日/周/月时，默认返回 weekly；只有在综合/新项目工作流补源时才使用 include_all_periods=true 抓取三档并去重
+- 用户说"新项目"指创建时间在指定窗口内的项目，默认 {NEW_PROJECT_DAYS} 天
 """
 
 
@@ -204,7 +236,11 @@ class HotProjectAgent:
                     tool_args = {}
 
                 logger.info(f"[Agent] Tool 调用: {tool_name}({tool_args})")
-                result = self._execute_tool(tool_name, tool_args)
+                try:
+                    result = self._execute_tool(tool_name, tool_args)
+                except Exception as e:
+                    logger.error(f"[Agent] Tool {tool_name} 执行异常: {e}")
+                    result = {"error": f"工具执行异常: {e}"}
                 result_str = self._serialize_result(result)
 
                 self.state.conversation.append({
@@ -254,8 +290,9 @@ class HotProjectAgent:
             result = tool_search_hot_projects(
                 state.token_mgr,
                 categories=args.get("categories"),
-                min_stars=args.get("min_stars", 1000),
+                min_stars=args.get("min_stars", STAR_RANGE_MIN),
                 max_pages=args.get("max_pages", 3),
+                new_project_days=args.get("new_project_days"),
             )
             # 缓存搜索结果
             raw_repos = result.pop("_raw_repos", [])
@@ -266,18 +303,22 @@ class HotProjectAgent:
         elif name == "scan_star_range":
             result = tool_scan_star_range(
                 state.token_mgr,
-                min_star=args.get("min_star", 2000),
-                max_star=args.get("max_star", 40000),
+                min_star=args.get("min_star", STAR_RANGE_MIN),
+                max_star=args.get("max_star", STAR_RANGE_MAX),
                 seen_repos=state.seen_repos,
+                new_project_days=args.get("new_project_days"),
             )
             raw_repos = result.pop("_raw_repos", [])
             state.last_search_repos.extend(raw_repos)
             return result
 
         elif name == "check_repo_growth":
+            repo = args.get("repo")
+            if not repo:
+                return {"error": "缺少必需参数 repo（格式: owner/repo）"}
             return tool_check_repo_growth(
                 state.token_mgr,
-                repo=args["repo"],
+                repo=repo,
                 db=state.db,
             )
 
@@ -289,6 +330,7 @@ class HotProjectAgent:
                 repos=state.last_search_repos,
                 db=state.db,
                 growth_threshold=args.get("growth_threshold", 800),
+                new_project_days=args.get("new_project_days"),
             )
             state.last_candidates = result.get("candidates", {})
             # 中间落盘
@@ -302,15 +344,18 @@ class HotProjectAgent:
                 state.last_candidates,
                 top_n=args.get("top_n", HOT_PROJECT_COUNT),
                 mode=args.get("mode", "comprehensive"),
-                token_mgr=state.token_mgr,
                 db=state.db,
+                new_project_days=args.get("new_project_days"),
             )
             state.last_ranked = result.pop("_ordered_tuples", [])
             return result
 
         elif name == "describe_project":
+            repo = args.get("repo")
+            if not repo:
+                return {"error": "缺少必需参数 repo（格式: owner/repo）"}
             return tool_describe_project(
-                repo=args["repo"],
+                repo=repo,
                 db=state.db,
             )
 
@@ -327,21 +372,12 @@ class HotProjectAgent:
                 repo=args.get("repo"),
             )
 
-        elif name == "full_discovery":
-            result = tool_full_discovery(state.token_mgr)
-            if result.get("status") == "completed":
-                state.db = load_db()
-                state.last_search_repos = []
-                state.last_candidates = {}
-                state.last_ranked = []
-                state.seen_repos = set()
-            return result
-
         elif name == "fetch_trending":
             result = tool_fetch_trending(
-                since=args.get("since", "daily"),
+                since=args.get("since", "weekly"),
                 language=args.get("language", ""),
                 spoken_language=args.get("spoken_language", ""),
+                include_all_periods=args.get("include_all_periods", False),
             )
             # 路径 2：将 Trending 仓库加入 search_repos 缓存，后续可用于 batch_check_growth
             raw_repos = result.pop("_raw_repos", [])

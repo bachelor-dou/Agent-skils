@@ -1,34 +1,35 @@
 """
 Agent Tool 定义
 ===============
-将热门项目发现的各功能封装为 Agent 可调用的 Tool。
-
-每个 Tool 包含：
-  - 函数实现（接收结构化参数，返回结构化结果）
-  - OpenAI Function Calling 格式的 schema 定义
-  - 人类可读的描述（供 LLM 理解 Tool 功能）
+9 个 Tool 函数 + TOOL_SCHEMAS（供 Agent ReAct 循环调用）。
 
 Tool 列表：
   1. search_hot_projects    — 按关键词类别搜索热门仓库
   2. scan_star_range        — 按 star 范围扫描仓库
-  3. check_repo_growth      — 查询单个仓库近期增长
+  3. check_repo_growth      — 查询单个仓库实时详情及近期增长
   4. batch_check_growth     — 批量计算仓库增长并筛选候选
   5. rank_candidates        — 对候选列表混合评分排序
   6. describe_project       — 调用 LLM 生成单个项目描述
   7. generate_report        — 生成完整 Markdown 报告
   8. get_db_info            — 查询 DB 状态和仓库信息
-  9. full_discovery         — 完整执行一次热门项目发现流程
+  9. fetch_trending         — 获取 GitHub Trending 热门仓库
+
+内部实现拆分到独立模块：
+  - tasks/     — Task 子类、批量提交、断点续传、候选管理
+  - ranking.py — 评分排序算法
+  - report.py  — 报告生成
 """
 
-import json
 import logging
 import time
+from datetime import datetime, timezone
 
-from .config import (
+from .common.config import (
+    DEFAULT_SCORE_MODE,
     GITHUB_TOKENS,
     HOT_PROJECT_COUNT,
     MIN_STAR_FILTER,
-    DEFAULT_SCORE_MODE,
+    NEW_PROJECT_DAYS,
     SEARCH_KEYWORDS,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
@@ -36,11 +37,24 @@ from .config import (
     STAR_RANGE_MIN,
     TIME_WINDOW_DAYS,
 )
-from .db import load_db, save_db
-from .github_api import auto_split_star_range, search_github_repos
-from .growth_estimator import estimate_star_growth_binary
-from .llm import call_llm_describe
-from .token_manager import TokenManager
+from .common.db import save_db, update_db_project
+from .common.github_api import auto_split_star_range, search_github_repos
+from .growth_estimator import (
+    GROWTH_ESTIMATION_UNRESOLVED,
+    estimate_star_growth_binary,
+)
+from .common.llm import call_llm_describe
+from .common.token_manager import TokenManager
+from .report import step3_generate_report
+from .ranking import step2_rank_and_select
+from .tasks import (
+    KeywordSearchTask,
+    ScanSegmentTask,
+    _remove_checkpoint,
+    _save_checkpoint,
+    _submit_growth_tasks,
+    TokenWorkerPool,
+)
 
 logger = logging.getLogger("discover_hot")
 
@@ -53,22 +67,28 @@ logger = logging.getLogger("discover_hot")
 def tool_search_hot_projects(
     token_mgr: TokenManager,
     categories: list[str] | None = None,
-    min_stars: int = MIN_STAR_FILTER,
+    min_stars: int = STAR_RANGE_MIN,
     max_pages: int = 3,
+    new_project_days: int | None = None,
 ) -> dict:
     """
-    Tool 1: 按关键词类别搜索 GitHub 热门仓库。
+    Tool 1: 按关键词类别搜索 GitHub 热门仓库（并行）。
+
+    使用 TokenWorkerPool + KeywordSearchTask 并行搜索。
 
     Args:
-        token_mgr:  TokenManager 实例
-        categories: 搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
-        min_stars:  最低 star 过滤线
-        max_pages:  每个关键词搜索的最大页数
+        token_mgr:        TokenManager 实例
+        categories:       搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
+        min_stars:        最低 star 过滤线
+        max_pages:        每个关键词搜索的最大页数
+        new_project_days: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
 
     Returns:
         {"repos": [{"full_name": ..., "star": ..., "description": ...}, ...],
          "total": int, "categories_searched": list}
     """
+    from datetime import timedelta
+
     if categories:
         keywords_dict = {k: v for k, v in SEARCH_KEYWORDS.items() if k in categories}
         if not keywords_dict:
@@ -77,41 +97,61 @@ def tool_search_hot_projects(
     else:
         keywords_dict = SEARCH_KEYWORDS
 
-    seen: set[str] = set()
+    # 新项目模式：计算创建时间截止日期
+    created_after = ""
+    if new_project_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=new_project_days)
+        created_after = cutoff.strftime("%Y-%m-%d")
+
+    raw_repos: dict[str, dict] = {}
+    total_keywords = sum(len(kws) for kws in keywords_dict.values())
+
+    # ── 并行搜索：提交 KeywordSearchTask 到 Pool ──
+    pool = TokenWorkerPool(token_mgr.tokens)
+    pool.start()
+    try:
+        keyword_idx = 0
+        for category, keywords in keywords_dict.items():
+            for keyword in keywords:
+                keyword_idx += 1
+                pool.submit(KeywordSearchTask(
+                    _token_mgr=token_mgr,
+                    keyword=keyword,
+                    category=category,
+                    keyword_idx=keyword_idx,
+                    total_keywords=total_keywords,
+                    max_pages=max_pages,
+                    created_after=created_after,
+                    min_stars_override=min_stars,
+                    _raw_repos=raw_repos,
+                ))
+        pool.wait_all_done()
+        pool.drain_results()
+    finally:
+        pool.shutdown()
+
+    # ── 转换为返回格式 ──
     repos: list[dict] = []
+    for fn, info in raw_repos.items():
+        repo_item = info["repo_item"]
+        star = info["star"]
+        if star < min_stars:
+            continue
+        repos.append({
+            "full_name": fn,
+            "star": star,
+            "description": (repo_item.get("description") or "")[:200],
+            "language": repo_item.get("language") or "",
+            "topics": repo_item.get("topics") or [],
+            "_raw": repo_item,
+        })
 
-    for category, keywords in keywords_dict.items():
-        for keyword in keywords:
-            for page in range(1, max_pages + 1):
-                items = search_github_repos(token_mgr, keyword, token_idx=0, page=page)
-                if not items:
-                    break
-                for item in items:
-                    full_name = item.get("full_name", "")
-                    if not full_name or full_name in seen:
-                        continue
-                    seen.add(full_name)
-                    star = item.get("stargazers_count", 0)
-                    if star < min_stars:
-                        continue
-                    repos.append({
-                        "full_name": full_name,
-                        "star": star,
-                        "description": (item.get("description") or "")[:200],
-                        "language": item.get("language") or "",
-                        "topics": item.get("topics") or [],
-                        "_raw": item,  # 保留原始数据供后续使用
-                    })
-                time.sleep(SEARCH_REQUEST_INTERVAL)
-            time.sleep(SEARCH_REQUEST_INTERVAL)
-
-    # 去掉 _raw 再返回给 Agent（减少 token 消耗）
     display_repos = [{k: v for k, v in r.items() if k != "_raw"} for r in repos]
     return {
         "repos": display_repos,
         "total": len(repos),
         "categories_searched": list(keywords_dict.keys()),
-        "_raw_repos": repos,  # 内部使用，不序列化给 LLM
+        "_raw_repos": repos,
     }
 
 
@@ -120,45 +160,77 @@ def tool_scan_star_range(
     min_star: int = STAR_RANGE_MIN,
     max_star: int = STAR_RANGE_MAX,
     seen_repos: set[str] | None = None,
+    new_project_days: int | None = None,
 ) -> dict:
     """
-    Tool 2: 按 star 范围扫描仓库。
+    Tool 2: 按 star 范围扫描仓库（并行）。
+
+    使用 TokenWorkerPool + ScanSegmentTask 并行扫描各子区间。
+
+    阶段隔离：
+      Phase 0 — 串行：auto_split_star_range 递归分段（Pool 未启动，token_idx=0）
+      Phase 1 — 并行：ScanSegmentTask 提交到 Pool，N Worker 并行扫描
 
     Args:
-        min_star:    最低星数
-        max_star:    最高星数
-        seen_repos:  已扫描过的仓库集合（用于去重）
+        min_star:         最低星数
+        max_star:         最高星数
+        seen_repos:       已扫描过的仓库集合（用于去重）
+        new_project_days: 新项目判定窗口（天），指定后在查询中加入 created:>=date 过滤
     """
+    from datetime import timedelta
+
     if seen_repos is None:
         seen_repos = set()
 
-    segments = auto_split_star_range(token_mgr, min_star, max_star, token_idx=0)
-    repos: list[dict] = []
+    # 新项目模式：计算创建时间截止日期
+    created_after = ""
+    extra_query = ""
+    min_star_filter = min_star
+    if new_project_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=new_project_days)
+        created_after = cutoff.strftime("%Y-%m-%d")
+        extra_query = f"created:>={created_after}"
 
-    for seg_idx, (low, high) in enumerate(segments, 1):
-        query = f"stars:{low}..{high}"
-        for page in range(1, 11):
-            items = search_github_repos(
-                token_mgr, query, token_idx=0, page=page, sort="updated", auto_star_filter=False
-            )
-            if not items:
-                break
-            for item in items:
-                full_name = item.get("full_name", "")
-                if not full_name or full_name in seen_repos:
-                    continue
-                seen_repos.add(full_name)
-                star = item.get("stargazers_count", 0)
-                if star < MIN_STAR_FILTER:
-                    continue
-                repos.append({
-                    "full_name": full_name,
-                    "star": star,
-                    "description": (item.get("description") or "")[:200],
-                    "language": item.get("language") or "",
-                    "_raw": item,
-                })
-            time.sleep(SEARCH_REQUEST_INTERVAL)
+    # ── Phase 0: 串行分段（Pool 未启动，token_idx=0 独占） ──
+    segments = auto_split_star_range(
+        token_mgr, min_star, max_star, token_idx=0, extra_query=extra_query
+    )
+    raw_repos: dict[str, dict] = {}
+
+    # ── Phase 1: 并行扫描各子区间 ──
+    pool = TokenWorkerPool(token_mgr.tokens)
+    pool.start()
+    try:
+        for seg_idx, (low, high) in enumerate(segments, 1):
+            pool.submit(ScanSegmentTask(
+                _token_mgr=token_mgr,
+                seg_idx=seg_idx,
+                low=low,
+                high=high,
+                total_segments=len(segments),
+                created_after=created_after,
+                min_stars_override=min_star_filter,
+                _raw_repos=raw_repos,
+            ))
+        pool.wait_all_done()
+        pool.drain_results()
+    finally:
+        pool.shutdown()
+
+    # ── 去重 + 转换返回格式 ──
+    repos: list[dict] = []
+    for fn, info in raw_repos.items():
+        if fn in seen_repos:
+            continue
+        seen_repos.add(fn)
+        repo_item = info["repo_item"]
+        repos.append({
+            "full_name": fn,
+            "star": info["star"],
+            "description": (repo_item.get("description") or "")[:200],
+            "language": repo_item.get("language") or "",
+            "_raw": repo_item,
+        })
 
     display_repos = [{k: v for k, v in r.items() if k != "_raw"} for r in repos]
     return {
@@ -176,11 +248,15 @@ def tool_check_repo_growth(
     db: dict | None = None,
 ) -> dict:
     """
-    Tool 3: 查询单个仓库近期 star 增长。
+    Tool 3: 查询单个仓库近期 star 增长，实时获取项目详情并生成 LLM 描述。
+
+    返回实时数据（不使用 DB 缓存，除了创建时间）：
+      - 当前 star、近期增长、语言、简介、创建时间
+      - LLM 生成的项目详细描述（README 浓缩摘要）
 
     Args:
         repo: "owner/repo" 格式
-        db:   DB 字典（可选，提供则优先用差值法）
+        db:   DB 字典（可选，提供则优先用差值法计算增长）
     """
     parts = repo.split("/", 1)
     if len(parts) != 2:
@@ -188,16 +264,17 @@ def tool_check_repo_growth(
 
     owner, repo_name = parts
 
-    # 先获取当前 star 数
+    # 实时获取仓库信息
     items = search_github_repos(
         token_mgr, f"repo:{repo}", token_idx=0, page=1, per_page=1, auto_star_filter=False
     )
     if not items:
         return {"error": f"未找到仓库: {repo}"}
 
-    current_star = items[0].get("stargazers_count", 0)
+    repo_item = items[0]
+    current_star = repo_item.get("stargazers_count", 0)
 
-    # 尝试 DB 差值法
+    # 增长计算
     if db and db.get("valid") and repo in db.get("projects", {}):
         saved_star = db["projects"][repo].get("star", 0)
         growth = current_star - saved_star
@@ -206,13 +283,42 @@ def tool_check_repo_growth(
         growth = estimate_star_growth_binary(token_mgr, owner, repo_name, current_star, token_idx=0)
         method = "二分法/采样外推"
 
+    if growth == GROWTH_ESTIMATION_UNRESOLVED:
+        growth_value = None
+        growth_status = "sampling_unresolved"
+        meets_threshold = False
+        method = f"{method}(未决)"
+        growth_warning = "采样数据不足，当前未返回可靠增长估值；本轮结果未写入批处理 checkpoint/DB。"
+    else:
+        growth_value = growth
+        growth_status = "ok"
+        meets_threshold = growth >= STAR_GROWTH_THRESHOLD
+        growth_warning = ""
+
+    # LLM 生成项目描述（README 浓缩摘要）
+    html_url = repo_item.get("html_url", f"https://github.com/{repo}")
+    repo_info = {
+        "short_desc": repo_item.get("description", ""),
+        "language": repo_item.get("language", ""),
+        "topics": repo_item.get("topics", []),
+        "readme_url": f"{html_url}#readme",
+    }
+    description = call_llm_describe(repo, repo_info, html_url)
+
     return {
         "repo": repo,
         "current_star": current_star,
-        "growth": growth,
+        "growth": growth_value,
+        "growth_status": growth_status,
         "time_window_days": TIME_WINDOW_DAYS,
         "method": method,
-        "meets_threshold": growth >= STAR_GROWTH_THRESHOLD,
+        "meets_threshold": meets_threshold,
+        "warning": growth_warning,
+        "language": repo_item.get("language", ""),
+        "short_desc": (repo_item.get("description") or "")[:200],
+        "created_at": repo_item.get("created_at", ""),
+        "topics": repo_item.get("topics", []),
+        "description": description or "描述生成失败",
     }
 
 
@@ -221,19 +327,21 @@ def tool_batch_check_growth(
     repos: list[dict],
     db: dict,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
+    new_project_days: int | None = None,
 ) -> dict:
     """
     Tool 4: 批量计算仓库增长并筛选候选。
 
     使用 TokenWorkerPool + CalcGrowthTask 并行计算。
+    当 new_project_days 指定时，先按创建时间筛选新项目，只对新项目计算增长。
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
         db:               DB 字典
         growth_threshold: 增长阈值
+        new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
     """
-    from .pipeline import _submit_growth_tasks, _save_checkpoint
-    from .worker_pool import TokenWorkerPool
+    from datetime import timedelta
 
     # 构建 raw_repos 格式
     raw_repos: dict[str, dict] = {}
@@ -248,6 +356,77 @@ def tool_batch_check_growth(
             "created_at": raw_item.get("created_at", ""),
         }
 
+    # ── 补全缺失的 created_at（DB → API），所有模式通用 ──
+    # 确保 Trending 等无 created_at 的仓库也能存入 DB，后续查询可直接命中
+    db_projects = db.get("projects", {})
+    api_fetched_count = 0
+    for fn, info in raw_repos.items():
+        if info.get("created_at"):
+            continue
+        # 1. DB 查询
+        db_ca = db_projects.get(fn, {}).get("created_at", "")
+        if db_ca:
+            info["created_at"] = db_ca
+            info["repo_item"]["created_at"] = db_ca
+            continue
+        # 2. API 调用
+        try:
+            items = search_github_repos(
+                token_mgr,
+                f"repo:{fn}",
+                token_idx=0,
+                page=1,
+                per_page=1,
+                auto_star_filter=False,
+            )
+            if items:
+                repo_item = next(
+                    (item for item in items if item.get("full_name") == fn),
+                    items[0],
+                )
+                created_at = repo_item.get("created_at", "")
+                if created_at:
+                    info["created_at"] = created_at
+                    info["repo_item"]["created_at"] = created_at
+                    update_db_project(
+                        db_projects, fn,
+                        info.get("star", repo_item.get("stargazers_count", 0)),
+                        repo_item,
+                    )
+                    api_fetched_count += 1
+            time.sleep(SEARCH_REQUEST_INTERVAL)
+        except Exception as e:
+            logger.warning(f"API 补全 created_at 失败: {fn}, {e}")
+    if api_fetched_count:
+        logger.info(f"created_at 补全: API 获取 {api_fetched_count} 个")
+
+    # ── 新项目前置筛选：仅保留创建时间在窗口内的仓库 ──
+    skipped_count = 0
+    if new_project_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=new_project_days)
+        filtered: dict[str, dict] = {}
+        for fn, info in raw_repos.items():
+            created_at = info.get("created_at", "")
+            if not created_at:
+                skipped_count += 1
+                continue
+            try:
+                created_date = datetime.strptime(
+                    created_at[:10], "%Y-%m-%d"
+                ).replace(tzinfo=timezone.utc)
+                if created_date >= cutoff:
+                    filtered[fn] = info
+                else:
+                    skipped_count += 1
+            except (ValueError, TypeError):
+                skipped_count += 1
+        logger.info(
+            f"新项目前置筛选(<={new_project_days}天): "
+            f"原 {len(raw_repos)} 个 → 保留 {len(filtered)} 个, "
+            f"跳过 {skipped_count} 个"
+        )
+        raw_repos = filtered
+
     candidate_map: dict[str, dict] = {}
 
     pool = TokenWorkerPool(token_mgr.tokens)
@@ -259,6 +438,7 @@ def tool_batch_check_growth(
             "db_projects": db.get("projects", {}),
             "candidate_map": candidate_map,
             "growth_threshold": growth_threshold,
+            "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
         }
@@ -270,14 +450,18 @@ def tool_batch_check_growth(
 
         if growth_ctx["checkpoint_dirty"][0]:
             _save_checkpoint(checkpoint)
+
+        _remove_checkpoint()
     finally:
         pool.shutdown()
 
     return {
         "candidates": candidate_map,
-        "total_checked": len(repos),
+        "total_checked": len(raw_repos),
+        "total_input": len(repos),
         "candidates_count": len(candidate_map),
-        "skipped": 0,
+        "unresolved_sampling_count": growth_ctx["unresolved_count"][0],
+        "skipped_by_creation_time": skipped_count,
         "threshold": growth_threshold,
     }
 
@@ -286,20 +470,22 @@ def tool_rank_candidates(
     candidates: dict[str, dict],
     top_n: int = HOT_PROJECT_COUNT,
     mode: str = DEFAULT_SCORE_MODE,
-    token_mgr: TokenManager | None = None,
     db: dict | None = None,
+    new_project_days: int | None = None,
 ) -> dict:
     """
     Tool 5: 对候选列表评分排序。
 
     Args:
-        candidates: {full_name: {"growth": int, "star": int, "stars_today": int(可选)}}
-        top_n:      取前 N 个
-        mode:       评分模式 ("comprehensive" | "hot_new")
+        candidates:       {full_name: {"growth": int, "star": int, "stars_today": int(可选)}}
+        top_n:            取前 N 个
+        mode:             评分模式 ("comprehensive" | "hot_new")
+        new_project_days: hot_new 模式下新项目判定窗口（天），None 则使用默认值
     """
-    from .pipeline import step2_rank_and_select
-
-    top = step2_rank_and_select(candidates, mode=mode, db=db, token_mgr=token_mgr)[:top_n]
+    top = step2_rank_and_select(
+        candidates, mode=mode, db=db,
+        new_project_days=new_project_days,
+    )[:top_n]
 
     if mode == "hot_new" and db is not None:
         save_db(db)
@@ -355,9 +541,8 @@ def tool_generate_report(
     """
     Tool 7: 生成完整 Markdown 报告。
 
-    复用 pipeline.step3_generate_report 的逻辑。
+    调用 report.step3_generate_report 生成报告。
     """
-    from .pipeline import step3_generate_report
     report_path = step3_generate_report(top_projects, db)
     return {"report_path": report_path, "project_count": len(top_projects)}
 
@@ -383,61 +568,77 @@ def tool_get_db_info(db: dict, repo: str | None = None) -> dict:
     }
 
 
-def tool_full_discovery(token_mgr: TokenManager) -> dict:
-    """
-    Tool 9: 完整执行一次热门项目发现流程（等同原脚本 main()）。
-
-    依次执行搜索 → 增长筛选 → 排序 → 报告。
-    """
-    from .pipeline import main as pipeline_main
-    try:
-        pipeline_main()
-        return {"status": "completed"}
-    except Exception as e:
-        logger.error(f"完整发现流程执行失败: {e}")
-        return {"status": "failed", "error": str(e)}
-
-
 def tool_fetch_trending(
-    since: str = "daily",
+    since: str = "weekly",
     language: str = "",
     spoken_language: str = "",
+    include_all_periods: bool = False,
 ) -> dict:
     """
     Tool 10: 获取 GitHub Trending 仓库列表。
 
     两种使用路径：
-      路径 1 — 直接展示：用户问 Trending 上有什么，直接返回列表
-      路径 2 — 候选补充：返回的仓库可加入候选池走正常评分流程
+      路径 1 — 直接展示：用户问 Trending 上有什么，默认返回 weekly
+      路径 2 — 候选补充：可抓取 daily / weekly / monthly 三档并去重后加入候选池
 
     Args:
-        since:           时间范围 ("daily" | "weekly" | "monthly")
+        since:           时间范围 ("daily" | "weekly" | "monthly")，默认 weekly
         language:        编程语言筛选，如 "python"，""=全部
         spoken_language: 自然语言代码，如 "zh"，""=全部
+        include_all_periods:
+                         为 True 时抓取 daily / weekly / monthly 三档并去重汇总
     """
-    from .github_trending import fetch_trending
+    from .github_trending import fetch_trending, fetch_trending_all
 
-    repos = fetch_trending(since=since, language=language, spoken_language=spoken_language)
+    normalized_since = since if since in {"daily", "weekly", "monthly"} else "weekly"
+    if include_all_periods:
+        repos = fetch_trending_all(language=language, spoken_language=spoken_language)
+    else:
+        repos = fetch_trending(
+            since=normalized_since,
+            language=language,
+            spoken_language=spoken_language,
+        )
 
-    display_repos = [
-        {
-            "full_name": r["full_name"],
-            "star": r["star"],
-            "forks": r["forks"],
-            "stars_today": r["stars_today"],
-            "description": r["description"][:200],
-            "language": r["language"],
-        }
-        for r in repos
-    ]
+    if include_all_periods:
+        display_repos = [
+            {
+                "full_name": r["full_name"],
+                "star": r["star"],
+                "forks": r["forks"],
+                "periods": r.get("periods", []),
+                "stars_by_period": r.get("stars_by_period", {}),
+                "description": r["description"][:200],
+                "language": r["language"],
+            }
+            for r in repos
+        ]
+    else:
+        display_repos = [
+            {
+                "full_name": r["full_name"],
+                "star": r["star"],
+                "forks": r["forks"],
+                "stars_today": r["stars_today"],
+                "description": r["description"][:200],
+                "language": r["language"],
+            }
+            for r in repos
+        ]
 
-    return {
+    result = {
         "repos": display_repos,
         "count": len(display_repos),
-        "since": since,
         "language": language or "all",
+        "include_all_periods": include_all_periods,
         "_raw_repos": repos,  # 内部使用
     }
+    if include_all_periods:
+        result["periods"] = ["daily", "weekly", "monthly"]
+    else:
+        result["since"] = normalized_since
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -466,13 +667,20 @@ TOOL_SCHEMAS = [
                     },
                     "min_stars": {
                         "type": "integer",
-                        "description": f"最低star过滤线，默认{MIN_STAR_FILTER}",
-                        "default": MIN_STAR_FILTER,
+                        "description": f"最低star过滤线，默认{STAR_RANGE_MIN}",
+                        "default": STAR_RANGE_MIN,
                     },
                     "max_pages": {
                         "type": "integer",
                         "description": "每个关键词搜索最大页数，默认3",
                         "default": 3,
+                    },
+                    "new_project_days": {
+                        "type": "integer",
+                        "description": (
+                            "新项目筛选窗口（天）。指定后在搜索查询中加入 created:>=date 过滤，"
+                            "只返回该天数内创建的仓库"
+                        ),
                     },
                 },
             },
@@ -496,6 +704,13 @@ TOOL_SCHEMAS = [
                         "description": f"最高星数，默认{STAR_RANGE_MAX}",
                         "default": STAR_RANGE_MAX,
                     },
+                    "new_project_days": {
+                        "type": "integer",
+                        "description": (
+                            "新项目筛选窗口（天）。指定后在查询中加入 created:>=date 过滤，"
+                            "只扫描该天数内创建的仓库"
+                        ),
+                    },
                 },
             },
         },
@@ -505,8 +720,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "check_repo_growth",
             "description": (
-                "查询单个GitHub仓库近期star增长情况。"
-                f"返回近{TIME_WINDOW_DAYS}天的star增长数、当前star总数、是否达到热门阈值。"
+                "查询单个GitHub仓库的实时详细信息：当前star、近期增长、语言、简介、创建时间，"
+                "并调用LLM生成项目详细描述（README浓缩摘要）。"
+                f"增长窗口为近{TIME_WINDOW_DAYS}天。"
             ),
             "parameters": {
                 "type": "object",
@@ -527,6 +743,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "批量计算多个仓库的star增长并筛选满足阈值的候选。"
                 "通常在search_hot_projects之后调用。"
+                "指定new_project_days时，先按创建时间筛选新项目再计算增长，大幅减少请求量。"
             ),
             "parameters": {
                 "type": "object",
@@ -535,6 +752,13 @@ TOOL_SCHEMAS = [
                         "type": "integer",
                         "description": f"增长阈值，默认{STAR_GROWTH_THRESHOLD}",
                         "default": STAR_GROWTH_THRESHOLD,
+                    },
+                    "new_project_days": {
+                        "type": "integer",
+                        "description": (
+                            "新项目筛选窗口（天）。指定后只对创建时间在该窗口内的仓库计算增长。"
+                            "不传则对所有仓库计算增长（综合排名场景）。"
+                        ),
                     },
                 },
             },
@@ -562,10 +786,17 @@ TOOL_SCHEMAS = [
                         "enum": ["comprehensive", "hot_new"],
                         "description": (
                             "评分模式。comprehensive=综合排名（增长量+增长率，新项目平滑折扣）；"
-                            "hot_new=新项目专榜（仅创建时间<=45天的新项目，按增长量排序）。"
+                            "hot_new=新项目专榜（仅满足创建时间窗口的新项目，按增长量排序）。"
                             "默认comprehensive。"
                         ),
                         "default": "comprehensive",
+                    },
+                    "new_project_days": {
+                        "type": "integer",
+                        "description": (
+                            "hot_new模式下的新项目判定窗口（天）。"
+                            f"默认{NEW_PROJECT_DAYS}天。如用户说'近一个月的新项目'则传30。"
+                        ),
                     },
                 },
             },
@@ -618,20 +849,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "full_discovery",
-            "description": (
-                "完整执行一次热门项目发现流程（搜索→增长计算→排序→LLM描述→报告）。"
-                "等同于直接运行原脚本，耗时较长。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "fetch_trending",
             "description": (
                 "获取GitHub Trending页面的热门仓库列表。"
@@ -645,8 +862,16 @@ TOOL_SCHEMAS = [
                     "since": {
                         "type": "string",
                         "enum": ["daily", "weekly", "monthly"],
-                        "description": "时间范围，默认daily",
-                        "default": "daily",
+                        "description": "时间范围，直接浏览 Trending 时默认 weekly",
+                        "default": "weekly",
+                    },
+                    "include_all_periods": {
+                        "type": "boolean",
+                        "description": (
+                            "为 true 时抓取 daily、weekly、monthly 三个 Trending 维度并按仓库去重汇总。"
+                            "适合综合排名和新项目排名的候选补充阶段。"
+                        ),
+                        "default": False,
                     },
                     "language": {
                         "type": "string",
