@@ -4,628 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>GitHub Hot Projects</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f5efe3;
-      --panel: rgba(255, 251, 245, 0.9);
-      --panel-strong: #fffaf1;
-      --ink: #1f2228;
-      --muted: #6a6f79;
-      --brand: #17324d;
-      --brand-soft: #2f5b82;
-      --accent: #d7883a;
-      --accent-soft: #f8d8b0;
-      --agent: #f2e6d8;
-      --user: #d7e8fb;
-      --ok: #2f6d44;
-      --border: rgba(35, 44, 56, 0.12);
-      --shadow: 0 18px 50px rgba(27, 41, 56, 0.12);
-      --radius-xl: 28px;
-      --radius-lg: 22px;
-      --radius-md: 16px;
-      --radius-sm: 12px;
-      --content-width: 1120px;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    html, body {
-      margin: 0;
-      min-height: 100%;
-      font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Noto Sans SC", sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(215, 232, 251, 0.75), transparent 32%),
-        radial-gradient(circle at top right, rgba(248, 216, 176, 0.72), transparent 28%),
-        linear-gradient(180deg, #f9f3e8 0%, #f0e7d9 100%);
-      color: var(--ink);
-    }
-
-    body {
-      padding: 18px;
-    }
-
-    .shell {
-      max-width: var(--content-width);
-      margin: 0 auto;
-      min-height: calc(100vh - 36px);
-      display: grid;
-      grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.95fr);
-      gap: 18px;
-      align-items: stretch;
-    }
-
-    .chat-panel,
-    .report-panel {
-      border: 1px solid var(--border);
-      border-radius: var(--radius-xl);
-      background: var(--panel);
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(14px);
-      overflow: hidden;
-    }
-
-    .chat-panel {
-      display: grid;
-      grid-template-rows: auto auto 1fr auto;
-      min-height: calc(100vh - 36px);
-    }
-
-    .hero {
-      position: relative;
-      padding: 24px 22px 18px;
-      background:
-        linear-gradient(135deg, rgba(23, 50, 77, 0.96), rgba(43, 79, 113, 0.9)),
-        linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
-      color: #fff;
-    }
-
-    .hero::after {
-      content: "";
-      position: absolute;
-      inset: auto -30px -40px auto;
-      width: 180px;
-      height: 180px;
-      border-radius: 999px;
-      background: radial-gradient(circle, rgba(255, 255, 255, 0.2), transparent 68%);
-      pointer-events: none;
-    }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.14);
-      font-size: 12px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    h1 {
-      margin: 14px 0 8px;
-      font-size: clamp(28px, 4vw, 40px);
-      line-height: 1.05;
-      font-weight: 800;
-      letter-spacing: -0.03em;
-    }
-
-    .hero p {
-      margin: 0;
-      max-width: 36rem;
-      color: rgba(255, 255, 255, 0.86);
-      line-height: 1.6;
-      font-size: 14px;
-    }
-
-    .status-strip {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      padding: 14px 18px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(255, 250, 243, 0.9);
-    }
-
-    .stat-card {
-      padding: 12px 14px;
-      border-radius: var(--radius-md);
-      background: var(--panel-strong);
-      border: 1px solid rgba(23, 50, 77, 0.08);
-    }
-
-    .stat-card span {
-      display: block;
-      font-size: 11px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-
-    .stat-card strong {
-      display: block;
-      margin-top: 6px;
-      font-size: 16px;
-      color: var(--brand);
-      overflow-wrap: anywhere;
-    }
-
-    .messages {
-      padding: 18px;
-      overflow: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      scroll-behavior: smooth;
-      background:
-        linear-gradient(180deg, rgba(255, 251, 245, 0.84), rgba(245, 239, 227, 0.74)),
-        linear-gradient(90deg, rgba(215, 232, 251, 0.08), rgba(248, 216, 176, 0.08));
-    }
-
-    .message {
-      max-width: min(82%, 620px);
-      padding: 14px 16px 15px;
-      border-radius: 22px;
-      line-height: 1.65;
-      font-size: 15px;
-      position: relative;
-      animation: rise 220ms ease;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .message.agent {
-      align-self: flex-start;
-      background: var(--agent);
-      border-bottom-left-radius: 8px;
-    }
-
-    .message.user {
-      align-self: flex-end;
-      background: var(--user);
-      border-bottom-right-radius: 8px;
-    }
-
-    .message.system {
-      align-self: center;
-      max-width: 92%;
-      font-size: 13px;
-      background: rgba(255, 255, 255, 0.76);
-      color: var(--muted);
-      border: 1px dashed rgba(35, 44, 56, 0.12);
-      text-align: center;
-    }
-
-    .message .label {
-      display: inline-flex;
-      margin-bottom: 6px;
-      font-size: 11px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: rgba(31, 34, 40, 0.55);
-    }
-
-    .message a {
-      color: var(--brand-soft);
-      font-weight: 700;
-      text-decoration: none;
-      border-bottom: 1px solid rgba(47, 91, 130, 0.25);
-    }
-
-    .message a:hover {
-      color: var(--brand);
-    }
-
-    .composer {
-      padding: 16px 18px 18px;
-      border-top: 1px solid var(--border);
-      background: rgba(255, 250, 243, 0.92);
-    }
-
-    .quick-actions {
-      display: flex;
-      gap: 10px;
-      overflow: auto;
-      margin-bottom: 12px;
-      padding-bottom: 4px;
-    }
-
-    .quick-actions button,
-    .report-actions button,
-    .composer button {
-      appearance: none;
-      border: 0;
-      cursor: pointer;
-      transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
-    }
-
-    .quick-actions button {
-      padding: 10px 14px;
-      border-radius: 999px;
-      background: #fff;
-      color: var(--brand);
-      border: 1px solid rgba(23, 50, 77, 0.12);
-      white-space: nowrap;
-      font-size: 13px;
-      font-weight: 700;
-    }
-
-    .quick-actions button:hover,
-    .report-actions button:hover,
-    .composer button:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 10px 22px rgba(23, 50, 77, 0.12);
-    }
-
-    .composer-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: end;
-    }
-
-    textarea {
-      width: 100%;
-      min-height: 58px;
-      max-height: 150px;
-      resize: none;
-      border: 1px solid rgba(23, 50, 77, 0.12);
-      border-radius: 18px;
-      padding: 16px 18px;
-      background: #fffdf8;
-      color: var(--ink);
-      font: inherit;
-      line-height: 1.5;
-      outline: none;
-    }
-
-    textarea:focus {
-      border-color: rgba(47, 91, 130, 0.48);
-      box-shadow: 0 0 0 4px rgba(47, 91, 130, 0.08);
-    }
-
-    .composer button {
-      min-width: 112px;
-      height: 58px;
-      padding: 0 20px;
-      border-radius: 18px;
-      background: linear-gradient(135deg, var(--accent), #b9611d);
-      color: #fff;
-      font-size: 15px;
-      font-weight: 800;
-      letter-spacing: 0.02em;
-    }
-
-    .composer button[disabled] {
-      opacity: 0.6;
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .session-actions {
-      display: flex;
-      justify-content: flex-end;
-      margin-top: 10px;
-    }
-
-    .session-actions button {
-      appearance: none;
-      border: 1px solid rgba(23, 50, 77, 0.14);
-      background: rgba(255, 255, 255, 0.72);
-      color: var(--brand);
-      min-height: 42px;
-      padding: 0 16px;
-      border-radius: 14px;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
-    }
-
-    .session-actions button:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 8px 18px rgba(23, 50, 77, 0.1);
-    }
-
-    .session-actions button[disabled] {
-      opacity: 0.6;
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .report-panel {
-      display: grid;
-      grid-template-rows: auto auto 1fr;
-      min-height: calc(100vh - 36px);
-    }
-
-    .report-head {
-      padding: 22px 20px 16px;
-      background: linear-gradient(180deg, rgba(255, 250, 243, 0.9), rgba(255, 244, 228, 0.82));
-      border-bottom: 1px solid var(--border);
-    }
-
-    .report-head h2 {
-      margin: 10px 0 6px;
-      font-size: 22px;
-      color: var(--brand);
-      letter-spacing: -0.02em;
-    }
-
-    .report-head p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.6;
-    }
-
-    .report-actions {
-      display: flex;
-      gap: 10px;
-      padding: 14px 20px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(255, 253, 248, 0.84);
-    }
-
-    .report-actions button {
-      border-radius: 999px;
-      padding: 10px 14px;
-      font-size: 13px;
-      font-weight: 700;
-      background: #fff;
-      color: var(--brand);
-      border: 1px solid rgba(23, 50, 77, 0.12);
-    }
-
-    .report-list {
-      padding: 16px;
-      overflow: auto;
-      display: grid;
-      gap: 12px;
-      align-content: start;
-      background: linear-gradient(180deg, rgba(255, 251, 245, 0.68), rgba(241, 234, 223, 0.5));
-    }
-
-    .report-card {
-      display: block;
-      padding: 16px;
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.82);
-      border: 1px solid rgba(23, 50, 77, 0.09);
-      color: inherit;
-      text-decoration: none;
-    }
-
-    .report-card:hover {
-      border-color: rgba(47, 91, 130, 0.24);
-      transform: translateY(-1px);
-      transition: transform 160ms ease, border-color 160ms ease;
-    }
-
-    .report-card strong {
-      display: block;
-      font-size: 16px;
-      color: var(--brand);
-      margin-bottom: 8px;
-      line-height: 1.35;
-    }
-
-    .report-meta {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .report-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(215, 232, 251, 0.55);
-      color: var(--brand);
-      font-weight: 700;
-    }
-
-    .empty {
-      padding: 22px 18px;
-      border-radius: 18px;
-      border: 1px dashed rgba(23, 50, 77, 0.16);
-      background: rgba(255, 255, 255, 0.56);
-      color: var(--muted);
-      line-height: 1.7;
-      font-size: 14px;
-    }
-
-    .typing::after {
-      content: "";
-      display: inline-block;
-      width: 1em;
-      animation: dots 1s steps(4, end) infinite;
-    }
-
-    @keyframes rise {
-      from {
-        opacity: 0;
-        transform: translateY(10px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-
-    @keyframes dots {
-      0% { content: ""; }
-      25% { content: "."; }
-      50% { content: ".."; }
-      75% { content: "..."; }
-      100% { content: ""; }
-    }
-
-    @media (max-width: 980px) {
-      body {
-        padding: 12px;
-      }
-
-      .shell {
-        grid-template-columns: 1fr;
-      }
-
-      .chat-panel,
-      .report-panel {
-        min-height: auto;
-      }
-
-      .chat-panel {
-        min-height: 100dvh;
-      }
-
-      .report-panel {
-        max-height: none;
-        min-height: auto;
-      }
-    }
-
-    @media (max-width: 640px) {
-      body {
-        padding: 0;
-      }
-
-      .shell {
-        gap: 0;
-        max-width: none;
-      }
-
-      .chat-panel,
-      .report-panel {
-        border-radius: 0;
-        border-left: 0;
-        border-right: 0;
-      }
-
-      .chat-panel {
-        min-height: 100dvh;
-      }
-
-      .report-panel {
-        min-height: auto;
-      }
-
-      .hero {
-        padding: 18px 16px 14px;
-      }
-
-      h1 {
-        margin: 10px 0 6px;
-        font-size: 24px;
-        line-height: 1.08;
-      }
-
-      .hero p {
-        max-width: none;
-        font-size: 13px;
-        line-height: 1.5;
-      }
-
-      .status-strip {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        padding: 12px;
-        gap: 8px;
-      }
-
-      .stat-card {
-        padding: 10px 12px;
-      }
-
-      .stat-card span {
-        font-size: 10px;
-      }
-
-      .stat-card strong {
-        font-size: 14px;
-      }
-
-      .messages {
-        padding: 14px 12px;
-        gap: 12px;
-      }
-
-      .composer-row {
-        grid-template-columns: 1fr;
-        gap: 10px;
-      }
-
-      .composer {
-        padding: 12px;
-      }
-
-      .quick-actions {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-        overflow: visible;
-      }
-
-      .quick-actions button {
-        min-height: 44px;
-        white-space: normal;
-        line-height: 1.35;
-      }
-
-      textarea {
-        min-height: 52px;
-        padding: 14px 15px;
-      }
-
-      .composer button {
-        width: 100%;
-        height: 50px;
-      }
-
-      .session-actions {
-        margin-top: 8px;
-      }
-
-      .session-actions button {
-        width: 100%;
-      }
-
-      .message {
-        max-width: 100%;
-        padding: 12px 14px;
-        font-size: 14px;
-      }
-
-      .report-head {
-        padding: 16px 14px 12px;
-      }
-
-      .report-actions {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-        padding: 12px 14px;
-      }
-
-      .report-actions button {
-        width: 100%;
-      }
-
-      .report-list {
-        padding: 12px;
-      }
-    }
-  </style>
+  <link rel="stylesheet" href="/web/chat.css?v=20260415-2128">
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
+  <nav class="mobile-tabs" id="mobile-tabs">
+    <button type="button" class="active" data-tab="chat">💬 对话</button>
+    <button type="button" data-tab="report">📊 报告</button>
+  </nav>
   <main class="shell">
     <section class="chat-panel">
       <header class="hero">
@@ -648,24 +35,23 @@
 
       <footer class="composer">
         <div class="quick-actions">
-          <button type="button" data-prompt="生成今天综合热榜，并给我报告链接">生成综合榜</button>
-          <button type="button" data-prompt="生成今天新项目热榜，并给我报告链接">生成新项目榜</button>
+          <button type="button" data-prompt="生成综合热榜">生成综合榜</button>
+          <button type="button" data-prompt="生成新项目热榜">生成新项目榜</button>
+          <button type="button" data-prompt="看看本周 GitHub Trending">GitHub Trending</button>
         </div>
         <div class="composer-row">
-          <textarea id="composer-input" placeholder="例如：生成今天综合热榜，并返回可查看的榜单链接"></textarea>
-          <button id="send-button" type="button">发送</button>
+          <textarea id="composer-input" placeholder="例如：生成综合热榜 / 前50名 AI Agent 方向 / 增长>=500的新项目"></textarea>
+          <button id="end-session-button" class="composer-secondary-button" type="button">重新开始</button>
         </div>
         <div class="session-actions">
-          <button id="end-session-button" type="button">重新开始</button>
+          <button id="send-button" class="composer-primary-button" type="button">发送</button>
         </div>
       </footer>
     </section>
 
     <aside class="report-panel">
       <header class="report-head">
-        <div class="eyebrow" style="background: rgba(23, 50, 77, 0.08); color: var(--brand);">Rendered Reports</div>
         <h2>报告列表</h2>
-        <p>这里直接展示服务器上的 Markdown 报告，点击后会打开 HTML 渲染页，适合手机端查看。</p>
       </header>
 
       <div class="report-actions">
@@ -694,6 +80,9 @@
     let socket = null;
     let socketReady = false;
     let latestReports = [];
+    let wsReconnectTimer = null;
+    let wsReconnectDelay = 1000; // 初始重连间隔 1s，指数退避最大 30s
+    const WS_MAX_RECONNECT_DELAY = 30000;
 
     renderSessionIntro(false);
 
@@ -727,7 +116,7 @@
       if (!keepHistory) {
         messagesEl.innerHTML = "";
       }
-      addMessage("agent", introText || "欢迎，你可以直接让我生成综合榜、新项目榜，或者刷新已有日报。\n\n生成完成后，下方会出现可点开的 HTML 报告入口。", {
+      addMessage("agent", introText || "欢迎，你可以点击快捷按钮生成综合榜、新项目榜、查看 Trending，也可以输入框自定义参数（如类别、数量、增长阈值等）。", {
         asHtml: false,
       });
     }
@@ -807,6 +196,7 @@
 
     function updateTypingIndicator(el, finalText) {
       const body = el.lastElementChild;
+      body.className = "md-body";
       body.innerHTML = enhanceReply(finalText);
       body.classList.remove("typing");
     }
@@ -867,6 +257,10 @@
       const currentSocket = socket;
       socket = null;
       socketReady = false;
+      if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
       if (updateStatus) {
         transportStatusEl.textContent = "普通模式";
       }
@@ -875,8 +269,21 @@
       }
     }
 
+    function scheduleReconnect() {
+      if (wsReconnectTimer) return;
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connectWebSocket();
+      }, wsReconnectDelay);
+      wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
+    }
+
     function connectWebSocket() {
-      closeSocket(false);
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      socket = null;
+      socketReady = false;
       transportStatusEl.textContent = "连接中";
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const currentSessionId = sessionId;
@@ -887,6 +294,7 @@
       } catch (error) {
         socketReady = false;
         transportStatusEl.textContent = "普通模式";
+        scheduleReconnect();
         return;
       }
 
@@ -895,15 +303,20 @@
           return;
         }
         socketReady = true;
+        wsReconnectDelay = 1000; // 连接成功，重置退避
         transportStatusEl.textContent = "已连接";
       });
 
-      socket.addEventListener("close", () => {
+      socket.addEventListener("close", (event) => {
         if (currentSessionId !== sessionId) {
           return;
         }
         socketReady = false;
         transportStatusEl.textContent = "普通模式";
+        // 非主动关闭时自动重连
+        if (event.code !== 1000) {
+          scheduleReconnect();
+        }
       });
 
       socket.addEventListener("error", () => {
@@ -912,6 +325,7 @@
         }
         socketReady = false;
         transportStatusEl.textContent = "普通模式";
+        scheduleReconnect();
       });
     }
 
@@ -993,6 +407,23 @@
     }
 
     function enhanceReply(text) {
+      // 使用 marked 渲染 Markdown，DOMPurify 防 XSS
+      if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+        const rawHtml = marked.parse(text);
+        const safeHtml = DOMPurify.sanitize(rawHtml, {
+          ADD_ATTR: ["target"],
+          ALLOW_TAGS: [
+            "h1","h2","h3","h4","h5","h6","p","br","hr","ul","ol","li",
+            "strong","em","del","code","pre","blockquote","a","img",
+            "table","thead","tbody","tr","th","td","div","span","sub","sup",
+          ],
+        });
+        // 为 .md 文件名添加报告链接
+        return safeHtml.replace(/([\w.-]+\.md)/g, (match) => {
+          return `<a href="${getReportHtmlUrl(match)}" target="_blank" rel="noopener">${match}</a>`;
+        });
+      }
+      // Fallback：无 marked/DOMPurify 时简单渲染
       const escaped = escapeHtml(text);
       const withReportLinks = escaped.replace(/([\w.-]+\.md)/g, (match) => {
         return `<a href="${getReportHtmlUrl(match)}" target="_blank" rel="noopener">${match}</a>`;
@@ -1025,6 +456,59 @@
         .replace(/\"/g, "&quot;")
         .replace(/'/g, "&#39;");
     }
+
+    // ── 手机端 Tab 切换 ──
+    (function setupMobileTabs() {
+      const tabsBar = document.getElementById("mobile-tabs");
+      const chatPanel = document.querySelector(".chat-panel");
+      const reportPanel = document.querySelector(".report-panel");
+      if (!tabsBar || !chatPanel || !reportPanel) return;
+
+      const buttons = tabsBar.querySelectorAll("button[data-tab]");
+      const mobileQuery = window.matchMedia("(max-width: 640px)");
+
+      function switchTab(target) {
+        buttons.forEach(btn => btn.classList.toggle("active", btn.dataset.tab === target));
+        if (target === "chat") {
+          chatPanel.hidden = false;
+          reportPanel.hidden = true;
+        } else {
+          chatPanel.hidden = true;
+          reportPanel.hidden = false;
+        }
+      }
+
+      buttons.forEach(btn => {
+        btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+      });
+
+      function syncTabLayout() {
+        if (mobileQuery.matches) {
+          const activeButton = tabsBar.querySelector("button.active") || buttons[0];
+          switchTab(activeButton?.dataset.tab || "chat");
+        } else {
+          chatPanel.hidden = false;
+          reportPanel.hidden = false;
+        }
+      }
+
+      syncTabLayout();
+      mobileQuery.addEventListener("change", syncTabLayout);
+
+      // 生成报告后自动闪烁报告 Tab 提示用户
+      const origLoadReports = loadReports;
+      loadReports = async function() {
+        const prevCount = latestReports.length;
+        await origLoadReports.call(this);
+        if (latestReports.length > prevCount && reportPanel.hidden) {
+          const reportTab = tabsBar.querySelector('[data-tab="report"]');
+          if (reportTab && !reportTab.classList.contains("active")) {
+            reportTab.style.color = "var(--accent)";
+            setTimeout(() => { reportTab.style.color = ""; }, 2000);
+          }
+        }
+      };
+    })();
   </script>
 </body>
 </html>

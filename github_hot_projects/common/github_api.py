@@ -80,7 +80,7 @@ def search_github_repos(
 
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
             _check_response(resp, token_idx)
             if resp.status_code == 200:
                 try:
@@ -122,7 +122,7 @@ def get_search_total_count(token_mgr: TokenManager, query: str, token_idx: int) 
 
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
             _check_response(resp, token_idx)
             if resp.status_code == 200:
                 try:
@@ -213,7 +213,7 @@ def get_stargazers_page(
 
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
             _check_response(resp, token_idx)
             if resp.status_code == 200:
                 try:
@@ -281,7 +281,7 @@ def graphql_stargazers_batch(
                 "https://api.github.com/graphql",
                 headers=headers,
                 json={"query": query_str, "variables": variables},
-                timeout=30,
+                timeout=60,
             )
             _check_response(resp, token_idx)
             if resp.status_code == 200:

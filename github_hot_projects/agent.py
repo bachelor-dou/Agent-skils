@@ -272,7 +272,7 @@ class HotProjectAgent:
 
         for attempt in range(3):
             try:
-                resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=120)
+                resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=300)
                 if resp.status_code == 200:
                     return resp.json()
                 logger.warning(f"LLM 调用失败: status={resp.status_code}, attempt={attempt + 1}")
@@ -452,11 +452,20 @@ class HotProjectAgent:
             "新项目榜",
             "新项目热榜",
             "新项目排名",
-            "最近有什么新项目",
             " new project",
             "hot_new",
         )
-        return any(marker in latest_user for marker in markers)
+        if any(marker in latest_user for marker in markers):
+            return True
+
+        has_new_project_intent = "新项目" in latest_user or "new project" in latest_user
+        has_hot_ranking_intent = any(
+            marker in latest_user
+            for marker in [
+                "热榜", "榜单", "排名", "top", "前", "热门", "比较火",
+            ]
+        )
+        return has_new_project_intent and has_hot_ranking_intent
 
     def _is_realtime_refresh_request(self) -> bool:
         """最近一条用户消息包含实时强刷语义时返回 True。"""
@@ -471,13 +480,14 @@ class HotProjectAgent:
 
         # 1) 强触发词：出现即强制刷新
         hard_triggers = [
-            "强制刷新", "立即刷新", "重新跑", "实时热榜", "realtime", "force refresh",
+            "强制刷新", "立即刷新", "重新跑", "实时热榜",
+            "realtime", "force refresh",
         ]
         if any(k in latest_user for k in hard_triggers):
             return True
 
-        # 2) 语义组合触发：必须包含明确“当前时态”词，避免“近期/最新”误触
-        has_current_time_intent = any(k in latest_user for k in ["实时", "当前", "现在", "此刻"])
+        # 2) 语义组合触发：只接受明确的当前时态词 + 排名词 + GitHub/项目语境
+        has_current_time_intent = any(k in latest_user for k in ["实时", "当前", "现在", "此刻", "最新"])
         has_ranking_intent = any(k in latest_user for k in ["热榜", "榜单", "排名", "top", "前"])
         has_github_intent = any(k in latest_user for k in ["github", "社区", "项目"])
         return has_current_time_intent and has_ranking_intent and has_github_intent

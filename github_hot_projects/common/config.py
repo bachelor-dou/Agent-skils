@@ -6,11 +6,15 @@
 """
 
 import os
+from pathlib import Path
+
+
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 # ──────────────────────────────────────────────────────────────
 # GitHub Token（最多 N 个，轮换使用，用完一个自动切下一个）
-#   优先从环境变量 GITHUB_TOKENS（逗号分隔）读取；
-#   未设置时回退到下方硬编码列表（仅供本地开发）。
+#   从环境变量 GITHUB_TOKENS（逗号分隔）读取；
+#   未设置时保持为空，由运行入口决定是否退出。
 # ──────────────────────────────────────────────────────────────
 _env_tokens = os.environ.get("GITHUB_TOKENS", "")
 GITHUB_TOKENS: list[str] = (
@@ -59,16 +63,12 @@ DEFAULT_SCORE_MODE: str = "comprehensive"
 # ──────────────────────────────────────────────────────────────
 MAX_BINARY_SEARCH_DEPTH: int = 20      # 二分法查 stargazers 最大深度
 SEARCH_REQUEST_INTERVAL: float = 2.5   # Search API 请求最小间隔（秒）
-RATE_LIMIT_WAIT_INTERVAL: int = 300    # 限流后轮询恢复间隔（秒）
 
 # ──────────────────────────────────────────────────────────────
 # 路径配置（基于包根目录 github_hot_projects/）
-#   config.py 位于 common/ 子包内，PACKAGE_DIR 向上一级指向包根。
-#   DB、报告、日志均存放在包根目录下，部署时整个包即自包含。
 #   可通过环境变量覆盖：DATA_DIR
 # ──────────────────────────────────────────────────────────────
-PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR: str = os.environ.get("DATA_DIR", PACKAGE_DIR)
+DATA_DIR: str = os.environ.get("DATA_DIR", str(PACKAGE_DIR))
 DB_FILE_PATH = os.path.join(DATA_DIR, "Github_DB.json")
 CHECKPOINT_FILE_PATH = os.path.join(DATA_DIR, ".pipeline_checkpoint.json")
 REPORT_DIR = os.path.join(DATA_DIR, "report")

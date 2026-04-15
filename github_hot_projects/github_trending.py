@@ -66,7 +66,7 @@ def fetch_trending(
             url,
             params=params,
             headers={"User-Agent": _USER_AGENT},
-            timeout=30,
+            timeout=120,
         )
         resp.raise_for_status()
     except requests.RequestException as e:

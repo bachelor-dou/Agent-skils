@@ -157,8 +157,13 @@ def _render_report_html(name: str, markdown_text: str) -> str:
         lines = markdown_text.splitlines()
         title = next((line[2:].strip() for line in lines if line.startswith("# ")), name)
         summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
+        import re
+        # 预处理：移除 Markdown 中的原始 HTML 标签，防止 XSS
+        sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*>.*?</\1>', '', markdown_text, flags=re.DOTALL | re.IGNORECASE)
+        sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*/?\s*>', '', sanitized_text, flags=re.IGNORECASE)
+        sanitized_text = re.sub(r'\bon\w+\s*=', '', sanitized_text, flags=re.IGNORECASE)
         article_html = markdown.markdown(
-                markdown_text,
+                sanitized_text,
                 extensions=["extra", "sane_lists", "toc", "nl2br"],
                 output_format="html5",
         )
@@ -243,12 +248,16 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             background: var(--paper);
             border: 1px solid var(--line);
             box-shadow: var(--shadow);
+            font-size: 17px;
+            line-height: 1.86;
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
         }}
         .content h1, .content h2, .content h3 {{ color: var(--brand); line-height: 1.25; }}
         .content h1 {{ font-size: 34px; margin-top: 0; }}
         .content h2 {{ margin-top: 28px; font-size: 24px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }}
         .content h3 {{ margin-top: 20px; font-size: 19px; }}
-        .content p {{ margin: 12px 0; }}
+        .content p {{ margin: 14px 0; word-break: normal; overflow-wrap: break-word; }}
         .content blockquote {{
             margin: 16px 0;
             padding: 14px 16px;
@@ -258,8 +267,10 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             border-radius: 0 18px 18px 0;
         }}
         .content hr {{ border: 0; border-top: 1px dashed rgba(24, 52, 78, 0.18); margin: 28px 0; }}
-        .content a {{ color: var(--brand); font-weight: 700; text-decoration: none; }}
+        .content a {{ color: var(--brand); font-weight: 700; text-decoration: none; overflow-wrap: break-word; word-break: normal; }}
         .content a:hover {{ text-decoration: underline; }}
+        .content p a, .content li a, .content td a, .content th a {{ display: inline-block; max-width: 100%; overflow-wrap: anywhere; }}
+        .content li, .content td, .content th {{ word-break: normal; overflow-wrap: break-word; }}
         .content code {{
             padding: 2px 6px;
             border-radius: 8px;
@@ -273,9 +284,11 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             border-radius: 18px;
             background: #112132;
             color: #e5edf6;
+            line-height: 1.7;
         }}
         .content pre code {{ background: transparent; padding: 0; color: inherit; }}
         .content ul, .content ol {{ padding-left: 20px; }}
+        .content li + li {{ margin-top: 8px; }}
         .footer {{ margin-top: 12px; color: var(--muted); font-size: 13px; text-align: center; }}
         @media (max-width: 640px) {{
             body {{ padding: 12px 10px 28px; }}
@@ -283,13 +296,13 @@ def _render_report_html(name: str, markdown_text: str) -> str:
             .content {{ padding: 20px 16px; border-radius: 24px; }}
             .toolbar a {{ flex: 1 1 auto; }}
             .content h2 {{ font-size: 22px; }}
+            .content {{ font-size: 16px; line-height: 1.82; }}
         }}
     </style>
 </head>
 <body>
     <div class="page">
         <header class="hero">
-            <div class="eyebrow">Rendered Markdown Report</div>
             <h1>{safe_title}</h1>
             <div class="summary">{safe_summary or '这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。'}</div>
             <div class="toolbar">
@@ -367,7 +380,14 @@ async def index():
     """默认打开移动端聊天页。"""
     if not os.path.isfile(CHAT_PAGE_PATH):
         raise HTTPException(status_code=404, detail="聊天页面不存在")
-    return FileResponse(CHAT_PAGE_PATH)
+    return FileResponse(
+        CHAT_PAGE_PATH,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/chat", response_class=FileResponse)
@@ -375,7 +395,14 @@ async def chat_page():
     """提供移动端聊天页静态文件。"""
     if not os.path.isfile(CHAT_PAGE_PATH):
         raise HTTPException(status_code=404, detail="聊天页面不存在")
-    return FileResponse(CHAT_PAGE_PATH)
+    return FileResponse(
+        CHAT_PAGE_PATH,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -478,6 +505,9 @@ async def ws_chat(websocket: WebSocket, session_id: str):
                 reply = await asyncio.to_thread(_chat_with_lock, data)
             except SystemExit:
                 reply = "未配置任何 GitHub Token，当前只能预览页面与报告渲染效果。请先设置 GITHUB_TOKENS 环境变量后再发起 Agent 对话。"
+            except Exception as e:
+                logger.error("WebSocket Agent 执行异常: session=%s, error=%s", session_id, e)
+                reply = f"处理消息时出现错误：{e}"
             logger.info("WebSocket 回复完成: session=%s, reply_len=%s", session_id, len(reply or ""))
             await websocket.send_text(reply)
     except WebSocketDisconnect:

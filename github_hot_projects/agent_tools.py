@@ -295,15 +295,21 @@ def tool_check_repo_growth(
         meets_threshold = growth >= STAR_GROWTH_THRESHOLD
         growth_warning = ""
 
-    # LLM 生成项目描述（README 浓缩摘要）
+    # LLM 生成项目描述（README 浓缩摘要），优先复用 DB 中已有描述
     html_url = repo_item.get("html_url", f"https://github.com/{repo}")
-    repo_info = {
-        "short_desc": repo_item.get("description", ""),
-        "language": repo_item.get("language", ""),
-        "topics": repo_item.get("topics", []),
-        "readme_url": f"{html_url}#readme",
-    }
-    description = call_llm_describe(repo, repo_info, html_url)
+    cached_desc = ""
+    if db:
+        cached_desc = db.get("projects", {}).get(repo, {}).get("desc", "")
+    if cached_desc:
+        description = cached_desc
+    else:
+        repo_info = {
+            "short_desc": repo_item.get("description", ""),
+            "language": repo_item.get("language", ""),
+            "topics": repo_item.get("topics", []),
+            "readme_url": f"{html_url}#readme",
+        }
+        description = call_llm_describe(repo, repo_info, html_url)
 
     return {
         "repo": repo,
