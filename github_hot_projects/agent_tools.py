@@ -37,7 +37,7 @@ from .common.config import (
     STAR_RANGE_MIN,
     TIME_WINDOW_DAYS,
 )
-from .common.db import save_db, update_db_project
+from .common.db import save_db, update_db_project, set_growth_cache
 from .common.github_api import auto_split_star_range, search_github_repos
 from .growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
@@ -328,18 +328,21 @@ def tool_batch_check_growth(
     db: dict,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
     new_project_days: int | None = None,
+    force_refresh: bool = False,
 ) -> dict:
     """
     Tool 4: 批量计算仓库增长并筛选候选。
 
     使用 TokenWorkerPool + CalcGrowthTask 并行计算。
     当 new_project_days 指定时，先按创建时间筛选新项目，只对新项目计算增长。
+    当 force_refresh=True 时，跳过 checkpoint/growth_cache/DB 差值，全部走实时估算并刷新 DB。
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
         db:               DB 字典
         growth_threshold: 增长阈值
         new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
+        force_refresh:    是否强制实时刷新（不复用 DB 与缓存）
     """
     from datetime import timedelta
 
@@ -438,6 +441,7 @@ def tool_batch_check_growth(
             "db_projects": db.get("projects", {}),
             "candidate_map": candidate_map,
             "growth_threshold": growth_threshold,
+            "force_refresh": force_refresh,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
@@ -463,6 +467,7 @@ def tool_batch_check_growth(
         "unresolved_sampling_count": growth_ctx["unresolved_count"][0],
         "skipped_by_creation_time": skipped_count,
         "threshold": growth_threshold,
+        "force_refresh": force_refresh,
     }
 
 
@@ -472,6 +477,7 @@ def tool_rank_candidates(
     mode: str = DEFAULT_SCORE_MODE,
     db: dict | None = None,
     new_project_days: int | None = None,
+    prefiltered_new_project_days: int | None = None,
 ) -> dict:
     """
     Tool 5: 对候选列表评分排序。
@@ -481,14 +487,26 @@ def tool_rank_candidates(
         top_n:            取前 N 个
         mode:             评分模式 ("comprehensive" | "hot_new")
         new_project_days: hot_new 模式下新项目判定窗口（天），None 则使用默认值
+        prefiltered_new_project_days:
+                          候选池在 batch_check_growth 阶段已按该窗口预筛；
+                          与 new_project_days 一致时，排名阶段可直接按增长排序
     """
     top = step2_rank_and_select(
         candidates, mode=mode, db=db,
         new_project_days=new_project_days,
+        prefiltered_new_project_days=prefiltered_new_project_days,
     )[:top_n]
 
     if mode == "hot_new" and db is not None:
         save_db(db)
+
+    # 将评分持久化到 DB（跨会话可查）
+    if db is not None:
+        db_projects = db.get("projects", {})
+        for name, info in top:
+            score = info.get("_score")
+            if score is not None:
+                set_growth_cache(db_projects, name, info["growth"], score=score)
 
     ranked = []
     for i, (name, info) in enumerate(top, 1):
@@ -537,13 +555,14 @@ def tool_describe_project(repo: str, db: dict) -> dict:
 def tool_generate_report(
     top_projects: list[tuple[str, dict]],
     db: dict,
+    mode: str = "comprehensive",
 ) -> dict:
     """
     Tool 7: 生成完整 Markdown 报告。
 
     调用 report.step3_generate_report 生成报告。
     """
-    report_path = step3_generate_report(top_projects, db)
+    report_path = step3_generate_report(top_projects, db, mode=mode)
     return {"report_path": report_path, "project_count": len(top_projects)}
 
 
@@ -744,6 +763,7 @@ TOOL_SCHEMAS = [
                 "批量计算多个仓库的star增长并筛选满足阈值的候选。"
                 "通常在search_hot_projects之后调用。"
                 "指定new_project_days时，先按创建时间筛选新项目再计算增长，大幅减少请求量。"
+                "指定force_refresh=true时，强制走实时估算，不复用DB差值和增长缓存。"
             ),
             "parameters": {
                 "type": "object",
@@ -759,6 +779,14 @@ TOOL_SCHEMAS = [
                             "新项目筛选窗口（天）。指定后只对创建时间在该窗口内的仓库计算增长。"
                             "不传则对所有仓库计算增长（综合排名场景）。"
                         ),
+                    },
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": (
+                            "是否强制实时刷新。true=不走checkpoint/growth_cache/DB差值，"
+                            "直接重新估算增长并刷新数据库。默认false。"
+                        ),
+                        "default": False,
                     },
                 },
             },

@@ -210,8 +210,41 @@ Agent> [check_repo_growth] transformers: +1200, vllm: +1820
 
 ## 3. API 服务模式
 
+启动前请先配置运行所需环境变量：
+
 ```bash
-python -m github_hot_projects.api_server   # 默认 0.0.0.0:8000
+export GITHUB_TOKENS="ghp_token1,ghp_token2"
+export LLM_API_KEY="sk-xxx"
+```
+
+推荐启动方式有两种：
+
+```bash
+python -m github_hot_projects.api_server
+```
+
+```bash
+uvicorn github_hot_projects.api_server:app --host 0.0.0.0 --port 8000
+```
+
+如果部署在服务器上，手机端应该访问聊天页而不是直接访问 API：
+
+```text
+本机预览:  http://127.0.0.1:8000/chat
+局域网访问: http://服务器IP:8000/chat
+正式部署:  https://你的域名/chat
+```
+
+已生成的日报 HTML 页面可通过下面格式直接打开：
+
+```text
+http://服务器IP:8000/api/reports/报告文件名/html
+```
+
+例如：
+
+```text
+http://127.0.0.1:8000/api/reports/2026-04-14.md/html
 ```
 
 ### 对话

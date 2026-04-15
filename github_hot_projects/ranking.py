@@ -46,13 +46,14 @@ def step2_rank_and_select(
     mode: str = DEFAULT_SCORE_MODE,
     db: dict | None = None,
     new_project_days: int | None = None,
+    prefiltered_new_project_days: int | None = None,
 ) -> list[tuple[str, dict]]:
     """
     评分排序 + 截取 Top N。
 
     评分模式：
       comprehensive — 综合排名：log(增长量) + log(增长率)，新项目平滑折扣
-      hot_new       — 新项目专榜：用 DB 补全创建时间，按增长量排序
+    hot_new       — 新项目专榜：候选池已预筛时直接按增长量排序，否则兜底按创建时间过滤
 
     Returns:
         [(full_name, {"growth": int, "star": int, ...}), ...] 按 score 降序，返回全部排序结果。
@@ -93,19 +94,31 @@ def step2_rank_and_select(
             return False
 
     if mode == "hot_new":
-        _hydrate_candidate_created_at(candidate_map, db)
-        new_projects = {
-            name: info for name, info in candidate_map.items()
-            if _is_new_project(info)
-        }
-        sorted_candidates = sorted(
-            new_projects.items(),
-            key=lambda x: x[1]["growth"],
-            reverse=True,
-        )
-        logger.info(
-            f"Step 2 (hot_new): 新项目(<={_new_days}天) {len(new_projects)} 个。"
-        )
+        if prefiltered_new_project_days == _new_days:
+            sorted_candidates = sorted(
+                candidate_map.items(),
+                key=lambda x: x[1]["growth"],
+                reverse=True,
+            )
+            logger.info(
+                f"Step 2 (hot_new): 候选池已前置筛选(<={_new_days}天)，"
+                f"直接按增长量排序 {len(candidate_map)} 个。"
+            )
+        else:
+            _hydrate_candidate_created_at(candidate_map, db)
+            new_projects = {
+                name: info for name, info in candidate_map.items()
+                if _is_new_project(info)
+            }
+            sorted_candidates = sorted(
+                new_projects.items(),
+                key=lambda x: x[1]["growth"],
+                reverse=True,
+            )
+            logger.info(
+                f"Step 2 (hot_new): 兜底按新项目窗口(<={_new_days}天)过滤后，"
+                f"保留 {len(new_projects)} 个。"
+            )
     else:
         sorted_candidates = sorted(
             candidate_map.items(), key=lambda x: _calc_score(x[1]), reverse=True
@@ -117,8 +130,13 @@ def step2_rank_and_select(
     logger.info("  Top 10 预览:")
     for i, (name, info) in enumerate(sorted_candidates[:10], 1):
         score = _calc_score(info)
+        info["_score"] = score
         logger.info(
             f"    {i}. {name} (+{info['growth']}, star={info['star']}, score={score:.0f})"
         )
+
+    # 补充其余候选的 score
+    for name, info in sorted_candidates[10:]:
+        info["_score"] = _calc_score(info)
 
     return sorted_candidates

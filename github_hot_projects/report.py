@@ -19,18 +19,30 @@ from .common.llm import call_llm_describe
 logger = logging.getLogger("discover_hot")
 
 
+# 模式 → 文件后缀 / 标题映射
+_MODE_META = {
+    "comprehensive": ("", "GitHub 热门项目"),
+    "hot_new":       ("_hot_new", "GitHub 新项目热度榜"),
+}
+
+
 def step3_generate_report(
-    top_projects: list[tuple[str, dict]], db: dict
+    top_projects: list[tuple[str, dict]], db: dict,
+    mode: str = "comprehensive",
 ) -> str:
     """
     为 Top N 项目生成 LLM 描述 + 输出 Markdown 报告。
+
+    Args:
+        mode: 排名模式，"comprehensive" 或 "hot_new"，影响文件名和标题。
 
     Returns:
         报告文件路径。
     """
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    report_path = os.path.join(REPORT_DIR, f"{today}.md")
+    suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
+    report_path = os.path.join(REPORT_DIR, f"{today}{suffix}.md")
     db_projects = db.get("projects", {})
 
     need_llm: list[tuple[int, str, str, dict]] = []
@@ -57,7 +69,7 @@ def step3_generate_report(
             else:
                 desc_results.setdefault(full_name, "")
 
-    lines: list[str] = [f"# GitHub 热门项目 — {today}\n"]
+    lines: list[str] = [f"# {title_prefix} — {today}\n"]
     lines.append(
         f"> 共 {len(top_projects)} 个项目 | "
         f"窗口期: {TIME_WINDOW_DAYS} 天 | "

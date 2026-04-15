@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>GitHub Hot Projects</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5efe3;
+      --panel: rgba(255, 251, 245, 0.9);
+      --panel-strong: #fffaf1;
+      --ink: #1f2228;
+      --muted: #6a6f79;
+      --brand: #17324d;
+      --brand-soft: #2f5b82;
+      --accent: #d7883a;
+      --accent-soft: #f8d8b0;
+      --agent: #f2e6d8;
+      --user: #d7e8fb;
+      --ok: #2f6d44;
+      --border: rgba(35, 44, 56, 0.12);
+      --shadow: 0 18px 50px rgba(27, 41, 56, 0.12);
+      --radius-xl: 28px;
+      --radius-lg: 22px;
+      --radius-md: 16px;
+      --radius-sm: 12px;
+      --content-width: 1120px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Noto Sans SC", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(215, 232, 251, 0.75), transparent 32%),
+        radial-gradient(circle at top right, rgba(248, 216, 176, 0.72), transparent 28%),
+        linear-gradient(180deg, #f9f3e8 0%, #f0e7d9 100%);
+      color: var(--ink);
+    }
+
+    body {
+      padding: 18px;
+    }
+
+    .shell {
+      max-width: var(--content-width);
+      margin: 0 auto;
+      min-height: calc(100vh - 36px);
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.95fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .chat-panel,
+    .report-panel {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+      overflow: hidden;
+    }
+
+    .chat-panel {
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      min-height: calc(100vh - 36px);
+    }
+
+    .hero {
+      position: relative;
+      padding: 24px 22px 18px;
+      background:
+        linear-gradient(135deg, rgba(23, 50, 77, 0.96), rgba(43, 79, 113, 0.9)),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
+      color: #fff;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -30px -40px auto;
+      width: 180px;
+      height: 180px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.2), transparent 68%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 14px 0 8px;
+      font-size: clamp(28px, 4vw, 40px);
+      line-height: 1.05;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 36rem;
+      color: rgba(255, 255, 255, 0.86);
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 250, 243, 0.9);
+    }
+
+    .stat-card {
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      background: var(--panel-strong);
+      border: 1px solid rgba(23, 50, 77, 0.08);
+    }
+
+    .stat-card span {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .stat-card strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 16px;
+      color: var(--brand);
+      overflow-wrap: anywhere;
+    }
+
+    .messages {
+      padding: 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+      background:
+        linear-gradient(180deg, rgba(255, 251, 245, 0.84), rgba(245, 239, 227, 0.74)),
+        linear-gradient(90deg, rgba(215, 232, 251, 0.08), rgba(248, 216, 176, 0.08));
+    }
+
+    .message {
+      max-width: min(82%, 620px);
+      padding: 14px 16px 15px;
+      border-radius: 22px;
+      line-height: 1.65;
+      font-size: 15px;
+      position: relative;
+      animation: rise 220ms ease;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .message.agent {
+      align-self: flex-start;
+      background: var(--agent);
+      border-bottom-left-radius: 8px;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--user);
+      border-bottom-right-radius: 8px;
+    }
+
+    .message.system {
+      align-self: center;
+      max-width: 92%;
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.76);
+      color: var(--muted);
+      border: 1px dashed rgba(35, 44, 56, 0.12);
+      text-align: center;
+    }
+
+    .message .label {
+      display: inline-flex;
+      margin-bottom: 6px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(31, 34, 40, 0.55);
+    }
+
+    .message a {
+      color: var(--brand-soft);
+      font-weight: 700;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(47, 91, 130, 0.25);
+    }
+
+    .message a:hover {
+      color: var(--brand);
+    }
+
+    .composer {
+      padding: 16px 18px 18px;
+      border-top: 1px solid var(--border);
+      background: rgba(255, 250, 243, 0.92);
+    }
+
+    .quick-actions {
+      display: flex;
+      gap: 10px;
+      overflow: auto;
+      margin-bottom: 12px;
+      padding-bottom: 4px;
+    }
+
+    .quick-actions button,
+    .report-actions button,
+    .composer button {
+      appearance: none;
+      border: 0;
+      cursor: pointer;
+      transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+    }
+
+    .quick-actions button {
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--brand);
+      border: 1px solid rgba(23, 50, 77, 0.12);
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .quick-actions button:hover,
+    .report-actions button:hover,
+    .composer button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 22px rgba(23, 50, 77, 0.12);
+    }
+
+    .composer-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 58px;
+      max-height: 150px;
+      resize: none;
+      border: 1px solid rgba(23, 50, 77, 0.12);
+      border-radius: 18px;
+      padding: 16px 18px;
+      background: #fffdf8;
+      color: var(--ink);
+      font: inherit;
+      line-height: 1.5;
+      outline: none;
+    }
+
+    textarea:focus {
+      border-color: rgba(47, 91, 130, 0.48);
+      box-shadow: 0 0 0 4px rgba(47, 91, 130, 0.08);
+    }
+
+    .composer button {
+      min-width: 112px;
+      height: 58px;
+      padding: 0 20px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, var(--accent), #b9611d);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+
+    .composer button[disabled] {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .session-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 10px;
+    }
+
+    .session-actions button {
+      appearance: none;
+      border: 1px solid rgba(23, 50, 77, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--brand);
+      min-height: 42px;
+      padding: 0 16px;
+      border-radius: 14px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+    }
+
+    .session-actions button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 18px rgba(23, 50, 77, 0.1);
+    }
+
+    .session-actions button[disabled] {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .report-panel {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-height: calc(100vh - 36px);
+    }
+
+    .report-head {
+      padding: 22px 20px 16px;
+      background: linear-gradient(180deg, rgba(255, 250, 243, 0.9), rgba(255, 244, 228, 0.82));
+      border-bottom: 1px solid var(--border);
+    }
+
+    .report-head h2 {
+      margin: 10px 0 6px;
+      font-size: 22px;
+      color: var(--brand);
+      letter-spacing: -0.02em;
+    }
+
+    .report-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .report-actions {
+      display: flex;
+      gap: 10px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 253, 248, 0.84);
+    }
+
+    .report-actions button {
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      background: #fff;
+      color: var(--brand);
+      border: 1px solid rgba(23, 50, 77, 0.12);
+    }
+
+    .report-list {
+      padding: 16px;
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      background: linear-gradient(180deg, rgba(255, 251, 245, 0.68), rgba(241, 234, 223, 0.5));
+    }
+
+    .report-card {
+      display: block;
+      padding: 16px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(23, 50, 77, 0.09);
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .report-card:hover {
+      border-color: rgba(47, 91, 130, 0.24);
+      transform: translateY(-1px);
+      transition: transform 160ms ease, border-color 160ms ease;
+    }
+
+    .report-card strong {
+      display: block;
+      font-size: 16px;
+      color: var(--brand);
+      margin-bottom: 8px;
+      line-height: 1.35;
+    }
+
+    .report-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .report-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(215, 232, 251, 0.55);
+      color: var(--brand);
+      font-weight: 700;
+    }
+
+    .empty {
+      padding: 22px 18px;
+      border-radius: 18px;
+      border: 1px dashed rgba(23, 50, 77, 0.16);
+      background: rgba(255, 255, 255, 0.56);
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .typing::after {
+      content: "";
+      display: inline-block;
+      width: 1em;
+      animation: dots 1s steps(4, end) infinite;
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes dots {
+      0% { content: ""; }
+      25% { content: "."; }
+      50% { content: ".."; }
+      75% { content: "..."; }
+      100% { content: ""; }
+    }
+
+    @media (max-width: 980px) {
+      body {
+        padding: 12px;
+      }
+
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .chat-panel,
+      .report-panel {
+        min-height: auto;
+      }
+
+      .chat-panel {
+        min-height: 100dvh;
+      }
+
+      .report-panel {
+        max-height: none;
+        min-height: auto;
+      }
+    }
+
+    @media (max-width: 640px) {
+      body {
+        padding: 0;
+      }
+
+      .shell {
+        gap: 0;
+        max-width: none;
+      }
+
+      .chat-panel,
+      .report-panel {
+        border-radius: 0;
+        border-left: 0;
+        border-right: 0;
+      }
+
+      .chat-panel {
+        min-height: 100dvh;
+      }
+
+      .report-panel {
+        min-height: auto;
+      }
+
+      .hero {
+        padding: 18px 16px 14px;
+      }
+
+      h1 {
+        margin: 10px 0 6px;
+        font-size: 24px;
+        line-height: 1.08;
+      }
+
+      .hero p {
+        max-width: none;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .status-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        padding: 12px;
+        gap: 8px;
+      }
+
+      .stat-card {
+        padding: 10px 12px;
+      }
+
+      .stat-card span {
+        font-size: 10px;
+      }
+
+      .stat-card strong {
+        font-size: 14px;
+      }
+
+      .messages {
+        padding: 14px 12px;
+        gap: 12px;
+      }
+
+      .composer-row {
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+
+      .composer {
+        padding: 12px;
+      }
+
+      .quick-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        overflow: visible;
+      }
+
+      .quick-actions button {
+        min-height: 44px;
+        white-space: normal;
+        line-height: 1.35;
+      }
+
+      textarea {
+        min-height: 52px;
+        padding: 14px 15px;
+      }
+
+      .composer button {
+        width: 100%;
+        height: 50px;
+      }
+
+      .session-actions {
+        margin-top: 8px;
+      }
+
+      .session-actions button {
+        width: 100%;
+      }
+
+      .message {
+        max-width: 100%;
+        padding: 12px 14px;
+        font-size: 14px;
+      }
+
+      .report-head {
+        padding: 16px 14px 12px;
+      }
+
+      .report-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        padding: 12px 14px;
+      }
+
+      .report-actions button {
+        width: 100%;
+      }
+
+      .report-list {
+        padding: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="chat-panel">
+      <header class="hero">
+        <h1>GitHub Hot Projects</h1>
+        <p>手机端先对话下达指令，服务端调用 Agent 生成 Markdown 榜单，再把当前报告渲染成可阅读的网页返回给你。</p>
+      </header>
+
+      <section class="status-strip">
+        <div class="stat-card">
+          <span>连接状态</span>
+          <strong id="transport-status">连接中</strong>
+        </div>
+        <div class="stat-card">
+          <span>报告数量</span>
+          <strong id="report-count">0</strong>
+        </div>
+      </section>
+
+      <section class="messages" id="messages"></section>
+
+      <footer class="composer">
+        <div class="quick-actions">
+          <button type="button" data-prompt="生成今天综合热榜，并给我报告链接">生成综合榜</button>
+          <button type="button" data-prompt="生成今天新项目热榜，并给我报告链接">生成新项目榜</button>
+        </div>
+        <div class="composer-row">
+          <textarea id="composer-input" placeholder="例如：生成今天综合热榜，并返回可查看的榜单链接"></textarea>
+          <button id="send-button" type="button">发送</button>
+        </div>
+        <div class="session-actions">
+          <button id="end-session-button" type="button">重新开始</button>
+        </div>
+      </footer>
+    </section>
+
+    <aside class="report-panel">
+      <header class="report-head">
+        <div class="eyebrow" style="background: rgba(23, 50, 77, 0.08); color: var(--brand);">Rendered Reports</div>
+        <h2>报告列表</h2>
+        <p>这里直接展示服务器上的 Markdown 报告，点击后会打开 HTML 渲染页，适合手机端查看。</p>
+      </header>
+
+      <div class="report-actions">
+        <button id="refresh-reports" type="button">刷新报告列表</button>
+        <button id="open-latest" type="button">打开最新报告</button>
+      </div>
+
+      <section class="report-list" id="report-list"></section>
+    </aside>
+  </main>
+
+  <script>
+    const SESSION_STORAGE_KEY = "gh-hot-session-id";
+    const messagesEl = document.getElementById("messages");
+    const inputEl = document.getElementById("composer-input");
+    const sendButton = document.getElementById("send-button");
+    const endSessionButton = document.getElementById("end-session-button");
+    const reportListEl = document.getElementById("report-list");
+    const reportCountEl = document.getElementById("report-count");
+    const transportStatusEl = document.getElementById("transport-status");
+    const refreshReportsButton = document.getElementById("refresh-reports");
+    const openLatestButton = document.getElementById("open-latest");
+
+    let sessionId = getOrCreateSessionId();
+
+    let socket = null;
+    let socketReady = false;
+    let latestReports = [];
+
+    renderSessionIntro(false);
+
+    setupComposer();
+    setupQuickActions();
+    setupReportActions();
+    setupSessionActions();
+    connectWebSocket();
+    loadReports();
+
+    function createSessionId() {
+      return `mobile-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function getOrCreateSessionId() {
+      const existing = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (existing) {
+        return existing;
+      }
+      const sid = createSessionId();
+      localStorage.setItem(SESSION_STORAGE_KEY, sid);
+      return sid;
+    }
+
+    function updateSessionId(nextSessionId) {
+      sessionId = nextSessionId;
+      localStorage.setItem(SESSION_STORAGE_KEY, nextSessionId);
+    }
+
+    function renderSessionIntro(keepHistory, introText) {
+      if (!keepHistory) {
+        messagesEl.innerHTML = "";
+      }
+      addMessage("agent", introText || "欢迎，你可以直接让我生成综合榜、新项目榜，或者刷新已有日报。\n\n生成完成后，下方会出现可点开的 HTML 报告入口。", {
+        asHtml: false,
+      });
+    }
+
+    function setupComposer() {
+      inputEl.addEventListener("input", autoResize);
+      inputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendMessage();
+        }
+      });
+      sendButton.addEventListener("click", sendMessage);
+    }
+
+    function setupQuickActions() {
+      document.querySelectorAll("[data-prompt]").forEach((button) => {
+        button.addEventListener("click", () => {
+          inputEl.value = button.dataset.prompt || "";
+          autoResize();
+          sendMessage();
+        });
+      });
+    }
+
+    function setupReportActions() {
+      refreshReportsButton.addEventListener("click", loadReports);
+      openLatestButton.addEventListener("click", () => {
+        if (!latestReports.length) {
+          addMessage("system", "当前还没有报告可打开，先生成一份日报。", { asHtml: false });
+          return;
+        }
+        window.open(getReportHtmlUrl(latestReports[0].name), "_blank", "noopener");
+      });
+    }
+
+    function setupSessionActions() {
+      endSessionButton.addEventListener("click", endSession);
+    }
+
+    function autoResize() {
+      inputEl.style.height = "auto";
+      inputEl.style.height = `${Math.min(inputEl.scrollHeight, 150)}px`;
+    }
+
+    function setSending(isSending) {
+      sendButton.disabled = isSending;
+      sendButton.textContent = isSending ? "发送中" : "发送";
+    }
+
+    function addMessage(role, text, options = {}) {
+      const item = document.createElement("article");
+      item.className = `message ${role}`;
+
+      if (role !== "system") {
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = role === "user" ? "You" : "Agent";
+        item.appendChild(label);
+      }
+
+      const body = document.createElement("div");
+      if (options.asHtml) {
+        body.innerHTML = text;
+      } else {
+        body.textContent = text;
+      }
+      item.appendChild(body);
+      messagesEl.appendChild(item);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return item;
+    }
+
+    function addTypingIndicator() {
+      return addMessage("agent", "正在处理", { asHtml: false, typing: true });
+    }
+
+    function updateTypingIndicator(el, finalText) {
+      const body = el.lastElementChild;
+      body.innerHTML = enhanceReply(finalText);
+      body.classList.remove("typing");
+    }
+
+    async function sendMessage() {
+      const message = inputEl.value.trim();
+      if (!message) {
+        return;
+      }
+
+      addMessage("user", message, { asHtml: false });
+      inputEl.value = "";
+      autoResize();
+      setSending(true);
+
+      const pending = addMessage("agent", "正在处理", { asHtml: false });
+      pending.querySelector("div:last-child").classList.add("typing");
+
+      try {
+        const reply = socketReady ? await sendViaWebSocket(message) : await sendViaHttp(message);
+        updateTypingIndicator(pending, reply);
+        await loadReports();
+      } catch (error) {
+        pending.remove();
+        addMessage("system", `请求失败：${error.message}`, { asHtml: false });
+      } finally {
+        setSending(false);
+      }
+    }
+
+    async function endSession() {
+      const previousSessionId = sessionId;
+      endSessionButton.disabled = true;
+      closeSocket(false);
+      transportStatusEl.textContent = "切换中";
+
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(previousSessionId)}`, {
+          method: "DELETE",
+        });
+        if (!response.ok && response.status !== 404) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+      } catch (error) {
+        addMessage("system", `结束旧会话时出现提示：${error.message}` , { asHtml: false });
+      }
+
+      const nextSessionId = createSessionId();
+      updateSessionId(nextSessionId);
+      renderSessionIntro(false, "已经为你清空当前对话，你可以直接开始新的提问。\n\n生成完成后，下方会出现可点开的 HTML 报告入口。");
+      connectWebSocket();
+      setSending(false);
+      endSessionButton.disabled = false;
+      inputEl.focus();
+    }
+
+    function closeSocket(updateStatus) {
+      const currentSocket = socket;
+      socket = null;
+      socketReady = false;
+      if (updateStatus) {
+        transportStatusEl.textContent = "普通模式";
+      }
+      if (currentSocket && (currentSocket.readyState === WebSocket.OPEN || currentSocket.readyState === WebSocket.CONNECTING)) {
+        currentSocket.close(1000, "session-reset");
+      }
+    }
+
+    function connectWebSocket() {
+      closeSocket(false);
+      transportStatusEl.textContent = "连接中";
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const currentSessionId = sessionId;
+      const url = `${protocol}//${window.location.host}/ws/chat/${encodeURIComponent(currentSessionId)}`;
+
+      try {
+        socket = new WebSocket(url);
+      } catch (error) {
+        socketReady = false;
+        transportStatusEl.textContent = "普通模式";
+        return;
+      }
+
+      socket.addEventListener("open", () => {
+        if (currentSessionId !== sessionId) {
+          return;
+        }
+        socketReady = true;
+        transportStatusEl.textContent = "已连接";
+      });
+
+      socket.addEventListener("close", () => {
+        if (currentSessionId !== sessionId) {
+          return;
+        }
+        socketReady = false;
+        transportStatusEl.textContent = "普通模式";
+      });
+
+      socket.addEventListener("error", () => {
+        if (currentSessionId !== sessionId) {
+          return;
+        }
+        socketReady = false;
+        transportStatusEl.textContent = "普通模式";
+      });
+    }
+
+    function sendViaWebSocket(message) {
+      return new Promise((resolve, reject) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          sendViaHttp(message).then(resolve).catch(reject);
+          return;
+        }
+
+        const handleMessage = (event) => {
+          socket.removeEventListener("message", handleMessage);
+          resolve(event.data);
+        };
+
+        socket.addEventListener("message", handleMessage, { once: true });
+        socket.send(message);
+      });
+    }
+
+    async function sendViaHttp(message) {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, message }),
+      });
+
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const errorPayload = await response.json();
+          detail = errorPayload.detail || detail;
+        } catch (error) {
+          detail = `HTTP ${response.status}`;
+        }
+        throw new Error(detail);
+      }
+
+      const payload = await response.json();
+      return payload.reply || "服务端未返回内容";
+    }
+
+    async function loadReports() {
+      reportListEl.innerHTML = '<div class="empty">正在读取报告列表...</div>';
+
+      try {
+        const response = await fetch("/api/reports");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        latestReports = Array.isArray(payload.reports) ? payload.reports : [];
+        reportCountEl.textContent = String(latestReports.length);
+        renderReports(latestReports);
+      } catch (error) {
+        reportListEl.innerHTML = `<div class="empty">读取报告失败：${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function renderReports(reports) {
+      if (!reports.length) {
+        reportListEl.innerHTML = '<div class="empty">当前还没有日报。你可以先在左侧发一条“生成今天综合热榜”看看效果。</div>';
+        return;
+      }
+
+      reportListEl.innerHTML = reports.map((report, index) => {
+        const label = index === 0 ? '<div class="report-chip">Latest</div>' : "";
+        return `
+          <a class="report-card" href="${getReportHtmlUrl(report.name)}" target="_blank" rel="noopener">
+            ${label}
+            <strong>${escapeHtml(report.name)}</strong>
+            <div class="report-meta">
+              <span>${formatSize(report.size)}</span>
+              <span>HTML 渲染预览</span>
+            </div>
+          </a>
+        `;
+      }).join("");
+    }
+
+    function enhanceReply(text) {
+      const escaped = escapeHtml(text);
+      const withReportLinks = escaped.replace(/([\w.-]+\.md)/g, (match) => {
+        return `<a href="${getReportHtmlUrl(match)}" target="_blank" rel="noopener">${match}</a>`;
+      });
+      return withReportLinks.replace(/\n/g, "<br>");
+    }
+
+    function getReportHtmlUrl(name) {
+      return `/api/reports/${encodeURIComponent(name)}/html`;
+    }
+
+    function formatSize(size) {
+      if (!Number.isFinite(size)) {
+        return "大小未知";
+      }
+      if (size < 1024) {
+        return `${size} B`;
+      }
+      if (size < 1024 * 1024) {
+        return `${(size / 1024).toFixed(1)} KB`;
+      }
+      return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+  </script>
+</body>
+</html>

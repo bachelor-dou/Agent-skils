@@ -27,7 +27,7 @@ from ..common.config import (
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
 )
-from ..common.db import save_db, update_db_project
+from ..common.db import save_db, update_db_project, get_cached_growth, set_growth_cache
 from ..common.github_api import search_github_repos
 from ..growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
@@ -305,6 +305,7 @@ class CalcGrowthTask(Task):
 
         if growth >= 0:
             update_db_project(db_projects, self.full_name, current_star, self.repo_item)
+            set_growth_cache(db_projects, self.full_name, growth)
             if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
 
@@ -344,7 +345,7 @@ def _submit_growth_tasks(
     growth_ctx: dict,
 ) -> dict:
     """
-    批量增长计算入队：DB 差值法主线程处理，其余提交为 CalcGrowthTask。
+    批量增长计算入队：默认先走 checkpoint/cache/DB 差值，再将剩余提交为 CalcGrowthTask。
 
     growth_ctx 由调用方创建并传入（包含 checkpoint, pending_created_at, db_projects 等共享状态）。
     返回 checkpoint dict。
@@ -352,8 +353,9 @@ def _submit_growth_tasks(
     db_valid = db.get("valid", False)
     db_projects = db.get("projects", {})
     growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
+    force_refresh = bool(growth_ctx.get("force_refresh", False))
 
-    checkpoint = _load_checkpoint()
+    checkpoint = {} if force_refresh else _load_checkpoint()
     growth_ctx["checkpoint"] = checkpoint
 
     pending = {
@@ -361,45 +363,64 @@ def _submit_growth_tasks(
         if fn not in candidate_map
     }
 
-    # 从 checkpoint 恢复
     resumed_count = 0
-    for fn in list(pending.keys()):
-        if fn in checkpoint:
-            cp = checkpoint[fn]
-            growth = cp["growth"]
-            current_star = cp["star"]
-            created_at = pending[fn].get("created_at", "")
-            repo_item = pending[fn]["repo_item"]
-            update_db_project(db_projects, fn, current_star, repo_item)
-            if growth >= growth_threshold:
-                _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
-            del pending[fn]
-            resumed_count += 1
+    if not force_refresh:
+        # 从 checkpoint 恢复
+        for fn in list(pending.keys()):
+            if fn in checkpoint:
+                cp = checkpoint[fn]
+                growth = cp["growth"]
+                current_star = cp["star"]
+                created_at = pending[fn].get("created_at", "")
+                repo_item = pending[fn]["repo_item"]
+                update_db_project(db_projects, fn, current_star, repo_item)
+                if growth >= growth_threshold:
+                    _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
+                del pending[fn]
+                resumed_count += 1
 
-    if resumed_count:
-        logger.info(f"断点续传: 恢复 {resumed_count} 个已计算项目。")
-        save_db(db)
+        if resumed_count:
+            logger.info(f"断点续传: 恢复 {resumed_count} 个已计算项目。")
+            save_db(db)
 
     # DB 差值法：主线程直接处理
     checkpoint_dirty = False
     db_count = 0
+    cache_count = 0
 
-    for full_name in list(pending.keys()):
-        info = pending[full_name]
-        current_star = info["star"]
-        repo_item = info["repo_item"]
-        created_at = info.get("created_at", "")
+    if not force_refresh:
+        for full_name in list(pending.keys()):
+            info = pending[full_name]
+            current_star = info["star"]
+            repo_item = info["repo_item"]
+            created_at = info.get("created_at", "")
 
-        if full_name in db_projects and db_valid:
-            saved_star = db_projects[full_name].get("star", 0)
-            growth = current_star - saved_star
-            update_db_project(db_projects, full_name, current_star, repo_item)
-            checkpoint[full_name] = {"growth": growth, "star": current_star}
-            checkpoint_dirty = True
-            db_count += 1
-            if growth >= growth_threshold:
-                _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
-            del pending[full_name]
+            # 优先：增长缓存（TTL 内有效，跨会话复用）
+            cached_growth = get_cached_growth(db_projects, full_name)
+            if cached_growth is not None:
+                update_db_project(db_projects, full_name, current_star, repo_item)
+                checkpoint[full_name] = {"growth": cached_growth, "star": current_star}
+                checkpoint_dirty = True
+                cache_count += 1
+                if cached_growth >= growth_threshold:
+                    _upsert_candidate(candidate_map, full_name, cached_growth, current_star, created_at, "cache")
+                del pending[full_name]
+                continue
+
+            # 次选：DB 差值法
+            if full_name in db_projects and db_valid:
+                saved_star = db_projects[full_name].get("star", 0)
+                growth = current_star - saved_star
+                update_db_project(db_projects, full_name, current_star, repo_item)
+                checkpoint[full_name] = {"growth": growth, "star": current_star}
+                checkpoint_dirty = True
+                db_count += 1
+                set_growth_cache(db_projects, full_name, growth)
+                if growth >= growth_threshold:
+                    _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
+                del pending[full_name]
+    else:
+        logger.info("强制刷新模式：跳过 checkpoint、growth_cache 和 DB 差值，全部走实时增长估算。")
 
     if checkpoint_dirty:
         _save_checkpoint(checkpoint)
@@ -418,8 +439,8 @@ def _submit_growth_tasks(
 
     logger.info(
         f"批量增长计算: {len(pending)} 个任务入队 "
-        f"(DB差值 {db_count}, 续传 {resumed_count}, "
-        f"跳过已入选 {len(raw_repos) - len(pending) - db_count - resumed_count})"
+        f"(缓存命中 {cache_count}, DB差值 {db_count}, 续传 {resumed_count}, "
+        f"跳过已入选 {len(raw_repos) - len(pending) - db_count - cache_count - resumed_count})"
     )
 
     return checkpoint

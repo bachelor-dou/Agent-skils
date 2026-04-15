@@ -35,10 +35,11 @@ LLM_MODEL: str = os.environ.get(
 # ──────────────────────────────────────────────────────────────
 STAR_GROWTH_THRESHOLD: int = 800       # 窗口期 star 增长阈值
 MIN_STAR_FILTER: int = 1000            # 最低 star 过滤线
-HOT_PROJECT_COUNT: int = 80            # 最终热门项目输出数量
-TIME_WINDOW_DAYS: int = 10             # 时间窗口（天）
+HOT_PROJECT_COUNT: int = 100           # 最终热门项目输出数量（上限，有几个出几个）
+TIME_WINDOW_DAYS: int = 7              # 时间窗口（天）
 NEW_PROJECT_DAYS: int = 45             # 新项目判定窗口（创建时间距今 <= 45 天视为新项目）
-DATA_EXPIRE_DAYS: int = 11             # DB 数据过期判定天数（必须 > TIME_WINDOW_DAYS）
+DATA_EXPIRE_DAYS: int = TIME_WINDOW_DAYS + 1  # DB 数据过期判定天数（必须 > TIME_WINDOW_DAYS）
+GROWTH_CACHE_TTL_HOURS: int = 36       # 增长缓存有效期（小时），跨会话复用
 
 # ──────────────────────────────────────────────────────────────
 # Star 范围扫描（补充关键词搜索未覆盖的热门仓库）

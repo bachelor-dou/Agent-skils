@@ -30,7 +30,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH
+from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH, GROWTH_CACHE_TTL_HOURS
 
 logger = logging.getLogger("discover_hot")
 
@@ -145,3 +145,52 @@ def update_db_project(
             "topics": topics,
             "readme_url": readme_url,
         }
+
+
+# ══════════════════════════════════════════════════════════════
+# 增长缓存（跨会话复用，避免重复 API 调用）
+# ══════════════════════════════════════════════════════════════
+
+
+def get_cached_growth(
+    db_projects: dict, full_name: str,
+    ttl_hours: int = GROWTH_CACHE_TTL_HOURS,
+) -> int | None:
+    """
+    获取缓存的增长值。在 TTL 内返回缓存的 growth，否则返回 None。
+    """
+    project = db_projects.get(full_name, {})
+    gc = project.get("growth_cache")
+    if not gc:
+        return None
+    computed_at = gc.get("computed_at", "")
+    if not computed_at:
+        return None
+    try:
+        ts = datetime.strptime(computed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        hours_old = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+        if hours_old < ttl_hours:
+            return gc.get("growth")
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def set_growth_cache(
+    db_projects: dict, full_name: str,
+    growth: int, score: float | None = None,
+) -> None:
+    """
+    将增长值（及可选的评分）写入 DB 缓存。
+    """
+    if full_name not in db_projects:
+        return
+    cache = {
+        "growth": growth,
+        "computed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if score is not None:
+        cache["score"] = score
+    db_projects[full_name]["growth_cache"] = cache

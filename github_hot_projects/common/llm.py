@@ -63,6 +63,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
         "max_tokens": 1024,
+        "enable_thinking": False,
     }
 
     for attempt in range(3):
