@@ -67,7 +67,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
 
     for attempt in range(3):
         try:
-            resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=60)
+            resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=180)
             if resp.status_code == 200:
                 try:
                     data = resp.json()
