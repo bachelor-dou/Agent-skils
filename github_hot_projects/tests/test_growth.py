@@ -126,3 +126,24 @@ class TestGrowthSampling:
                 result = estimate_by_sampling(mock_token_mgr, "org", "repo")
                 # 外推结果应 > 200（因为采样只覆盖 3 天但窗口是 7 天）
                 assert result > 200
+
+    def test_sampling_respects_configured_batch_limit(self, mock_token_mgr):
+        """采样批次数应受配置上限约束，避免重新落回硬编码。"""
+        from github_hot_projects.growth_estimator import estimate_by_sampling
+
+        now = datetime.now(timezone.utc)
+        batch = [now - timedelta(minutes=i) for i in range(100)]
+        batch.sort()
+        calls = []
+
+        def mock_graphql(*args, **kwargs):
+            calls.append(kwargs.get("before"))
+            return batch, f"cursor{len(calls)}"
+
+        with patch("github_hot_projects.growth_estimator.MAX_GRAPHQL_SAMPLING_BATCHES", 3):
+            with patch("github_hot_projects.growth_estimator.graphql_stargazers_batch", side_effect=mock_graphql):
+                with patch("github_hot_projects.growth_estimator.time.sleep"):
+                    result = estimate_by_sampling(mock_token_mgr, "org", "repo")
+
+        assert result > 0
+        assert len(calls) == 3

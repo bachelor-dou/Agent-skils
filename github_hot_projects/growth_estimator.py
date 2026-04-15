@@ -5,7 +5,7 @@ Star 增长估算器
 
   A. DB 差值法   — DB 有效 + 已有仓库 → current_star - db_star（0 次请求）
   B. REST 二分法 — 新仓库/DB 无效 → stargazers 分页二分查找窗口边界（~5-10 次请求）
-  C. 采样外推法  — REST 返回 422 → GraphQL 采 2000 条 + 分段加权速率外推（~20 次请求）
+    C. 采样外推法  — REST 返回 422 → GraphQL 采 3000 条 + 分段加权速率外推（~30 次请求）
 
 本模块实现路径 B 和 C。路径 A 在 tasks.py 的 _submit_growth_tasks 中直接计算。
 """
@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from .common.config import (
+    MAX_GRAPHQL_SAMPLING_BATCHES,
     MAX_BINARY_SEARCH_DEPTH,
     STAR_GROWTH_THRESHOLD,
     TIME_WINDOW_DAYS,
@@ -162,21 +163,21 @@ def estimate_by_sampling(
     token_idx: int = 0,
 ) -> int:
     """
-    采样外推法（增强版）：多批次 GraphQL 游标翻页采集 ~2000 条 star，
+    采样外推法（增强版）：多批次 GraphQL 游标翻页采集 ~3000 条 star，
     分段计算速率并识别加速趋势，外推窗口期增量。
 
     用于 REST 分页无法覆盖的超大仓库。
 
     优化策略：
-      1. 多批次采集：GraphQL last+before，最多 20 批 × 100 条 = 2000 条
-      2. 提前中断：采样跨越窗口边界（cutoff）时停止
-      3. 分段速率：按 100 条一段，越新的段权重越高（线性加权 1,2,...,n）
-      4. 外推：rate × window_seconds = 整个窗口的预估增长
+            1. 多批次采集：GraphQL last+before，最多 30 批 × 100 条 = 3000 条
+            2. 提前中断：采样跨越窗口边界（cutoff）时停止
+            3. 分段速率：按 100 条一段，越新的段权重越高（线性加权 1,2,...,n）
+            4. 外推：rate × window_seconds = 整个窗口的预估增长
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=TIME_WINDOW_DAYS)
     all_timestamps: list[datetime] = []
     cursor: str | None = None
-    max_batches = 20
+    max_batches = MAX_GRAPHQL_SAMPLING_BATCHES
 
     for _ in range(max_batches):
         ts_batch, cursor = graphql_stargazers_batch(

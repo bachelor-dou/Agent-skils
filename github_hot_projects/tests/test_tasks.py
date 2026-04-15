@@ -91,6 +91,42 @@ class TestKeywordSearchTask:
         assert "x/y" in raw_repos
 
 
+class TestScanSegmentTask:
+    def test_retry_pages_do_not_rescan_success_pages(self, mock_token_mgr):
+        from github_hot_projects.tasks.task import ScanSegmentTask
+
+        calls = []
+
+        def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
+            calls.append(page)
+            if page == 2:
+                return [{
+                    "full_name": "org/repo-2",
+                    "stargazers_count": 2000,
+                    "description": "repo2",
+                    "language": "Python",
+                    "created_at": "2026-04-01T00:00:00Z",
+                }]
+            return []
+
+        with patch("github_hot_projects.tasks.task.search_github_repos", side_effect=fake_search):
+            with patch("github_hot_projects.tasks.task.time.sleep"):
+                task = ScanSegmentTask(
+                    seg_idx=1,
+                    low=100,
+                    high=200,
+                    total_segments=1,
+                    page_numbers=[2],
+                    retry_round=1,
+                    _raw_repos={},
+                    _token_mgr=mock_token_mgr,
+                )
+                result = task.execute(token_idx=0)
+
+        assert len(result) == 1
+        assert calls == [2]
+
+
 # ──────────────────────────────────────────────────────────────
 # 3. CalcGrowthTask
 # ──────────────────────────────────────────────────────────────
@@ -218,6 +254,44 @@ class TestWorkerPool:
             assert len(error_received) == 1
             assert isinstance(error_received[0], ValueError)
             assert ok_task.done is True
+        finally:
+            pool.shutdown()
+
+    def test_fatal_error_requeues_to_other_worker(self):
+        """FatalWorkerError 会让当前 worker 退出，并把任务回退给其他 worker。"""
+        from github_hot_projects.common.exceptions import FatalWorkerError
+        from github_hot_projects.tasks.task_base import Task
+        from github_hot_projects.tasks.worker_pool import TokenWorkerPool
+
+        execution_workers = []
+
+        @dataclass
+        class FatalOnceTask(Task):
+            needs_token: bool = True
+            attempts: int = 0
+            result_value: Any = None
+
+            def execute(self, token_idx=None):
+                execution_workers.append(token_idx)
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise FatalWorkerError("token broken")
+                return token_idx
+
+            def on_result(self, result):
+                self.result_value = result
+
+        pool = TokenWorkerPool(["token1", "token2"])
+        pool.start()
+        try:
+            task = FatalOnceTask()
+            pool.submit(task)
+            assert pool.wait_all_done(timeout=5.0) is True
+            pool.drain_results()
+            assert task.attempts == 2
+            assert task.result_value is not None
+            assert execution_workers == [execution_workers[0], task.result_value]
+            assert execution_workers[0] != execution_workers[1]
         finally:
             pool.shutdown()
 

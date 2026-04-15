@@ -131,9 +131,10 @@ class KeywordSearchTask(Task):
     _raw_repos: dict = field(default=None, repr=False)
 
     def execute(self, token_idx: int | None) -> list[dict]:
+        worker_suffix = f", worker={token_idx}" if token_idx is not None else ""
         logger.info(
             f"[{self.keyword_idx}/{self.total_keywords}] 搜索: "
-            f"'{self.keyword}' (类别: {self.category})"
+            f"'{self.keyword}' (类别: {self.category}{worker_suffix})"
         )
         collected: list[dict] = []
         min_stars = self.min_stars_override if self.min_stars_override else MIN_STAR_FILTER
@@ -143,7 +144,7 @@ class KeywordSearchTask(Task):
 
         for page in range(1, self.max_pages + 1):
             items = search_github_repos(
-                self._token_mgr, query, token_idx, page=page
+                self._token_mgr, query, token_idx, page=page, worker_idx=token_idx
             )
             if items is None:
                 continue
@@ -193,25 +194,46 @@ class ScanSegmentTask(Task):
     total_segments: int = 0
     created_after: str = ""
     min_stars_override: int = 0
+    page_numbers: list[int] | None = None
+    retry_round: int = 0
     _raw_repos: dict = field(default=None, repr=False)
+    failed_pages: list[int] = field(default_factory=list, init=False, repr=False)
 
     def execute(self, token_idx: int | None) -> list[dict]:
+        self.failed_pages = []
         query = f"stars:{self.low}..{self.high}"
         if self.created_after:
             query = f"{query} created:>={self.created_after}"
-        logger.info(f"  子区间 {self.seg_idx}/{self.total_segments}: {query}")
+        worker_suffix = f" (worker={token_idx})" if token_idx is not None else ""
+        retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
+        page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
+        logger.info(
+            f"  子区间 {self.seg_idx}/{self.total_segments}: "
+            f"{query}{worker_suffix}{retry_suffix}{page_suffix}"
+        )
         collected: list[dict] = []
         min_stars = self.min_stars_override if self.min_stars_override else MIN_STAR_FILTER
+        pages = self.page_numbers if self.page_numbers is not None else list(range(1, 11))
+        stop_on_empty = self.page_numbers is None
 
-        for page in range(1, 11):
+        for page in pages:
             items = search_github_repos(
                 self._token_mgr, query, token_idx,
-                page=page, sort="updated", auto_star_filter=False,
+                page=page, sort="updated", auto_star_filter=False, worker_idx=token_idx,
             )
             if items is None:
+                self.failed_pages.append(page)
+                worker_suffix = f", worker={token_idx}" if token_idx is not None else ""
+                failure_action = "加入补偿队列" if self.retry_round == 0 else "补偿后仍失败"
+                logger.warning(
+                    f"  子区间 {self.seg_idx}/{self.total_segments}: {query}, "
+                    f"page={page}{worker_suffix} 连续失败，{failure_action}。"
+                )
                 continue
             if not items:
-                break
+                if stop_on_empty:
+                    break
+                continue
             for repo_item in items:
                 full_name = repo_item.get("full_name", "")
                 if not full_name:
@@ -242,7 +264,9 @@ class ScanSegmentTask(Task):
                 }
 
     def __str__(self) -> str:
-        return f"ScanSegment({self.low}..{self.high})"
+        pages = f", pages={self.page_numbers}" if self.page_numbers is not None else ""
+        retry = f", retry={self.retry_round}" if self.retry_round else ""
+        return f"ScanSegment({self.low}..{self.high}{pages}{retry})"
 
 
 @dataclass

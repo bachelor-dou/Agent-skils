@@ -63,6 +63,7 @@ DEFAULT_SCORE_MODE: str = "comprehensive"
 # ──────────────────────────────────────────────────────────────
 MAX_BINARY_SEARCH_DEPTH: int = 20      # 二分法查 stargazers 最大深度
 SEARCH_REQUEST_INTERVAL: float = 2.5   # Search API 请求最小间隔（秒）
+MAX_GRAPHQL_SAMPLING_BATCHES: int = 30  # GraphQL 采样外推最多翻页批次数（30×100≈3000 条）
 
 # ──────────────────────────────────────────────────────────────
 # 路径配置（基于包根目录 github_hot_projects/）

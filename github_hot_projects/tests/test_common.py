@@ -194,6 +194,26 @@ class TestGitHubAPI:
             with pytest.raises(TokenInvalidError):
                 search_github_repos(mock_token_mgr, "test", token_idx=0)
 
+    def test_search_github_repos_request_exception_returns_none(self, mock_token_mgr):
+        import requests
+
+        with patch(
+            "github_hot_projects.common.github_api.requests.get",
+            side_effect=requests.RequestException("network down"),
+        ) as mock_get:
+            with patch("github_hot_projects.common.github_api.time.sleep"):
+                from github_hot_projects.common.github_api import search_github_repos
+
+                result = search_github_repos(
+                    mock_token_mgr,
+                    "test",
+                    token_idx=0,
+                    worker_idx=2,
+                )
+
+        assert result is None
+        assert mock_get.call_count == 3
+
     def test_get_stargazers_page_success(self, mock_token_mgr):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

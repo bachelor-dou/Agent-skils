@@ -131,6 +131,47 @@ class TestToolFetchTrending:
             assert result["repos"][0]["full_name"] == "trending-org/trending-repo"
 
 
+class TestToolScanStarRange:
+    def test_retries_failed_pages_only(self, mock_token_mgr):
+        from github_hot_projects.agent_tools import tool_scan_star_range
+
+        calls = []
+        page2_attempts = [0]
+
+        def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
+            calls.append((query, page, token_idx, kwargs.get("worker_idx")))
+            if page == 1:
+                return [{
+                    "full_name": "org/repo-1",
+                    "stargazers_count": 150,
+                    "description": "repo1",
+                    "language": "Python",
+                    "created_at": "2026-04-01T00:00:00Z",
+                }]
+            if page == 2:
+                page2_attempts[0] += 1
+                if page2_attempts[0] == 1:
+                    return None
+                return [{
+                    "full_name": "org/repo-2",
+                    "stargazers_count": 160,
+                    "description": "repo2",
+                    "language": "Go",
+                    "created_at": "2026-04-02T00:00:00Z",
+                }]
+            return []
+
+        with patch("github_hot_projects.agent_tools.auto_split_star_range", return_value=[(100, 200)]):
+            with patch("github_hot_projects.tasks.task.search_github_repos", side_effect=fake_search):
+                with patch("github_hot_projects.tasks.task.time.sleep"):
+                    result = tool_scan_star_range(mock_token_mgr, min_star=100, max_star=200)
+
+        assert result["total"] == 2
+        assert page2_attempts[0] == 2
+        assert [page for _, page, _, _ in calls].count(1) == 1
+        assert [page for _, page, _, _ in calls].count(2) == 2
+
+
 class TestToolGetDBInfo:
     def test_db_info_overview(self):
         """tool_get_db_info 无 repo 参数返回概览。"""

@@ -201,8 +201,9 @@ def tool_scan_star_range(
     pool = TokenWorkerPool(token_mgr.tokens)
     pool.start()
     try:
+        segment_tasks: list[ScanSegmentTask] = []
         for seg_idx, (low, high) in enumerate(segments, 1):
-            pool.submit(ScanSegmentTask(
+            task = ScanSegmentTask(
                 _token_mgr=token_mgr,
                 seg_idx=seg_idx,
                 low=low,
@@ -211,9 +212,56 @@ def tool_scan_star_range(
                 created_after=created_after,
                 min_stars_override=min_star_filter,
                 _raw_repos=raw_repos,
-            ))
+            )
+            segment_tasks.append(task)
+            pool.submit(task)
         pool.wait_all_done()
         pool.drain_results()
+
+        retry_tasks: list[ScanSegmentTask] = []
+        retried_pages = 0
+        for task in segment_tasks:
+            if not task.failed_pages:
+                continue
+            retried_pages += len(task.failed_pages)
+            retry_task = ScanSegmentTask(
+                _token_mgr=token_mgr,
+                seg_idx=task.seg_idx,
+                low=task.low,
+                high=task.high,
+                total_segments=task.total_segments,
+                created_after=task.created_after,
+                min_stars_override=task.min_stars_override,
+                page_numbers=list(task.failed_pages),
+                retry_round=1,
+                _raw_repos=raw_repos,
+            )
+            retry_tasks.append(retry_task)
+
+        if retry_tasks:
+            logger.warning(
+                f"区间扫描发现 {retried_pages} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务。"
+            )
+            for task in retry_tasks:
+                pool.submit(task)
+            pool.wait_all_done()
+            pool.drain_results()
+
+            final_failed = [
+                (task.low, task.high, page)
+                for task in retry_tasks
+                for page in task.failed_pages
+            ]
+            if final_failed:
+                failed_preview = ", ".join(
+                    f"stars:{low}..{high}/page={page}"
+                    for low, high, page in final_failed[:10]
+                )
+                if len(final_failed) > 10:
+                    failed_preview += ", ..."
+                logger.error(
+                    f"页级补偿后仍有 {len(final_failed)} 个失败页，结果可能不完整: {failed_preview}"
+                )
     finally:
         pool.shutdown()
 

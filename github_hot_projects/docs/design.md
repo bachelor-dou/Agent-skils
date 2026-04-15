@@ -148,7 +148,7 @@ DB有效(≤DATA_EXPIRE_DAYS) 且 仓库存在 且 star非空?
                           │
                           ▼
                      GraphQL采样外推
-                     游标翻页采集≤2000条时间戳
+                     游标翻页采集≤3000条时间戳
                           │
                      跨越窗口边界?
                      ├─ 是 → 精确计数 → 增长值
@@ -369,7 +369,7 @@ f-string 模板，运行时渲染 config 常量值。包含角色定义、可用
 - **C2**: Search 30 次/分钟 → `SEARCH_REQUEST_INTERVAL=2.5s`
 - **C3**: Search 结果上限 1000 条 → auto_split_star_range 递归分段 ≤800
 - **C4**: Stargazers 页码上限 ~400 页 → star>40k 回退 GraphQL
-- **C5**: GraphQL 节点 500k/小时 → 每仓库最多 2000 条
+- **C5**: GraphQL 节点 500k/小时 → 每仓库最多 3000 条
 
 ### 线程安全不变量
 - **T1**: Worker 1:1 绑定 Token，不跨线程

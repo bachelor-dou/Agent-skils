@@ -62,6 +62,7 @@ def search_github_repos(
     sort: str = "stars",
     order: str = "desc",
     auto_star_filter: bool = True,
+    worker_idx: int | None = None,
 ) -> list[dict] | None:
     """
     调用 GitHub Search API 搜索仓库（3 次重试）。
@@ -77,8 +78,10 @@ def search_github_repos(
     url = "https://api.github.com/search/repositories"
     params = {"q": q, "sort": sort, "order": order, "per_page": per_page, "page": page}
     headers = token_mgr.get_rest_headers(token_idx)
+    caller = f"worker={worker_idx}, token={token_idx}" if worker_idx is not None else f"token={token_idx}"
 
     for attempt in range(3):
+        attempt_no = attempt + 1
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=60)
             _check_response(resp, token_idx)
@@ -86,21 +89,34 @@ def search_github_repos(
                 try:
                     return resp.json().get("items", [])
                 except (ValueError, KeyError):
-                    logger.error(f"搜索响应 JSON 解析失败: query='{q}', page={page}, attempt={attempt + 1}")
+                    logger.error(
+                        f"搜索响应 JSON 解析失败: query='{q}', {caller}, "
+                        f"page={page}, attempt={attempt_no}/3"
+                    )
                     continue
             elif resp.status_code == 422:
-                logger.warning(f"搜索参数无效: query='{q}', page={page}, status=422")
+                logger.warning(
+                    f"搜索参数无效: query='{q}', {caller}, page={page}, status=422"
+                )
                 return []
             else:
-                logger.warning(f"搜索异常: query='{q}', status={resp.status_code}")
+                logger.warning(
+                    f"搜索异常: query='{q}', {caller}, page={page}, "
+                    f"attempt={attempt_no}/3, status={resp.status_code}"
+                )
                 time.sleep(5 * 2 ** attempt)
         except (TokenInvalidError, RateLimitError):
             raise
         except requests.RequestException as e:
-            logger.error(f"搜索请求异常: query='{q}', error={e}")
+            logger.error(
+                f"搜索请求异常: query='{q}', {caller}, page={page}, "
+                f"attempt={attempt_no}/3, error={e}"
+            )
             time.sleep(5 * 2 ** attempt)
 
-    logger.warning(f"搜索 '{q}' page={page} 经 3 次重试仍失败，跳过。")
+    logger.warning(
+        f"搜索 '{q}' {caller}, page={page} 经 3 次重试仍失败，返回 None 由调用方决定后续处理。"
+    )
     return None
 
 
