@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from .common.config import (
     MIN_STAR_FILTER,
+    NEW_PROJECT_DAYS,
     REPORT_DIR,
     STAR_GROWTH_THRESHOLD,
     TIME_WINDOW_DAYS,
@@ -74,13 +75,17 @@ def step3_generate_report(
             else:
                 desc_results.setdefault(full_name, "")
 
+    hot_new_window = new_project_days if new_project_days is not None else NEW_PROJECT_DAYS
     lines: list[str] = [f"# {title_prefix} — {today}\n"]
-    lines.append(
-        f"> 共 {len(top_projects)} 个项目 | "
-        f"窗口期: {TIME_WINDOW_DAYS} 天 | "
-        f"增长阈值: >={STAR_GROWTH_THRESHOLD} stars | "
-        f"最低 star: >={MIN_STAR_FILTER}\n"
-    )
+    summary_parts = [
+        f"共 {len(top_projects)} 个项目",
+        f"增长统计窗口: {TIME_WINDOW_DAYS} 天",
+        f"增长阈值: >={STAR_GROWTH_THRESHOLD} stars",
+        f"最低 star: >={MIN_STAR_FILTER}",
+    ]
+    if mode == "hot_new":
+        summary_parts.insert(1, f"新项目创建窗口: <= {hot_new_window} 天")
+    lines.append(f"> {' | '.join(summary_parts)}\n")
 
     for idx, (full_name, info) in enumerate(top_projects, 1):
         growth = info["growth"]
@@ -88,7 +93,9 @@ def step3_generate_report(
         html_url = f"https://github.com/{full_name}"
         detailed_desc = desc_results.get(full_name, "")
 
-        lines.append(f"## {idx}. {full_name}（+{growth}，total {star}）\n")
+        lines.append(
+            f"## {idx}. {full_name}（+{growth}，⭐{star}） <button class=\"repo-copy-btn repo-copy-btn--title\" type=\"button\" data-repo=\"{full_name}\">复制</button>\n"
+        )
         lines.append(f"链接: {html_url}\n")
         lines.append(f"{detailed_desc}\n")
         lines.append("---\n")

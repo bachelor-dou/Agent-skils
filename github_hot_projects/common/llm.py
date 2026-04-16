@@ -95,7 +95,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
     return ""
 
 
-def batch_condense_descriptions(repos: list[dict], max_chars: int = 60) -> list[str]:
+def batch_condense_descriptions(repos: list[dict], max_chars: int = 300) -> list[str]:
     """
     用 LLM 批量浓缩项目描述，每个不超过 max_chars 字。
 
@@ -163,7 +163,10 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 60) -> list[
                             for i, r in enumerate(result):
                                 if not r:
                                     result[i] = repos[i].get("description", "")[:max_chars]
-                            logger.info(f"LLM 批量浓缩完成: {filled}/{len(repos)} 条")
+                            logger.info(
+                                f"LLM 批量浓缩项目简介完成: 成功解析 {filled}/{len(repos)} 条，"
+                                "未解析项已回退为原描述截断"
+                            )
                             return result
             logger.warning(f"LLM 批量浓缩失败: status={resp.status_code}, attempt={attempt+1}")
         except requests.RequestException as e:

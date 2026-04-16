@@ -27,11 +27,10 @@ cd /root/code/Agent-skils
 nohup python -m github_hot_projects >> github_hot_projects/logs/server.log 2>&1 &
 ```
 
-或：
+修改代码重启：
 
 ```bash
-cd /root/code/Agent-skils
-nohup uvicorn github_hot_projects.api_server:app --host 0.0.0.0 --port 8000 >> github_hot_projects/logs/server.log 2>&1 &
+pkill -f "python -m github_hot_projects" || true; cd /root/code/Agent-skils && nohup python -m github_hot_projects >> github_hot_projects/logs/server.log 2>&1 &
 ```
 
 ### 4. 查看日志 / 停止服务

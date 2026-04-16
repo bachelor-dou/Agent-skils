@@ -125,14 +125,34 @@ h1 {
 }
 
 .status-strip {
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 6px 18px;
   border-bottom: 1px solid var(--border);
   background: rgba(255, 250, 243, 0.9);
   font-size: 12px;
   color: var(--muted);
+}
+
+.status-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.status-cluster--report {
+  gap: 10px;
+}
+
+.status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 2px;
 }
 
 .status-dot {
@@ -169,6 +189,173 @@ h1 {
   color: var(--border);
   font-size: 14px;
   line-height: 1;
+}
+
+.status-help-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(23, 50, 77, 0.16);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--brand);
+  box-shadow: 0 4px 12px rgba(23, 50, 77, 0.08);
+  cursor: pointer;
+  flex-shrink: 0;
+  pointer-events: auto;
+  touch-action: manipulation;
+  user-select: none;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.status-help-button:hover {
+  transform: translateY(-1px);
+  background: var(--accent-soft);
+  box-shadow: 0 10px 22px rgba(23, 50, 77, 0.12);
+}
+
+.status-help-button:focus-visible,
+.usage-help-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(47, 91, 130, 0.14);
+}
+
+.usage-help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(19, 31, 43, 0.32);
+  backdrop-filter: blur(8px);
+}
+
+.usage-help-overlay[hidden] {
+  display: none !important;
+}
+
+.usage-help-card {
+  width: min(920px, 100%);
+  max-height: min(88vh, 900px);
+  overflow: auto;
+  padding: 22px;
+  border-radius: 24px;
+  border: 1px solid rgba(23, 50, 77, 0.12);
+  background:
+    radial-gradient(circle at top right, rgba(248, 216, 176, 0.34), transparent 26%),
+    linear-gradient(180deg, rgba(255, 250, 243, 0.98), rgba(250, 245, 237, 0.98));
+  box-shadow: 0 24px 60px rgba(20, 33, 48, 0.2);
+}
+
+.usage-help-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.usage-help-eyebrow {
+  margin: 0 0 8px;
+  color: var(--brand-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.usage-help-card h2 {
+  margin: 0;
+  color: var(--brand);
+  font-size: clamp(22px, 3vw, 30px);
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+.usage-help-close {
+  min-width: 72px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(23, 50, 77, 0.12);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--brand);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.usage-help-summary,
+.usage-help-note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
+  font-size: 14px;
+}
+
+.usage-help-note {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(248, 216, 176, 0.28);
+  color: var(--brand);
+}
+
+.usage-help-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.usage-help-item {
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(23, 50, 77, 0.1);
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.usage-help-item h3 {
+  margin: 0 0 10px;
+  color: var(--brand);
+  font-size: 16px;
+}
+
+.usage-help-item p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.usage-help-examples {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(23, 50, 77, 0.05);
+}
+
+.usage-help-examples strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--brand);
+  font-size: 14px;
+}
+
+.usage-help-examples p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.65;
 }
 
 .messages {
@@ -586,7 +773,20 @@ textarea:focus {
 
   .status-strip {
     padding: 4px 12px;
-    gap: 5px;
+    gap: 6px;
+  }
+
+  .status-cluster {
+    gap: 6px;
+  }
+
+  .status-cluster--report {
+    gap: 8px;
+  }
+
+  .status-actions {
+    gap: 8px;
+    margin-left: 1px;
   }
 
   .status-dot {
@@ -595,6 +795,12 @@ textarea:focus {
   }
 
   .status-text {
+    font-size: 11px;
+  }
+
+  .status-help-button {
+    width: 22px;
+    height: 22px;
     font-size: 11px;
   }
 
@@ -702,6 +908,35 @@ textarea:focus {
   .report-list {
     padding: 12px;
   }
+
+  .usage-help-overlay {
+    padding: 10px;
+  }
+
+  .usage-help-card {
+    max-height: min(92vh, 900px);
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .usage-help-head {
+    align-items: center;
+  }
+
+  .usage-help-close {
+    min-width: 62px;
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 12px;
+  }
+
+  .usage-help-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .usage-help-item {
+    padding: 14px;
+  }
 }
 
 .message.agent .md-body h1,
@@ -774,6 +1009,7 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  touch-action: pinch-zoom;
 }
 
 .fullscreen-overlay[hidden] {
@@ -816,6 +1052,7 @@ textarea:focus {
   line-height: 1.8;
   color: var(--ink);
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 .fullscreen-body h1,

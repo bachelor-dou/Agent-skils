@@ -281,6 +281,34 @@ def _render_report_html(name: str, markdown_text: str) -> str:
         .content hr {{ border: 0; border-top: 1px dashed rgba(24, 52, 78, 0.18); margin: 28px 0; }}
         .content a {{ color: var(--brand); font-weight: 700; text-decoration: none; overflow-wrap: break-word; word-break: normal; }}
         .content a:hover {{ text-decoration: underline; }}
+        .content .repo-copy-btn {{
+            appearance: none;
+            border: 1px solid rgba(24, 52, 78, 0.18);
+            background: rgba(24, 52, 78, 0.04);
+            color: var(--brand);
+            font-size: 12px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 999px;
+            margin-left: 8px;
+            cursor: pointer;
+            vertical-align: middle;
+            transition: background 160ms ease, border-color 160ms ease;
+        }}
+        .content .repo-copy-btn:hover {{
+            background: rgba(24, 52, 78, 0.1);
+            border-color: rgba(24, 52, 78, 0.28);
+        }}
+        .content .repo-copy-btn.copied {{
+            background: rgba(47, 109, 68, 0.14);
+            border-color: rgba(47, 109, 68, 0.36);
+            color: #1f6e45;
+        }}
+        .content .repo-copy-btn--title {{
+            font-size: 11px;
+            padding: 3px 9px;
+            margin-left: 10px;
+        }}
         .content p a, .content li a, .content td a, .content th a {{ display: inline-block; max-width: 100%; overflow-wrap: anywhere; }}
         .content li, .content td, .content th {{ word-break: normal; overflow-wrap: break-word; }}
         .content code {{
@@ -414,6 +442,79 @@ def _render_report_html(name: str, markdown_text: str) -> str:
 
             window.addEventListener("hashchange", syncFromHash);
             syncFromHash();
+        }})();
+
+        (function setupRepoCopyButtons() {{
+            const container = document.querySelector(".content");
+            if (!container) {{
+                return;
+            }}
+
+            function attachTitleButtonsForLegacyReports() {{
+                const titleSelector = "h2";
+                const repoPattern = /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/;
+                container.querySelectorAll(titleSelector).forEach(function(heading) {{
+                    const headingText = (heading.textContent || "").trim();
+                    const match = headingText.match(repoPattern);
+                    if (!match) {{
+                        return;
+                    }}
+                    if (heading.querySelector(".repo-copy-btn")) {{
+                        return;
+                    }}
+
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.className = "repo-copy-btn repo-copy-btn--title";
+                    button.setAttribute("data-repo", match[1]);
+                    button.textContent = "复制";
+                    heading.appendChild(document.createTextNode(" "));
+                    heading.appendChild(button);
+                }});
+            }}
+
+            async function copyText(text) {{
+                if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {{
+                    await navigator.clipboard.writeText(text);
+                    return;
+                }}
+
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.setAttribute("readonly", "readonly");
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                textarea.style.pointerEvents = "none";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+            }}
+
+            attachTitleButtonsForLegacyReports();
+
+            container.querySelectorAll(".repo-copy-btn").forEach(function(button) {{
+                button.addEventListener("click", async function() {{
+                    const repo = button.getAttribute("data-repo") || "";
+                    if (!repo) {{
+                        return;
+                    }}
+
+                    const originalText = button.textContent;
+                    try {{
+                        await copyText(repo);
+                        button.textContent = "已复制";
+                        button.classList.add("copied");
+                    }} catch (error) {{
+                        button.textContent = "复制失败";
+                    }}
+
+                    window.setTimeout(function() {{
+                        button.textContent = originalText;
+                        button.classList.remove("copied");
+                    }}, 1400);
+                }});
+            }});
         }})();
     </script>
 </body>
