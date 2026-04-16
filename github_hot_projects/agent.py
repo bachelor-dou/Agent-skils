@@ -20,6 +20,7 @@ Agent 接收自然语言指令，通过 LLM 自主规划步骤，
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 import requests
@@ -34,6 +35,7 @@ from .common.config import (
     TIME_WINDOW_DAYS,
     STAR_GROWTH_THRESHOLD,
     HOT_PROJECT_COUNT,
+    HOT_NEW_PROJECT_COUNT,
     NEW_PROJECT_DAYS,
 )
 from .agent_tools import (
@@ -349,9 +351,18 @@ class HotProjectAgent:
             if not state.last_candidates:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
             mode = args.get("mode", "comprehensive")
+            requested_top_n = args.get("top_n")
+            if requested_top_n is None:
+                effective_top_n = HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
+            elif mode == "hot_new" and not self._user_explicitly_requested_top_n():
+                # 避免模型在未被用户要求时擅自扩大新项目榜数量。
+                effective_top_n = HOT_NEW_PROJECT_COUNT
+            else:
+                effective_top_n = requested_top_n
+
             result = tool_rank_candidates(
                 state.last_candidates,
-                top_n=args.get("top_n", HOT_PROJECT_COUNT),
+                top_n=effective_top_n,
                 mode=mode,
                 db=state.db,
                 new_project_days=effective_new_project_days,
@@ -373,7 +384,13 @@ class HotProjectAgent:
         elif name == "generate_report":
             if not state.last_ranked:
                 return {"error": "没有排序结果，请先调用 rank_candidates"}
-            result = tool_generate_report(state.last_ranked, state.db, mode=state.last_mode)
+            report_new_project_days = state.last_candidate_new_project_days if state.last_mode == "hot_new" else None
+            result = tool_generate_report(
+                state.last_ranked,
+                state.db,
+                mode=state.last_mode,
+                new_project_days=report_new_project_days,
+            )
             save_db(state.db)
             return result
 
@@ -491,6 +508,23 @@ class HotProjectAgent:
         has_ranking_intent = any(k in latest_user for k in ["热榜", "榜单", "排名", "top", "前"])
         has_github_intent = any(k in latest_user for k in ["github", "社区", "项目"])
         return has_current_time_intent and has_ranking_intent and has_github_intent
+
+    def _user_explicitly_requested_top_n(self) -> bool:
+        """最近一条用户消息是否明确指定了榜单数量。"""
+        latest_user = ""
+        for msg in reversed(self.state.conversation):
+            if msg.get("role") == "user":
+                latest_user = (msg.get("content") or "").lower()
+                break
+
+        if not latest_user:
+            return False
+
+        patterns = [
+            r"(?:top|前)\s*\d+",
+            r"\d+\s*个(?:项目|仓库|结果|条)",
+        ]
+        return any(re.search(p, latest_user) for p in patterns)
 
     @staticmethod
     def _serialize_result(result: dict, max_len: int = 8000) -> str:

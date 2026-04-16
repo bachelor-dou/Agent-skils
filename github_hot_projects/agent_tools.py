@@ -28,6 +28,7 @@ from .common.config import (
     DEFAULT_SCORE_MODE,
     GITHUB_TOKENS,
     HOT_PROJECT_COUNT,
+    HOT_NEW_PROJECT_COUNT,
     MIN_STAR_FILTER,
     NEW_PROJECT_DAYS,
     SEARCH_KEYWORDS,
@@ -527,7 +528,7 @@ def tool_batch_check_growth(
 
 def tool_rank_candidates(
     candidates: dict[str, dict],
-    top_n: int = HOT_PROJECT_COUNT,
+    top_n: int | None = None,
     mode: str = DEFAULT_SCORE_MODE,
     db: dict | None = None,
     new_project_days: int | None = None,
@@ -545,6 +546,9 @@ def tool_rank_candidates(
                           候选池在 batch_check_growth 阶段已按该窗口预筛；
                           与 new_project_days 一致时，排名阶段可直接按增长排序
     """
+    if top_n is None:
+        top_n = HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
+
     top = step2_rank_and_select(
         candidates, mode=mode, db=db,
         new_project_days=new_project_days,
@@ -610,13 +614,19 @@ def tool_generate_report(
     top_projects: list[tuple[str, dict]],
     db: dict,
     mode: str = "comprehensive",
+    new_project_days: int | None = None,
 ) -> dict:
     """
     Tool 7: 生成完整 Markdown 报告。
 
     调用 report.step3_generate_report 生成报告。
     """
-    report_path = step3_generate_report(top_projects, db, mode=mode)
+    report_path = step3_generate_report(
+        top_projects,
+        db,
+        mode=mode,
+        new_project_days=new_project_days,
+    )
     return {"report_path": report_path, "project_count": len(top_projects)}
 
 
@@ -867,8 +877,10 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "top_n": {
                         "type": "integer",
-                        "description": f"返回前N个，默认{HOT_PROJECT_COUNT}",
-                        "default": HOT_PROJECT_COUNT,
+                        "description": (
+                            f"返回前N个。comprehensive 默认{HOT_PROJECT_COUNT}；"
+                            f"hot_new 默认{HOT_NEW_PROJECT_COUNT}。"
+                        ),
                     },
                     "mode": {
                         "type": "string",

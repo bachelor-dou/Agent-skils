@@ -31,14 +31,16 @@ import glob
 import time
 import asyncio
 import threading
+import collections
 from datetime import datetime
 from html import escape
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import markdown
 
@@ -435,6 +437,84 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("API Server 关闭")
 
+
+# ══════════════════════════════════════════════════════════════
+# 安全中间件：IP 黑名单 + 速率限制 + 敏感路径拦截
+# ══════════════════════════════════════════════════════════════
+
+# 已确认的恶意扫描 IP（从日志分析得出）
+_IP_BLACKLIST: set[str] = {
+    "104.243.32.126",
+    "209.222.101.194",
+    "172.232.209.215",
+}
+
+# 敏感路径前缀 — 命中即返回 404，不暴露任何信息
+_BLOCKED_PATH_PREFIXES: tuple[str, ...] = (
+    "/.env", "/.git", "/.well-known/mcp", "/.well-known/agent",
+    "/.well-known/ai-plugin", "/v1/models", "/v1/chat/completions",
+    "/v1/embeddings", "/api/tags", "/console/api", "/graphql",
+    "/debug", "/config", "/_cluster", "/_cat", "/_ml",
+    "/admin", "/login", "/swagger", "/internal",
+    "/copilot_internal", "/openai/", "/sdapi/",
+)
+
+# 速率限制：滑动窗口，每 IP 每分钟最多 _RATE_LIMIT 次请求
+_RATE_WINDOW = 60          # 窗口秒数
+_RATE_LIMIT = 120          # 窗口内最大请求数
+_rate_records: dict[str, collections.deque] = {}
+_rate_lock = threading.Lock()
+
+
+def _get_client_ip(request: Request) -> str:
+    """提取客户端真实 IP（支持反代 X-Forwarded-For）。"""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _is_rate_limited(ip: str) -> bool:
+    """检查 IP 是否超出速率限制。"""
+    now = time.time()
+    with _rate_lock:
+        if ip not in _rate_records:
+            _rate_records[ip] = collections.deque()
+        dq = _rate_records[ip]
+        # 清理过期记录
+        while dq and dq[0] < now - _RATE_WINDOW:
+            dq.popleft()
+        if len(dq) >= _RATE_LIMIT:
+            return True
+        dq.append(now)
+        return False
+
+
+class SecurityMiddleware(BaseHTTPMiddleware):
+    """统一安全中间件：黑名单 → 敏感路径 → 速率限制。"""
+
+    async def dispatch(self, request: Request, call_next):
+        client_ip = _get_client_ip(request)
+
+        # 1. IP 黑名单
+        if client_ip in _IP_BLACKLIST:
+            logger.warning(f"黑名单拦截: {client_ip} {request.url.path}")
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+
+        # 2. 敏感路径拦截
+        path = request.url.path.lower()
+        if any(path.startswith(p) for p in _BLOCKED_PATH_PREFIXES):
+            logger.warning(f"敏感路径拦截: {client_ip} {request.url.path}")
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+        # 3. 速率限制
+        if _is_rate_limited(client_ip):
+            logger.warning(f"速率限制触发: {client_ip} {request.url.path}")
+            return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
+
+        return await call_next(request)
+
+
 app = FastAPI(
     title="GitHub Hot Projects Agent API",
     description="基于 ReAct Agent 的 GitHub 热门项目发现服务",
@@ -453,6 +533,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 安全中间件（注册在 CORS 之后，Starlette 中间件栈后注册先执行）
+app.add_middleware(SecurityMiddleware)
 
 
 # ══════════════════════════════════════════════════════════════

@@ -29,12 +29,14 @@ _MODE_META = {
 def step3_generate_report(
     top_projects: list[tuple[str, dict]], db: dict,
     mode: str = "comprehensive",
+    new_project_days: int | None = None,
 ) -> str:
     """
     为 Top N 项目生成 LLM 描述 + 输出 Markdown 报告。
 
     Args:
         mode: 排名模式，"comprehensive" 或 "hot_new"，影响文件名和标题。
+        new_project_days: 新项目窗口天数。hot_new 模式下若提供，会写入文件后缀避免覆盖。
 
     Returns:
         报告文件路径。
@@ -42,6 +44,9 @@ def step3_generate_report(
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
+    if mode == "hot_new" and new_project_days is not None:
+        suffix = f"{suffix}_{new_project_days}d"
+        title_prefix = f"{title_prefix}（近{new_project_days}天）"
     report_path = os.path.join(REPORT_DIR, f"{today}{suffix}.md")
     db_projects = db.get("projects", {})
 

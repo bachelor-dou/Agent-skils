@@ -84,6 +84,7 @@
     let wsReconnectDelay = 1000; // 初始重连间隔 1s，指数退避最大 30s
     const WS_MAX_RECONNECT_DELAY = 30000;
     let chatHistory = []; // {role, content, isHtml}
+    let activeRequest = null;
 
     restoreMessages();
 
@@ -216,6 +217,40 @@
       sendButton.textContent = isSending ? "发送中" : "发送";
     }
 
+    function resolveActiveRequest(reply) {
+      if (!activeRequest) {
+        return false;
+      }
+
+      const currentRequest = activeRequest;
+      activeRequest = null;
+      if (currentRequest.socket) {
+        currentRequest.socket._hasActiveRequest = false;
+      }
+      if (socket) {
+        socket._hasActiveRequest = false;
+      }
+      currentRequest.resolve(reply);
+      return true;
+    }
+
+    function rejectActiveRequest(error) {
+      if (!activeRequest) {
+        return false;
+      }
+
+      const currentRequest = activeRequest;
+      activeRequest = null;
+      if (currentRequest.socket) {
+        currentRequest.socket._hasActiveRequest = false;
+      }
+      if (socket) {
+        socket._hasActiveRequest = false;
+      }
+      currentRequest.reject(error instanceof Error ? error : new Error(String(error)));
+      return true;
+    }
+
     function addMessage(role, text, options = {}) {
       const item = document.createElement("article");
       item.className = `message ${role}`;
@@ -291,6 +326,7 @@
     async function endSession() {
       const previousSessionId = sessionId;
       endSessionButton.disabled = true;
+      rejectActiveRequest(new Error("会话已重置"));
       closeSocket(false);
       updateConnectionStatus("切换中", "connecting");
 
@@ -372,16 +408,17 @@
       // 处理服务端待发缓冲区中的回复（重连后自动推送）
       socket.addEventListener("message", (event) => {
         if (currentSessionId !== sessionId) return;
-        // 若当前没有在等待回复（无 pending send），则这是缓冲的待发回复
-        if (!socket._hasActiveRequest) {
-          addMessage("agent", "", { asHtml: true, typing: false });
-          const msg = messagesEl.lastElementChild;
-          const body = msg.lastElementChild;
-          body.className = "md-body";
-          body.innerHTML = enhanceReply(event.data);
-          chatHistory.push({ role: "agent", content: body.innerHTML, isHtml: true });
-          saveChatHistory();
+        if (resolveActiveRequest(event.data)) {
+          return;
         }
+
+        addMessage("agent", "", { asHtml: true, typing: false });
+        const msg = messagesEl.lastElementChild;
+        const body = msg.lastElementChild;
+        body.className = "md-body";
+        body.innerHTML = enhanceReply(event.data);
+        chatHistory.push({ role: "agent", content: body.innerHTML, isHtml: true });
+        saveChatHistory();
       });
 
       socket.addEventListener("close", (event) => {
@@ -413,15 +450,20 @@
           return;
         }
 
-        socket._hasActiveRequest = true;
-        const handleMessage = (event) => {
-          socket.removeEventListener("message", handleMessage);
-          socket._hasActiveRequest = false;
-          resolve(event.data);
-        };
+        if (activeRequest) {
+          reject(new Error("上一条消息仍在处理中"));
+          return;
+        }
 
-        socket.addEventListener("message", handleMessage, { once: true });
-        socket.send(message);
+        const requestSocket = socket;
+        activeRequest = { resolve, reject, socket: requestSocket };
+        requestSocket._hasActiveRequest = true;
+
+        try {
+          requestSocket.send(message);
+        } catch (error) {
+          rejectActiveRequest(error);
+        }
       });
     }
 
