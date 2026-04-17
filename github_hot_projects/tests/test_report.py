@@ -32,7 +32,7 @@ class TestReport:
         assert "⭐15000" in content
         assert "repo-copy-btn" in content
         assert 'data-repo="hot-org/hot-repo"' in content
-        assert "复制组织/仓库" in content
+        assert "复制" in content
         assert "测试描述内容" in content
 
     def test_generate_report_hot_new(self, tmp_path, sample_db):

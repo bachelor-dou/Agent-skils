@@ -685,9 +685,9 @@ def tool_fetch_trending(
 
     period_label = {"daily": "今日增长", "weekly": "本周增长", "monthly": "本月增长"}
 
-    # 用 LLM 批量浓缩描述（最多60字），失败时回退截断
+    # 用 LLM 批量浓缩描述（最多70字），失败时回退截断
     from .common.llm import batch_condense_descriptions
-    condensed = batch_condense_descriptions(repos, max_chars=60)
+    condensed = batch_condense_descriptions(repos, max_chars=70)
 
     if include_all_periods:
         display_repos = [

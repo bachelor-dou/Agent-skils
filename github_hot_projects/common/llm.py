@@ -95,7 +95,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
     return ""
 
 
-def batch_condense_descriptions(repos: list[dict], max_chars: int = 300) -> list[str]:
+def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[str]:
     """
     用 LLM 批量浓缩项目描述，每个不超过 max_chars 字。
 
