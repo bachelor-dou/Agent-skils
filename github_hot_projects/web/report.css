@@ -180,6 +180,26 @@ h1 {
   transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
+.content .repo-favorite-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(24, 52, 78, 0.18);
+  background: rgba(24, 52, 78, 0.04);
+  color: rgba(24, 52, 78, 0.68);
+  font-size: 18px;
+  font-weight: 800;
+  border-radius: 10px;
+  margin-left: 8px;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
 .content .repo-copy-btn:not(.repo-copy-btn--icon)::before,
 .content .repo-copy-btn:not(.repo-copy-btn--icon)::after {
   content: "";
@@ -217,8 +237,19 @@ h1 {
   transform: translateY(-1px);
 }
 
+.content .repo-favorite-btn:hover {
+  background: rgba(215, 137, 57, 0.14);
+  border-color: rgba(215, 137, 57, 0.34);
+  transform: translateY(-1px);
+}
+
 .content .repo-copy-btn:focus-visible {
   outline: 2px solid rgba(24, 52, 78, 0.22);
+  outline-offset: 2px;
+}
+
+.content .repo-favorite-btn:focus-visible {
+  outline: 2px solid rgba(215, 137, 57, 0.24);
   outline-offset: 2px;
 }
 
@@ -226,6 +257,13 @@ h1 {
   background: rgba(47, 109, 68, 0.14);
   border-color: rgba(47, 109, 68, 0.36);
   color: #1f6e45;
+}
+
+.content .repo-favorite-btn.is-favorited {
+  background: rgba(245, 186, 45, 0.22);
+  border-color: rgba(232, 164, 22, 0.56);
+  color: #d99100;
+  box-shadow: 0 10px 24px rgba(232, 164, 22, 0.18);
 }
 
 .content .repo-copy-btn.copy-failed {
@@ -286,6 +324,164 @@ h1 {
 
 .content li + li {
   margin-top: 8px;
+}
+
+.content .repo-card {
+  margin: 16px 0 32px;
+  padding: 22px;
+  border-radius: 26px;
+  background:
+    radial-gradient(circle at top right, rgba(248, 216, 176, 0.22), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(246, 250, 243, 0.94));
+  border: 1px solid rgba(24, 52, 78, 0.10);
+  box-shadow: 0 16px 42px rgba(24, 52, 78, 0.10);
+}
+
+.content .repo-card__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.content .repo-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: rgba(24, 52, 78, 0.05);
+  border: 1px solid rgba(24, 52, 78, 0.08);
+}
+
+.content .repo-stat__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--brand);
+  flex: 0 0 auto;
+}
+
+.content .repo-stat__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.content .repo-stat__icon--language {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--lang-color, #6b7280);
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.7), 0 0 0 5px rgba(24, 52, 78, 0.08);
+}
+
+.content .repo-stat__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.content .repo-stat__label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.content .repo-stat__value {
+  font-size: 15px;
+  color: var(--brand);
+}
+
+.content .repo-card__topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.content .repo-topic {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(215, 137, 57, 0.12);
+  border: 1px solid rgba(215, 137, 57, 0.18);
+  color: #7a4a19;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.content .repo-card__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.content .repo-panel {
+  min-height: 100%;
+  padding: 18px 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(24, 52, 78, 0.08);
+}
+
+.content .repo-panel h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #365877;
+}
+
+.content .repo-panel p {
+  margin: 0;
+  color: #1f2937;
+  font-size: 15px;
+  line-height: 1.84;
+}
+
+.content .repo-panel p + p {
+  margin-top: 10px;
+}
+
+.content .repo-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.content .repo-card__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--brand);
+  border: 1px solid var(--brand);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+}
+
+.content .repo-card__action--ghost {
+  background: transparent;
+  color: var(--brand);
+}
+
+.content .repo-card__action:hover {
+  text-decoration: none;
 }
 
 .footer {
@@ -398,6 +594,12 @@ h1 {
   text-decoration-color: rgba(17, 24, 39, 0.65);
 }
 
+@media (max-width: 860px) {
+  .content .repo-card__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 640px) {
   body {
     padding: 12px 10px 28px;
@@ -417,5 +619,18 @@ h1 {
 
   .content h2 {
     font-size: 22px;
+  }
+
+  .content .repo-card {
+    padding: 18px 16px;
+    border-radius: 22px;
+  }
+
+  .content .repo-stat {
+    width: 100%;
+  }
+
+  .content .repo-card__grid {
+    grid-template-columns: 1fr;
   }
 }

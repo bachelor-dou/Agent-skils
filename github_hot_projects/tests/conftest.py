@@ -48,6 +48,7 @@ def sample_db():
                 "language": "Python",
                 "topics": ["ai", "test"],
                 "created_at": "2026-03-01T00:00:00Z",
+              "refreshed_at": "2026-04-14T08:00:00Z",
             },
             "old-org/old-repo": {
                 "star": 20000,
@@ -56,6 +57,7 @@ def sample_db():
                 "language": "Go",
                 "topics": ["database"],
                 "created_at": "2020-01-01T00:00:00Z",
+              "refreshed_at": "2026-04-10T08:00:00Z",
             },
         },
     }

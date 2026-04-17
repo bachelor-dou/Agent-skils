@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.1, maximum-scale=10.0, user-scalable=yes">
   <title>GitHub Hot Projects</title>
-  <link rel="stylesheet" href="/web/chat.css?v=20260416-helpfix">
+  <link rel="stylesheet" href="/web/chat.css?v=20260417-favorites-links">
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
@@ -28,6 +28,15 @@
         <div class="status-cluster status-cluster--report">
           <span class="status-text">报告 <strong id="report-count">0</strong></span>
           <div class="status-actions">
+            <button
+              type="button"
+              class="status-help-button status-favorite-button"
+              id="favorites-panel-button"
+              aria-label="查看收藏项目"
+              aria-haspopup="dialog"
+              aria-controls="favorites-overlay"
+              aria-expanded="false"
+            >☆</button>
             <button
               type="button"
               class="status-help-button"
@@ -138,6 +147,18 @@
     </section>
   </div>
 
+  <div class="favorites-overlay" id="favorites-overlay" hidden>
+    <section class="favorites-card" role="dialog" aria-modal="true" aria-labelledby="favorites-title">
+      <div class="favorites-head">
+        <div>
+          <p class="favorites-eyebrow">收藏列表</p>
+        </div>
+        <button type="button" class="favorites-close" id="favorites-close">关闭</button>
+      </div>
+      <div class="favorites-list" id="favorites-list"></div>
+    </section>
+  </div>
+
   <!-- 全屏阅读 overlay -->
   <div class="fullscreen-overlay" id="fullscreen-overlay" hidden>
     <header class="fullscreen-header">
@@ -146,6 +167,8 @@
     <article class="fullscreen-body" id="fullscreen-body"></article>
   </div>
 
+  <script src="/web/favorites.js?v=20260417-favorites-github"></script>
+  <script src="/web/chat-favorites.js?v=20260417-favorites-github"></script>
   <script>
     const SESSION_STORAGE_KEY = "gh-hot-session-id";
     const messagesEl = document.getElementById("messages");
@@ -172,6 +195,7 @@
     const WS_MAX_RECONNECT_DELAY = 30000;
     let chatHistory = []; // {role, content, isHtml}
     let activeRequest = null;
+    let favoritesPanel = null;
 
     restoreMessages();
 
@@ -179,6 +203,7 @@
     setupQuickActions();
     setupSessionActions();
     setupUsageHelp();
+    favoritesPanel = initFavoritesPanel();
     connectWebSocket();
     loadReports();
 
@@ -301,6 +326,9 @@
       }
 
       function openUsageHelp() {
+        if (favoritesPanel && typeof favoritesPanel.close === "function") {
+          favoritesPanel.close();
+        }
         usageHelpOverlay.hidden = false;
         usageHelpButton.setAttribute("aria-expanded", "true");
       }
@@ -327,6 +355,19 @@
         if (event.key === "Escape" && !usageHelpOverlay.hidden) {
           closeUsageHelp();
         }
+      });
+    }
+
+    function initFavoritesPanel() {
+      if (typeof window.setupChatFavoritesPanel !== "function") {
+        return null;
+      }
+
+      return window.setupChatFavoritesPanel({
+        onBeforeOpen() {
+          usageHelpOverlay.hidden = true;
+          usageHelpButton.setAttribute("aria-expanded", "false");
+        },
       });
     }
 
@@ -879,7 +920,7 @@
       });
 
       shellEl.addEventListener("touchstart", (event) => {
-        if (!mobileQuery.matches || event.touches.length !== 1 || !usageHelpOverlay.hidden) {
+        if (!mobileQuery.matches || event.touches.length !== 1 || !usageHelpOverlay.hidden || (favoritesPanel && favoritesPanel.isOpen())) {
           return;
         }
         if (event.target.closest("textarea, button, a, .usage-help-card")) {

@@ -36,7 +36,6 @@ import re
 from datetime import datetime
 from html import escape
 from contextlib import asynccontextmanager
-from functools import lru_cache
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -166,7 +165,6 @@ def _read_report_content(name: str) -> str:
         raise HTTPException(status_code=500, detail="无法读取报告") from exc
 
 
-@lru_cache(maxsize=8)
 def _load_web_text_asset(path: str) -> str:
     """读取 web 目录中的模板/静态文本资源。"""
     try:
@@ -437,7 +435,10 @@ async def get_report(name: str):
 async def get_report_html(name: str):
     """获取单个报告的 HTML 渲染页面。"""
     content = _read_report_content(name)
-    return HTMLResponse(content=_render_report_html(name, content))
+    return HTMLResponse(
+        content=_render_report_html(name, content),
+        headers=PAGE_NO_CACHE_HEADERS,
+    )
 
 
 @app.delete("/api/sessions/{session_id}")

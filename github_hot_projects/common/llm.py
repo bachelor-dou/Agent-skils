@@ -1,7 +1,7 @@
 """
 LLM 调用模块
 =============
-调用 LLM（兼容 OpenAI /v1/chat/completions 格式）为项目生成详细描述。
+调用 LLM（兼容 OpenAI /v1/chat/completions 格式）为项目生成结构化介绍。
 
 仅对最终 Top N 中 desc 为空的项目调用，
 传入仓库元信息（description、language、topics、readme_url）供 LLM 综合总结。
@@ -19,7 +19,7 @@ logger = logging.getLogger("discover_hot")
 
 def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
     """
-    调用 LLM 生成项目详细描述（200-400 字中文）。
+    调用 LLM 生成三段式项目介绍。
 
     Args:
         repo_name: "owner/repo"
@@ -27,7 +27,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
         html_url:  项目 GitHub 页面 URL
 
     Returns:
-        LLM 生成的描述文本；失败 3 次后返回空字符串。
+        LLM 生成的三段式描述文本；失败 3 次后返回空字符串。
     """
     if not LLM_API_URL or not LLM_API_KEY:
         logger.warning("LLM 未配置，跳过描述生成。")
@@ -45,12 +45,16 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
         info_parts.append(f"README链接（仅供标识，不能视为已读取内容）: {readme_url}")
 
     prompt = (
-        f"请对以下 GitHub 开源项目进行详细介绍。\n"
-        f"要求：\n"
-        f"1. 只能基于下方明确提供的信息写介绍，不要把项目地址或 README 链接当作已读取内容。\n"
+        f"请基于以下已提供信息，用中文总结这个 GitHub 开源项目。\n"
+        f"输出要求：\n"
+        f"1. 只能基于下方明确提供的信息，不要把项目地址或 README 链接当作已读取内容。\n"
         f"2. 不要补充未在输入中出现、且无法确认的外部知识；信息不足时使用保守表述。\n"
-        f"3. 优先说明已知的核心功能、解决的问题、技术方向和适用场景；没有依据的细节直接省略。\n"
-        f"4. 180-320 字，使用中文，避免空话和宣传语。\n\n"
+        f"3. 必须严格输出以下三个字段，字段名保持原样：\n"
+        f"项目定位与用途：...\n"
+        f"解决的问题：...\n"
+        f"使用场景：...\n"
+        f"4. 每个字段建议 70-160 字，总长度控制在 260-520 字。\n"
+        f"5. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
         + "\n".join(info_parts) + "\n"
     )
 
@@ -62,7 +66,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 1024,
+        "max_tokens": 1536,
         "enable_thinking": False,
     }
 

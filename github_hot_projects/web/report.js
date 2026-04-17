@@ -44,8 +44,9 @@
   syncFromHash();
 })();
 
-(function setupRepoCopyButtons() {
+(function setupRepoActionButtons() {
   const container = document.querySelector(".content");
+  const favoritesApi = window.GitHubHotFavorites || null;
   if (!container) {
     return;
   }
@@ -72,6 +73,49 @@
       return;
     }
     setButtonMessage(button, idleMessage);
+  }
+
+  function setFavoriteButtonState(button, repo) {
+    const favorited = favoritesApi && favoritesApi.isFavorite(repo);
+    const idleMessage = favorited ? "取消收藏 " + repo : "收藏 " + repo;
+
+    button.classList.toggle("is-favorited", !!favorited);
+    button.setAttribute("title", idleMessage);
+    button.setAttribute("aria-label", idleMessage);
+    button.textContent = favorited ? "★" : "☆";
+  }
+
+  function createFavoriteButton(repo) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "repo-favorite-btn";
+    button.setAttribute("data-repo", repo);
+    setFavoriteButtonState(button, repo);
+    return button;
+  }
+
+  function ensureFavoriteButtons() {
+    const titleSelector = "h2";
+    const repoPattern = /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/;
+    container.querySelectorAll(titleSelector).forEach(function (heading) {
+      const headingText = (heading.textContent || "").trim();
+      const match = headingText.match(repoPattern);
+      if (!match || heading.querySelector(".repo-favorite-btn")) {
+        return;
+      }
+      heading.appendChild(document.createTextNode(" "));
+      heading.appendChild(createFavoriteButton(match[1]));
+    });
+  }
+
+  function syncFavoriteButtons() {
+    container.querySelectorAll(".repo-favorite-btn").forEach(function (button) {
+      const repo = button.getAttribute("data-repo") || "";
+      if (!repo) {
+        return;
+      }
+      setFavoriteButtonState(button, repo);
+    });
   }
 
   function attachTitleButtonsForLegacyReports() {
@@ -113,6 +157,11 @@
   }
 
   attachTitleButtonsForLegacyReports();
+  ensureFavoriteButtons();
+
+  if (favoritesApi && typeof favoritesApi.subscribe === "function") {
+    favoritesApi.subscribe(syncFavoriteButtons);
+  }
 
   container.querySelectorAll(".repo-copy-btn").forEach(function (button) {
     button.addEventListener("click", async function () {
@@ -131,6 +180,17 @@
       window.setTimeout(function () {
         setButtonState(button, "idle", repo);
       }, 1400);
+    });
+  });
+
+  container.querySelectorAll(".repo-favorite-btn").forEach(function (button) {
+    button.addEventListener("click", function () {
+      const repo = button.getAttribute("data-repo") || "";
+      if (!repo || !favoritesApi) {
+        return;
+      }
+      favoritesApi.toggle(repo);
+      setFavoriteButtonState(button, repo);
     });
   });
 })();

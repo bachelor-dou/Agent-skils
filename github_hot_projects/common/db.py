@@ -13,8 +13,9 @@ DB 结构：
         "desc": "LLM 生成的描述",
         "short_desc": "GitHub 原始 description",
         "language": "Python",
-        "topics": ["ai", "llm"],
-        "readme_url": "https://github.com/owner/repo/blob/HEAD/README.md"
+                "topics": ["ai", "llm"],
+                "readme_url": "https://github.com/owner/repo/blob/HEAD/README.md",
+                "refreshed_at": "2026-04-17T03:25:00Z"
       }
     }
   }
@@ -28,13 +29,32 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH, GROWTH_CACHE_TTL_HOURS
 
 logger = logging.getLogger("discover_hot")
 
 _db_lock = threading.Lock()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _format_utc_timestamp(ts: datetime | None = None) -> str:
+    return (ts or _utc_now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_refresh_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
 
 
 def load_db() -> dict:
@@ -66,7 +86,7 @@ def load_db() -> dict:
     if date_str:
         try:
             db_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            days_diff = (datetime.now(timezone.utc) - db_date).days
+            days_diff = (_utc_now() - db_date).days
             if days_diff > DATA_EXPIRE_DAYS:
                 logger.warning(
                     f"DB 数据已过期（距上次更新 {days_diff} 天），"
@@ -87,7 +107,7 @@ def load_db() -> dict:
 
 def save_db(db: dict) -> None:
     """保存 DB 到磁盘，自动更新 date 为今天。线程安全 + 原子写入。"""
-    db["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    db["date"] = _utc_now().strftime("%Y-%m-%d")
     try:
         with _db_lock:
             temp_path = DB_FILE_PATH + ".tmp"
@@ -120,10 +140,12 @@ def update_db_project(
     topics = repo_item.get("topics") or []
     forks = repo_item.get("forks_count", 0)
     created_at = repo_item.get("created_at") or ""
+    refreshed_at = _format_utc_timestamp()
 
     if full_name in db_projects:
         db_projects[full_name]["star"] = current_star
         db_projects[full_name]["forks"] = forks
+        db_projects[full_name]["refreshed_at"] = refreshed_at
         if created_at and not db_projects[full_name].get("created_at"):
             db_projects[full_name]["created_at"] = created_at
         if "readme_url" not in db_projects[full_name]:
@@ -144,7 +166,19 @@ def update_db_project(
             "language": language,
             "topics": topics,
             "readme_url": readme_url,
+            "refreshed_at": refreshed_at,
         }
+
+
+def is_project_refresh_fresh(
+    project: dict,
+    max_age_days: int = DATA_EXPIRE_DAYS,
+) -> bool:
+    """判断单仓库刷新时间是否仍在允许窗口内。"""
+    refreshed_ts = _parse_refresh_timestamp(project.get("refreshed_at", ""))
+    if refreshed_ts is None:
+        return False
+    return _utc_now() - refreshed_ts <= timedelta(days=max_age_days)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -170,7 +204,7 @@ def get_cached_growth(
         ts = datetime.strptime(computed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc
         )
-        hours_old = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+        hours_old = (_utc_now() - ts).total_seconds() / 3600
         if hours_old < ttl_hours:
             return gc.get("growth")
     except (ValueError, TypeError):
@@ -189,7 +223,7 @@ def set_growth_cache(
         return
     cache = {
         "growth": growth,
-        "computed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "computed_at": _format_utc_timestamp(),
     }
     if score is not None:
         cache["score"] = score

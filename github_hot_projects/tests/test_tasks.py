@@ -4,6 +4,7 @@
 覆盖：Task 基类、KeywordSearchTask、CalcGrowthTask、WorkerPool。
 """
 
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 from dataclasses import dataclass, field
@@ -158,6 +159,57 @@ class TestCalcGrowthTask:
         )
         result = task.execute(token_idx=0)
         assert result[1] == -1
+
+    def test_submit_growth_tasks_stale_repo_skips_db_diff(self, mock_token_mgr):
+        from github_hot_projects.tasks.task import _submit_growth_tasks, CalcGrowthTask
+
+        class DummyPool:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, task):
+                self.submitted.append(task)
+
+        stale_refresh = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_repos = {
+            "org/repo": {
+                "star": 5000,
+                "created_at": "2026-04-01T00:00:00Z",
+                "repo_item": {
+                    "full_name": "org/repo",
+                    "stargazers_count": 5000,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            }
+        }
+        db = {
+            "valid": True,
+            "projects": {
+                "org/repo": {
+                    "star": 3200,
+                    "refreshed_at": stale_refresh,
+                }
+            },
+        }
+        growth_ctx = {
+            "checkpoint": None,
+            "pending_created_at": {},
+            "db_projects": db["projects"],
+            "candidate_map": {},
+            "growth_threshold": 800,
+            "force_refresh": False,
+            "unresolved_count": [0],
+            "checkpoint_dirty": [False],
+            "completed_since_save": [0],
+        }
+        pool = DummyPool()
+
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+            checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
+
+        assert checkpoint == {}
+        assert len(pool.submitted) == 1
+        assert isinstance(pool.submitted[0], CalcGrowthTask)
 
 
 # ──────────────────────────────────────────────────────────────

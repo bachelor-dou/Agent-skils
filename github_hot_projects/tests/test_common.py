@@ -149,6 +149,33 @@ class TestDB:
             db = load_db()
             assert db["projects"] == {}
 
+    def test_update_db_project_sets_refreshed_at(self):
+        from github_hot_projects.common.db import update_db_project
+
+        db_projects = {}
+        repo_item = {
+            "description": "test repo",
+            "language": "Python",
+            "topics": ["ai"],
+            "forks_count": 12,
+            "created_at": "2026-04-01T00:00:00Z",
+        }
+
+        update_db_project(db_projects, "org/repo", 5000, repo_item)
+
+        assert db_projects["org/repo"]["star"] == 5000
+        assert db_projects["org/repo"]["refreshed_at"].endswith("Z")
+
+    def test_is_project_refresh_fresh(self):
+        from github_hot_projects.common.db import is_project_refresh_fresh
+
+        fresh = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        stale = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        assert is_project_refresh_fresh({"refreshed_at": fresh}) is True
+        assert is_project_refresh_fresh({"refreshed_at": stale}) is False
+        assert is_project_refresh_fresh({}) is False
+
 
 # ──────────────────────────────────────────────────────────────
 # 4. GitHub API
@@ -286,17 +313,24 @@ class TestLLM:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "这是一个AI项目的测试描述。"}}]
+            "choices": [{"message": {"content": "项目定位与用途：这是一个AI项目。\n解决的问题：它帮助用户减少手工操作。\n使用场景：适合做自动化实验。"}}]
         }
 
-        with patch("github_hot_projects.common.llm.requests.post", return_value=mock_resp):
+        with patch("github_hot_projects.common.llm.requests.post", return_value=mock_resp) as mock_post:
             from github_hot_projects.common.llm import call_llm_describe
             desc = call_llm_describe(
                 "test/repo",
                 {"short_desc": "Test", "language": "Python", "topics": ["ai"]},
                 "https://github.com/test/repo",
             )
-            assert "测试描述" in desc
+            assert "项目定位与用途" in desc
+
+        payload = mock_post.call_args.kwargs["json"]
+        prompt = payload["messages"][0]["content"]
+        assert "项目定位与用途：" in prompt
+        assert "解决的问题：" in prompt
+        assert "使用场景：" in prompt
+        assert payload["max_tokens"] == 1536
 
     def test_call_llm_describe_no_api_key(self):
         with patch("github_hot_projects.common.llm.LLM_API_KEY", ""):

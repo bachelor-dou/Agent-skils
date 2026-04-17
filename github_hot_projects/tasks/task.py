@@ -27,7 +27,7 @@ from ..common.config import (
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
 )
-from ..common.db import save_db, update_db_project, get_cached_growth, set_growth_cache
+from ..common.db import save_db, update_db_project, get_cached_growth, set_growth_cache, is_project_refresh_fresh
 from ..common.github_api import search_github_repos
 from ..growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
@@ -411,6 +411,7 @@ def _submit_growth_tasks(
     checkpoint_dirty = False
     db_count = 0
     cache_count = 0
+    stale_db_count = 0
 
     if not force_refresh:
         for full_name in list(pending.keys()):
@@ -433,6 +434,9 @@ def _submit_growth_tasks(
 
             # 次选：DB 差值法
             if full_name in db_projects and db_valid:
+                if not is_project_refresh_fresh(db_projects[full_name]):
+                    stale_db_count += 1
+                    continue
                 saved_star = db_projects[full_name].get("star", 0)
                 growth = current_star - saved_star
                 update_db_project(db_projects, full_name, current_star, repo_item)
@@ -463,7 +467,7 @@ def _submit_growth_tasks(
 
     logger.info(
         f"批量增长计算: {len(pending)} 个任务入队 "
-        f"(缓存命中 {cache_count}, DB差值 {db_count}, 续传 {resumed_count}, "
+        f"(缓存命中 {cache_count}, DB差值 {db_count}, 仓库级过期回退 {stale_db_count}, 续传 {resumed_count}, "
         f"跳过已入选 {len(raw_repos) - len(pending) - db_count - cache_count - resumed_count})"
     )
 

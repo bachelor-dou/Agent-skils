@@ -38,7 +38,7 @@ from .common.config import (
     STAR_RANGE_MIN,
     TIME_WINDOW_DAYS,
 )
-from .common.db import save_db, update_db_project, set_growth_cache
+from .common.db import save_db, update_db_project, set_growth_cache, is_project_refresh_fresh
 from .common.github_api import auto_split_star_range, search_github_repos
 from .growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
@@ -324,13 +324,23 @@ def tool_check_repo_growth(
     current_star = repo_item.get("stargazers_count", 0)
 
     # 增长计算
-    if db and db.get("valid") and repo in db.get("projects", {}):
-        saved_star = db["projects"][repo].get("star", 0)
+    db_project = db.get("projects", {}).get(repo, {}) if db else {}
+    can_use_db_diff = bool(
+        db
+        and db.get("valid")
+        and db_project
+        and is_project_refresh_fresh(db_project)
+    )
+    if can_use_db_diff:
+        saved_star = db_project.get("star", 0)
         growth = current_star - saved_star
         method = "DB差值法"
     else:
         growth = estimate_star_growth_binary(token_mgr, owner, repo_name, current_star, token_idx=0)
-        method = "二分法/采样外推"
+        if db and db.get("valid") and db_project:
+            method = "仓库基线过期，二分法/采样外推"
+        else:
+            method = "二分法/采样外推"
 
     if growth == GROWTH_ESTIMATION_UNRESOLVED:
         growth_value = None

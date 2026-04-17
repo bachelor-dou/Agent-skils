@@ -4,6 +4,7 @@
 覆盖：核心 Tool 函数的调用逻辑。
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -17,7 +18,11 @@ class TestToolCheckRepoGrowth:
         db = {
             "valid": True,
             "projects": {
-                "org/repo": {"star": 4800, "desc": "已有描述"},
+                "org/repo": {
+                    "star": 4800,
+                    "desc": "已有描述",
+                    "refreshed_at": (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
             },
         }
 
@@ -36,6 +41,38 @@ class TestToolCheckRepoGrowth:
             assert result["growth"] == 200  # 5000 - 4800
             assert result["method"] == "DB差值法"
             assert result["description"] == "已有描述"
+
+    def test_stale_repo_refresh_falls_back_to_estimate(self, mock_token_mgr):
+        """仓库级刷新时间过旧时，不应走 DB 差值法。"""
+        from github_hot_projects.agent_tools import tool_check_repo_growth
+
+        db = {
+            "valid": True,
+            "projects": {
+                "org/repo": {
+                    "star": 3200,
+                    "desc": "已有描述",
+                    "refreshed_at": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+            },
+        }
+
+        search_result = [{
+            "full_name": "org/repo",
+            "stargazers_count": 5000,
+            "description": "test",
+            "language": "Python",
+            "topics": ["ai"],
+            "html_url": "https://github.com/org/repo",
+            "created_at": "2025-01-01T00:00:00Z",
+        }]
+
+        with patch("github_hot_projects.agent_tools.search_github_repos", return_value=search_result):
+            with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=650):
+                result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
+
+        assert result["growth"] == 650
+        assert "二分法/采样外推" in result["method"]
 
     def test_estimate_method(self, mock_token_mgr):
         """DB 无效 → 调用 estimate_star_growth_binary。"""
