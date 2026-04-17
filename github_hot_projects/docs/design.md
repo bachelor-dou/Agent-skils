@@ -24,7 +24,11 @@ Python 3.10+, requests, FastAPI, JSON 文件存储, OpenAI 兼容 LLM (SiliconFl
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                      入口层                              │
-│   agent_cli.py              api_server.py             │
+│ __main__.py  agent_cli.py  api_server.py              │
+│ scheduled_update.py  regenerate_report.py             │
+├─────────────────────────────────────────────────────────┤
+│                      Web 展示层                          │
+│   web/chat.html  web/chat.css  web/report.*           │
 ├─────────────────────────────────────────────────────────┤
 │                      Agent 层                            │
 │   agent.py（ReAct 循环 + 状态管理 + 对话压缩）           │
@@ -56,8 +60,12 @@ Python 3.10+, requests, FastAPI, JSON 文件存储, OpenAI 兼容 LLM (SiliconFl
 
 | 层 | 文件 | 职责 |
 |----|------|------|
+| 入口 | `__main__.py` | 默认启动入口：转调 `api_server.main()` |
 | 入口 | `agent_cli.py` | CLI REPL 入口：用户输入 → agent.chat() → 输出 |
-| 入口 | `api_server.py` | Web 服务：REST/WS 端点 + 会话管理（TTL+LRU）+ 全局 Tool 互斥锁 |
+| 入口 | `api_server.py` | Web/API 服务入口：REST/WS 端点 + 会话管理（TTL+LRU）+ 全局 Tool 互斥锁 |
+| 入口 | `scheduled_update.py` | 定时批处理入口：采集、增长计算、排名、生成报告 |
+| 入口 | `regenerate_report.py` | 从历史日志恢复候选并重建报告 |
+| Web | `web/` | 聊天页静态资源和报告页模板/脚本/样式 |
 | Agent | `agent.py` | ReAct 循环 + AgentState + SYSTEM_PROMPT + 对话压缩 |
 | 工具 | `agent_tools.py` | 9 个 tool_* 函数 + TOOL_SCHEMAS |
 | 业务 | `tasks.py` | Task 子类（搜索/扫描/增长）+ 批量提交 + 断点续传 + 候选管理 |
@@ -78,8 +86,10 @@ Python 3.10+, requests, FastAPI, JSON 文件存储, OpenAI 兼容 LLM (SiliconFl
 
 | 模式 | 入口命令 | 交互方式 | 适用场景 |
 |------|---------|---------|----------|
+| API Server | `python -m github_hot_projects` | REST/WebSocket | Web 集成、手机端访问 |
 | Agent CLI | `python -m github_hot_projects.agent_cli` | REPL | 探索、调试 |
-| API Server | `uvicorn ...api_server:app` | REST/WebSocket | Web 集成 |
+| 定时更新 | `python -m github_hot_projects.scheduled_update` | 批处理 | 周期性生成日报 |
+| 报告恢复 | `python -m github_hot_projects.regenerate_report --log ...` | 批处理 | 从历史日志补报表 |
 
 Agent CLI 和 API Server 共享同一套 agent_tools 中的 Tool 实现，通过 ReAct 循环按需调用 Tool。
 

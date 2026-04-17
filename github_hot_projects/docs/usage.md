@@ -62,6 +62,23 @@ python -m github_hot_projects
 python -m github_hot_projects.agent_cli  # 终端交互模式
 ```
 
+## 入口脚本职责
+
+| 命令 | 对应入口 | 职责 |
+|------|----------|------|
+| `python -m github_hot_projects` | `__main__.py` → `api_server.main()` | 默认 Web/API 服务入口 |
+| `python -m github_hot_projects.api_server` | `api_server.py` | 直接启动 FastAPI 服务，等价于默认入口 |
+| `python -m github_hot_projects.agent_cli` | `agent_cli.py` | 终端 REPL，对话调试 Agent |
+| `python -m github_hot_projects.scheduled_update` | `scheduled_update.py` | 定时批处理：搜索、增长计算、排名、生成日报 |
+| `python -m github_hot_projects.regenerate_report --log ...` | `regenerate_report.py` | 从历史日志恢复候选并重建指定日期报告 |
+
+Web 页面相关资源已经统一放在 `github_hot_projects/web/`：
+
+- `chat.html` / `chat.css`：聊天页静态资源
+- `report.html` / `report.css` / `report.js`：报告页模板与样式脚本
+
+`api_server.py` 现在只负责路由、Markdown 渲染和数据注入，不再内嵌整页 HTML。
+
 ## Agent 对话示例
 
 网页端和终端(`python -m github_hot_projects.agent_cli`)均支持自然语言指令。

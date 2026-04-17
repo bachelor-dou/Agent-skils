@@ -1190,3 +1190,95 @@ textarea:focus {
   max-width: 100%;
   border-radius: 8px;
 }
+
+.message.agent .md-body .repo-copy-btn,
+.fullscreen-body .repo-copy-btn {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  margin-left: 8px;
+  border: 1px solid rgba(23, 50, 77, 0.16);
+  border-radius: 10px;
+  background: rgba(23, 50, 77, 0.04);
+  color: var(--brand);
+  font-size: 0;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::before,
+.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::after,
+.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::before,
+.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::after {
+  content: "";
+  position: absolute;
+  width: 11px;
+  height: 13px;
+  border: 1.6px solid currentColor;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::before,
+.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::before {
+  transform: translate(-2px, -2px);
+  opacity: 0.58;
+}
+
+.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::after,
+.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::after {
+  transform: translate(2px, 2px);
+}
+
+.message.agent .md-body .repo-copy-btn--icon .repo-copy-icon,
+.fullscreen-body .repo-copy-btn--icon .repo-copy-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+}
+
+.message.agent .md-body .repo-copy-btn--icon .repo-copy-icon svg,
+.fullscreen-body .repo-copy-btn--icon .repo-copy-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.message.agent .md-body .repo-copy-btn:hover,
+.fullscreen-body .repo-copy-btn:hover {
+  background: rgba(23, 50, 77, 0.1);
+  border-color: rgba(23, 50, 77, 0.26);
+  transform: translateY(-1px);
+}
+
+.message.agent .md-body .repo-copy-btn:focus-visible,
+.fullscreen-body .repo-copy-btn:focus-visible {
+  outline: 2px solid rgba(47, 91, 130, 0.16);
+  outline-offset: 2px;
+}
+
+.message.agent .md-body .repo-copy-btn.copied,
+.fullscreen-body .repo-copy-btn.copied {
+  background: rgba(47, 109, 68, 0.14);
+  border-color: rgba(47, 109, 68, 0.32);
+  color: var(--ok);
+}
+
+.message.agent .md-body .repo-copy-btn.copy-failed,
+.fullscreen-body .repo-copy-btn.copy-failed {
+  background: rgba(185, 28, 28, 0.1);
+  border-color: rgba(185, 28, 28, 0.22);
+  color: #b42318;
+}
+
+.message.agent .md-body .repo-copy-btn--title,
+.fullscreen-body .repo-copy-btn--title {
+  width: 28px;
+  height: 28px;
+  margin-left: 10px;
+}

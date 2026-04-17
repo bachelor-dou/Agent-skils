@@ -32,9 +32,11 @@ import time
 import asyncio
 import threading
 import collections
+import re
 from datetime import datetime
 from html import escape
 from contextlib import asynccontextmanager
+from functools import lru_cache
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -50,7 +52,13 @@ from .common.config import DATA_DIR, LOG_DIR, REPORT_DIR
 logger = logging.getLogger("discover_hot")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 CHAT_PAGE_PATH = os.path.join(WEB_DIR, "chat.html")
+REPORT_PAGE_TEMPLATE_PATH = os.path.join(WEB_DIR, "report.html")
 APP_LOG_PATH = ""
+PAGE_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 
 def setup_app_logging() -> str:
@@ -140,386 +148,81 @@ _tool_execution_lock = threading.Lock()
 
 
 def _validate_report_name(name: str) -> str:
-        """校验报告名，防止路径穿越。"""
-        if "/" in name or "\\" in name or ".." in name:
-                raise HTTPException(status_code=400, detail="无效的报告名称")
-        return os.path.join(REPORT_DIR, name)
+    """校验报告名，防止路径穿越。"""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="无效的报告名称")
+    return os.path.join(REPORT_DIR, name)
 
 
 def _read_report_content(name: str) -> str:
-        """读取报告 Markdown 文本。"""
-        path = _validate_report_name(name)
-        if not os.path.isfile(path):
-                raise HTTPException(status_code=404, detail="报告不存在")
-        try:
-                with open(path, "r", encoding="utf-8") as f:
-                        return f.read()
-        except IOError as exc:
-                raise HTTPException(status_code=500, detail="无法读取报告") from exc
+    """读取报告 Markdown 文本。"""
+    path = _validate_report_name(name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="报告不存在")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except IOError as exc:
+        raise HTTPException(status_code=500, detail="无法读取报告") from exc
+
+
+@lru_cache(maxsize=8)
+def _load_web_text_asset(path: str) -> str:
+    """读取 web 目录中的模板/静态文本资源。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法加载 Web 资源: {os.path.basename(path)}") from exc
+
+
+def _render_web_template(path: str, replacements: dict[str, str]) -> str:
+    """将占位符模板渲染为最终 HTML。"""
+    document = _load_web_text_asset(path)
+    for placeholder, value in replacements.items():
+        document = document.replace(placeholder, value)
+    return document
+
+
+def _build_page_response(path: str, missing_detail: str) -> FileResponse:
+    """统一返回 no-cache 页面响应。"""
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=missing_detail)
+    return FileResponse(path, headers=PAGE_NO_CACHE_HEADERS)
 
 
 def _render_report_html(name: str, markdown_text: str) -> str:
-        """将 Markdown 报告渲染为移动端友好的 HTML 页面。"""
-        lines = markdown_text.splitlines()
-        title = next((line[2:].strip() for line in lines if line.startswith("# ")), name)
-        summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
-        import re
-        # 预处理：移除 Markdown 中的原始 HTML 标签，防止 XSS
-        sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*>.*?</\1>', '', markdown_text, flags=re.DOTALL | re.IGNORECASE)
-        sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*/?\s*>', '', sanitized_text, flags=re.IGNORECASE)
-        sanitized_text = re.sub(r'\bon\w+\s*=', '', sanitized_text, flags=re.IGNORECASE)
+    """将 Markdown 报告渲染为移动端友好的 HTML 页面。"""
+    lines = markdown_text.splitlines()
+    title = next((line[2:].strip() for line in lines if line.startswith("# ")), name)
+    summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
+    # 预处理：移除 Markdown 中的原始 HTML 标签，防止 XSS
+    sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*>.*?</\1>', '', markdown_text, flags=re.DOTALL | re.IGNORECASE)
+    sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*/?\s*>', '', sanitized_text, flags=re.IGNORECASE)
+    sanitized_text = re.sub(r'\bon\w+\s*=', '', sanitized_text, flags=re.IGNORECASE)
 
-        md = markdown.Markdown(
-                extensions=["extra", "sane_lists", "toc", "nl2br"],
-                output_format="html5",
-        )
-        article_html = md.convert(sanitized_text)
-        toc_html = getattr(md, "toc", "")
-        if not toc_html.strip():
-            toc_html = '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
+    md = markdown.Markdown(
+        extensions=["extra", "sane_lists", "toc", "nl2br"],
+        output_format="html5",
+    )
+    article_html = md.convert(sanitized_text)
+    toc_html = getattr(md, "toc", "")
+    if not toc_html.strip():
+        toc_html = '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
 
-        safe_title = escape(title)
-        safe_summary = escape(summary)
-        safe_name = escape(name)
-        return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{safe_title}</title>
-    <style>
-        :root {{
-            --bg: #eef5ea;
-            --paper: rgba(244, 249, 240, 0.97);
-            --ink: #1f2329;
-            --muted: #6b7280;
-            --brand: #18344e;
-            --accent: #d78939;
-            --line: rgba(24, 52, 78, 0.12);
-            --shadow: 0 18px 55px rgba(24, 52, 78, 0.12);
-        }}
-        * {{ box-sizing: border-box; }}
-        body {{
-            margin: 0;
-            font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Noto Sans SC", sans-serif;
-            color: var(--ink);
-            background:
-                radial-gradient(circle at top left, rgba(212, 229, 214, 0.82), transparent 28%),
-                radial-gradient(circle at top right, rgba(240, 229, 206, 0.72), transparent 24%),
-                linear-gradient(180deg, #eef5ea 0%, #e4ede0 100%);
-            line-height: 1.75;
-            padding: 24px 16px 40px;
-        }}
-        .page {{ max-width: 980px; margin: 0 auto; }}
-        .hero {{
-            padding: 28px 24px;
-            border-radius: 28px;
-            background: linear-gradient(135deg, rgba(24, 52, 78, 0.98), rgba(47, 91, 130, 0.92));
-            color: #fff;
-            box-shadow: var(--shadow);
-        }}
-        .eyebrow {{
-            display: inline-flex;
-            padding: 6px 10px;
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.14);
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }}
-        h1 {{ margin: 14px 0 10px; font-size: clamp(30px, 6vw, 46px); line-height: 1.06; letter-spacing: -0.03em; }}
-        .summary {{
-            margin-top: 14px;
-            padding: 14px 16px;
-            border-radius: 18px;
-            background: rgba(255, 255, 255, 0.1);
-            color: rgba(255, 255, 255, 0.88);
-            font-size: 14px;
-        }}
-        .toolbar {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0 0; }}
-        .toolbar a {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 42px;
-            width: 100%;
-            padding: 0 16px;
-            border-radius: 999px;
-            text-decoration: none;
-            font-weight: 700;
-            font-size: 14px;
-            letter-spacing: 0.02em;
-            color: #fff;
-            background: rgba(255, 255, 255, 0.12);
-            border: 1px solid rgba(255, 255, 255, 0.14);
-        }}
-        .content {{
-            margin-top: 18px;
-            padding: 26px 22px;
-            border-radius: 28px;
-            background: var(--paper);
-            border: 1px solid var(--line);
-            box-shadow: var(--shadow);
-            font-size: 17px;
-            line-height: 1.86;
-            text-rendering: optimizeLegibility;
-            -webkit-font-smoothing: antialiased;
-        }}
-        .content h1, .content h2, .content h3 {{ color: var(--brand); line-height: 1.25; scroll-margin-top: 24px; }}
-        .content h1 {{ font-size: 34px; margin-top: 0; }}
-        .content h2 {{ margin-top: 28px; font-size: 24px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }}
-        .content h3 {{ margin-top: 20px; font-size: 19px; }}
-        .content p {{ margin: 14px 0; word-break: normal; overflow-wrap: break-word; }}
-        .content blockquote {{
-            margin: 16px 0;
-            padding: 14px 16px;
-            border-left: 4px solid var(--accent);
-            background: rgba(248, 216, 176, 0.22);
-            color: #334155;
-            border-radius: 0 18px 18px 0;
-        }}
-        .content hr {{ border: 0; border-top: 1px dashed rgba(24, 52, 78, 0.18); margin: 28px 0; }}
-        .content a {{ color: var(--brand); font-weight: 700; text-decoration: none; overflow-wrap: break-word; word-break: normal; }}
-        .content a:hover {{ text-decoration: underline; }}
-        .content .repo-copy-btn {{
-            appearance: none;
-            border: 1px solid rgba(24, 52, 78, 0.18);
-            background: rgba(24, 52, 78, 0.04);
-            color: var(--brand);
-            font-size: 12px;
-            font-weight: 700;
-            padding: 4px 10px;
-            border-radius: 999px;
-            margin-left: 8px;
-            cursor: pointer;
-            vertical-align: middle;
-            transition: background 160ms ease, border-color 160ms ease;
-        }}
-        .content .repo-copy-btn:hover {{
-            background: rgba(24, 52, 78, 0.1);
-            border-color: rgba(24, 52, 78, 0.28);
-        }}
-        .content .repo-copy-btn.copied {{
-            background: rgba(47, 109, 68, 0.14);
-            border-color: rgba(47, 109, 68, 0.36);
-            color: #1f6e45;
-        }}
-        .content .repo-copy-btn--title {{
-            font-size: 11px;
-            padding: 3px 9px;
-            margin-left: 10px;
-        }}
-        .content p a, .content li a, .content td a, .content th a {{ display: inline-block; max-width: 100%; overflow-wrap: anywhere; }}
-        .content li, .content td, .content th {{ word-break: normal; overflow-wrap: break-word; }}
-        .content code {{
-            padding: 2px 6px;
-            border-radius: 8px;
-            background: rgba(24, 52, 78, 0.08);
-            font-family: "JetBrains Mono", "Cascadia Mono", monospace;
-            font-size: 0.92em;
-        }}
-        .content pre {{
-            overflow: auto;
-            padding: 14px;
-            border-radius: 18px;
-            background: #112132;
-            color: #e5edf6;
-            line-height: 1.7;
-        }}
-        .content pre code {{ background: transparent; padding: 0; color: inherit; }}
-        .content ul, .content ol {{ padding-left: 20px; }}
-        .content li + li {{ margin-top: 8px; }}
-        .footer {{ margin-top: 12px; color: var(--muted); font-size: 13px; text-align: center; }}
-        @media (max-width: 640px) {{
-            body {{ padding: 12px 10px 28px; }}
-            .hero {{ padding: 22px 18px; border-radius: 24px; }}
-            .content {{ padding: 20px 16px; border-radius: 24px; }}
-            .content h2 {{ font-size: 22px; }}
-            .content {{ font-size: 16px; line-height: 1.82; }}
-        }}
-        .toc-overlay {{
-            position: fixed;
-            inset: 0;
-            z-index: 999;
-            background: rgba(15, 23, 42, 0.45);
-            backdrop-filter: blur(8px);
-            display: none;
-        }}
-        .toc-overlay.active {{ display: flex; justify-content: center; align-items: flex-start; padding-top: 60px; }}
-        .toc-panel {{
-            background: linear-gradient(180deg, rgba(250, 253, 247, 0.98), rgba(244, 248, 240, 0.98));
-            border: 1px solid rgba(24, 52, 78, 0.10);
-            border-radius: 26px;
-            padding: 24px 20px;
-            max-width: 540px;
-            width: 90%;
-            max-height: 70vh;
-            overflow-y: auto;
-            box-shadow: var(--shadow);
-        }}
-        .toc-panel h3 {{ margin: 0; font-size: 18px; color: var(--brand); }}
-        .toc-subtitle {{ margin: 8px 0 16px; color: var(--muted); font-size: 13px; line-height: 1.6; }}
-        .toc-empty {{ margin: 0; color: var(--muted); line-height: 1.7; }}
-        .toc-panel ul {{ list-style: none; padding: 0; margin: 0; }}
-        .toc-panel .toc > ul {{ display: grid; gap: 10px; }}
-        .toc-panel .toc > ul > li {{
-            margin: 0;
-            padding: 12px 14px;
-            border-radius: 18px;
-            background: rgba(216, 229, 214, 0.55);
-            border: 1px solid rgba(24, 52, 78, 0.08);
-        }}
-        .toc-panel li ul {{ margin-top: 8px; padding-left: 12px; border-left: 2px solid rgba(24, 52, 78, 0.12); }}
-        .toc-panel li li {{ margin: 4px 0 0; padding-left: 0; }}
-        .toc-panel a {{ color: #111827; text-decoration: underline; text-decoration-color: rgba(17, 24, 39, 0.35); text-underline-offset: 3px; font-size: 15px; font-weight: 700; line-height: 1.6; display: block; padding: 6px 8px; border-radius: 12px; transition: background 160ms ease, text-decoration-color 160ms ease; }}
-        .toc-panel li li a {{ font-size: 14px; font-weight: 600; color: #1f2937; }}
-        .toc-panel a:hover {{ color: #111827; background: rgba(17, 24, 39, 0.04); text-decoration-color: rgba(17, 24, 39, 0.65); }}
-    </style>
-</head>
-<body>
-    <div class="page">
-        <header class="hero">
-            <h1>{safe_title}</h1>
-            <div class="summary">{safe_summary or '这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。'}</div>
-            <div class="toolbar">
-                <a href="/chat">返回聊天</a>
-                <a href="#toc" id="toc-trigger">目录导航</a>
-            </div>
-        </header>
-
-        <div class="toc-overlay" id="toc-overlay" aria-hidden="true">
-            <div class="toc-panel">
-                <h3>报告目录</h3>
-                <p class="toc-subtitle">点击目录项可直接跳到正文，对应浏览器返回会先回到目录视图。</p>
-                {toc_html}
-            </div>
-        </div>
-
-        <article class="content">
-            {article_html}
-        </article>
-
-        <div class="footer">GitHub Hot Projects · Mobile Report View</div>
-    </div>
-    <script>
-        (function setupTocNavigation() {{
-            const tocOverlay = document.getElementById("toc-overlay");
-            const tocTrigger = document.getElementById("toc-trigger");
-            const tocHash = "#toc";
-
-            function setOverlayVisible(visible) {{
-                tocOverlay.classList.toggle("active", visible);
-                tocOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
-            }}
-
-            function syncFromHash() {{
-                setOverlayVisible(window.location.hash === tocHash);
-            }}
-
-            tocTrigger.addEventListener("click", function(event) {{
-                event.preventDefault();
-                if (window.location.hash !== tocHash) {{
-                    history.pushState({{ toc: true }}, "", tocHash);
-                }}
-                syncFromHash();
-            }});
-
-            tocOverlay.addEventListener("click", function(event) {{
-                if (event.target !== tocOverlay) {{
-                    return;
-                }}
-                if (window.location.hash === tocHash) {{
-                    history.replaceState(null, "", window.location.pathname + window.location.search);
-                }}
-                syncFromHash();
-            }});
-
-            tocOverlay.querySelectorAll('a[href^="#"]').forEach(function(link) {{
-                link.addEventListener("click", function() {{
-                    setOverlayVisible(false);
-                }});
-            }});
-
-            window.addEventListener("hashchange", syncFromHash);
-            syncFromHash();
-        }})();
-
-        (function setupRepoCopyButtons() {{
-            const container = document.querySelector(".content");
-            if (!container) {{
-                return;
-            }}
-
-            function attachTitleButtonsForLegacyReports() {{
-                const titleSelector = "h2";
-                const repoPattern = /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/;
-                container.querySelectorAll(titleSelector).forEach(function(heading) {{
-                    const headingText = (heading.textContent || "").trim();
-                    const match = headingText.match(repoPattern);
-                    if (!match) {{
-                        return;
-                    }}
-                    if (heading.querySelector(".repo-copy-btn")) {{
-                        return;
-                    }}
-
-                    const button = document.createElement("button");
-                    button.type = "button";
-                    button.className = "repo-copy-btn repo-copy-btn--title";
-                    button.setAttribute("data-repo", match[1]);
-                    button.textContent = "复制";
-                    heading.appendChild(document.createTextNode(" "));
-                    heading.appendChild(button);
-                }});
-            }}
-
-            async function copyText(text) {{
-                if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {{
-                    await navigator.clipboard.writeText(text);
-                    return;
-                }}
-
-                const textarea = document.createElement("textarea");
-                textarea.value = text;
-                textarea.setAttribute("readonly", "readonly");
-                textarea.style.position = "fixed";
-                textarea.style.opacity = "0";
-                textarea.style.pointerEvents = "none";
-                document.body.appendChild(textarea);
-                textarea.select();
-                document.execCommand("copy");
-                document.body.removeChild(textarea);
-            }}
-
-            attachTitleButtonsForLegacyReports();
-
-            container.querySelectorAll(".repo-copy-btn").forEach(function(button) {{
-                button.addEventListener("click", async function() {{
-                    const repo = button.getAttribute("data-repo") || "";
-                    if (!repo) {{
-                        return;
-                    }}
-
-                    const originalText = button.textContent;
-                    try {{
-                        await copyText(repo);
-                        button.textContent = "已复制";
-                        button.classList.add("copied");
-                    }} catch (error) {{
-                        button.textContent = "复制失败";
-                    }}
-
-                    window.setTimeout(function() {{
-                        button.textContent = originalText;
-                        button.classList.remove("copied");
-                    }}, 1400);
-                }});
-            }});
-        }})();
-    </script>
-</body>
-</html>
-"""
+    safe_title = escape(title)
+    safe_summary = escape(summary or "这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。")
+    safe_name = escape(name)
+    return _render_web_template(
+        REPORT_PAGE_TEMPLATE_PATH,
+        {
+            "__REPORT_NAME__": safe_name,
+            "__REPORT_TITLE__": safe_title,
+            "__REPORT_SUMMARY__": safe_summary,
+            "__REPORT_TOC_HTML__": toc_html,
+            "__REPORT_ARTICLE_HTML__": article_html,
+        },
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -659,31 +362,13 @@ async def status():
 @app.get("/", response_class=FileResponse)
 async def index():
     """默认打开移动端聊天页。"""
-    if not os.path.isfile(CHAT_PAGE_PATH):
-        raise HTTPException(status_code=404, detail="聊天页面不存在")
-    return FileResponse(
-        CHAT_PAGE_PATH,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    return _build_page_response(CHAT_PAGE_PATH, "聊天页面不存在")
 
 
 @app.get("/chat", response_class=FileResponse)
 async def chat_page():
     """提供移动端聊天页静态文件。"""
-    if not os.path.isfile(CHAT_PAGE_PATH):
-        raise HTTPException(status_code=404, detail="聊天页面不存在")
-    return FileResponse(
-        CHAT_PAGE_PATH,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    return _build_page_response(CHAT_PAGE_PATH, "聊天页面不存在")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -828,7 +513,8 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 # 直接运行支持: python -m github_hot_projects.api_server
 # ══════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+def main() -> None:
+    """统一的 Web/API 服务启动入口。"""
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -838,3 +524,7 @@ if __name__ == "__main__":
         port=8000,
         reload=False,
     )
+
+
+if __name__ == "__main__":
+    main()

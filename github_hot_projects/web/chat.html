@@ -17,7 +17,6 @@
     <section class="chat-panel">
       <header class="hero">
         <h1>GitHub Hot Projects</h1>
-        <p>手机端先对话下达指令，服务端调用 Agent 生成 Markdown 榜单，再把当前报告渲染成可阅读的网页返回给你。</p>
       </header>
 
       <section class="status-strip">
@@ -654,11 +653,15 @@
       if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
         const rawHtml = marked.parse(text);
         const safeHtml = DOMPurify.sanitize(rawHtml, {
-          ADD_ATTR: ["target"],
+          ADD_ATTR: [
+            "target", "class", "type", "data-repo", "title", "aria-label", "aria-hidden",
+            "viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "xmlns",
+          ],
           ALLOW_TAGS: [
             "h1","h2","h3","h4","h5","h6","p","br","hr","ul","ol","li",
             "strong","em","del","code","pre","blockquote","a","img",
             "table","thead","tbody","tr","th","td","div","span","sub","sup",
+            "button","svg","path",
           ],
         });
         // 为 .md 文件名添加报告链接
@@ -710,6 +713,72 @@
         .replace(/\"/g, "&quot;")
         .replace(/'/g, "&#39;");
     }
+
+    async function copyText(text) {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "readonly");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.pointerEvents = "none";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+
+    function setCopyButtonMessage(button, message) {
+      button.setAttribute("title", message);
+      button.setAttribute("aria-label", message);
+    }
+
+    function setCopyButtonState(button, state, repo) {
+      const idleMessage = `复制 ${repo}`;
+      const copiedMessage = `已复制 ${repo}`;
+      const failedMessage = `复制失败 ${repo}`;
+
+      button.classList.toggle("copied", state === "copied");
+      button.classList.toggle("copy-failed", state === "failed");
+
+      if (state === "copied") {
+        setCopyButtonMessage(button, copiedMessage);
+        return;
+      }
+      if (state === "failed") {
+        setCopyButtonMessage(button, failedMessage);
+        return;
+      }
+      setCopyButtonMessage(button, idleMessage);
+    }
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest(".repo-copy-btn");
+      if (!button) {
+        return;
+      }
+
+      const repo = button.getAttribute("data-repo") || "";
+      if (!repo) {
+        return;
+      }
+
+      event.preventDefault();
+      try {
+        await copyText(repo);
+        setCopyButtonState(button, "copied", repo);
+      } catch (_error) {
+        setCopyButtonState(button, "failed", repo);
+      }
+
+      window.setTimeout(() => {
+        setCopyButtonState(button, "idle", repo);
+      }, 1400);
+    });
 
     // ── 双击消息全屏查看 ──
     (function setupFullscreen() {

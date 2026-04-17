@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>__REPORT_TITLE__</title>
+  <link rel="stylesheet" href="/web/report.css?v=20260417-copy-icon-fix">
+  <script src="/web/report.js?v=20260417-copy-icon-fix" defer></script>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <span class="eyebrow">移动端报告 · __REPORT_NAME__</span>
+      <h1>__REPORT_TITLE__</h1>
+      <div class="summary">__REPORT_SUMMARY__</div>
+      <div class="toolbar">
+        <a href="/chat">返回聊天</a>
+        <a href="#toc" id="toc-trigger">目录导航</a>
+      </div>
+    </header>
+
+    <div class="toc-overlay" id="toc-overlay" aria-hidden="true">
+      <div class="toc-panel">
+        <h3>报告目录</h3>
+        <p class="toc-subtitle">点击目录项可直接跳到正文，对应浏览器返回会先回到目录视图。</p>
+        __REPORT_TOC_HTML__
+      </div>
+    </div>
+
+    <article class="content">
+      __REPORT_ARTICLE_HTML__
+    </article>
+
+    <div class="footer">GitHub Hot Projects · Mobile Report View</div>
+  </div>
+</body>
+</html>

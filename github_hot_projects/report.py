@@ -19,6 +19,15 @@ from .common.llm import call_llm_describe
 
 logger = logging.getLogger("discover_hot")
 
+REPO_COPY_ICON_SVG = (
+    '<span class="repo-copy-icon" aria-hidden="true">'
+    '<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M7.25 6.75H4.75C3.92157 6.75 3.25 7.42157 3.25 8.25V15.25C3.25 16.0784 3.92157 16.75 4.75 16.75H11.75C12.5784 16.75 13.25 16.0784 13.25 15.25V12.75" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M8.25 4.75C8.25 3.92157 8.92157 3.25 9.75 3.25H15.25C16.0784 3.25 16.75 3.92157 16.75 4.75V10.25C16.75 11.0784 16.0784 11.75 15.25 11.75H9.75C8.92157 11.75 8.25 11.0784 8.25 10.25V4.75Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    '</svg>'
+    '</span>'
+)
+
 
 # 模式 → 文件后缀 / 标题映射
 _MODE_META = {
@@ -94,7 +103,7 @@ def step3_generate_report(
         detailed_desc = desc_results.get(full_name, "")
 
         lines.append(
-            f"## {idx}. {full_name}（+{growth}，⭐{star}） <button class=\"repo-copy-btn repo-copy-btn--title\" type=\"button\" data-repo=\"{full_name}\">复制</button>\n"
+            f"## {idx}. {full_name}（+{growth}，⭐{star}） <button class=\"repo-copy-btn repo-copy-btn--title repo-copy-btn--icon\" type=\"button\" data-repo=\"{full_name}\" title=\"复制 {full_name}\" aria-label=\"复制 {full_name}\">{REPO_COPY_ICON_SVG}</button>\n"
         )
         lines.append(f"链接: {html_url}\n")
         lines.append(f"{detailed_desc}\n")

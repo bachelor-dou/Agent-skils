@@ -38,8 +38,8 @@ cd /path/to/Agent-skils
 # 安装某个 Agent 的依赖
 pip install -r github_hot_projects/requirements.txt
 
-# 运行（所有 Agent 统一格式）
-python -m <agent_name>              # 管道模式
+# 运行（默认入口由各 Agent 自己定义）
+python -m <agent_name>              # 默认入口，例如 github_hot_projects 为 Web/API 服务
 python -m <agent_name>.agent_cli    # CLI 对话（如支持）
 ```
 

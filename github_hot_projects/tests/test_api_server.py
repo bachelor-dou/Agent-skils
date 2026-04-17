@@ -92,6 +92,17 @@ class TestReportEndpoints:
             assert resp.status_code == 200
             assert "测试报告" in resp.text
 
+    def test_get_report_html_uses_web_assets(self, client, tmp_path):
+        """报告 HTML 页面应引用 web 目录下的静态资源。"""
+        report_file = tmp_path / "2026-04-14.md"
+        report_file.write_text("# 测试报告\n\nhello")
+
+        with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
+            resp = client.get("/api/reports/2026-04-14.md/html")
+            assert resp.status_code == 200
+            assert '/web/report.css' in resp.text
+            assert '/web/report.js' in resp.text
+
     def test_get_report_html_not_found(self, client, tmp_path):
         """不存在的报告应返回 404。"""
         with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
