@@ -412,7 +412,10 @@ class HotProjectAgent:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
             mode = normalized_args.get("mode", "comprehensive")
             requested_top_n = normalized_args.get("top_n")
-            if requested_top_n is None:
+            explicit_top_n = self._extract_requested_top_n()
+            if explicit_top_n is not None:
+                effective_top_n = explicit_top_n
+            elif requested_top_n is None:
                 effective_top_n = HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
             elif mode == "hot_new" and not self._user_explicitly_requested_top_n():
                 # 避免模型在未被用户要求时擅自扩大新项目榜数量。
@@ -634,6 +637,33 @@ class HotProjectAgent:
         self.state.seen_repos.clear()
         self.state.discovery_turn_id = current_turn
         logger.info("[Agent] 检测到新一轮榜单构建，已重置候选、排序和去重状态。")
+        self._log_request_summary()
+
+    def _log_request_summary(self) -> None:
+        """用中文输出当前用户请求的关键参数摘要。"""
+        mode = "hot_new" if self._is_new_project_workflow_request() else "comprehensive"
+        rank_label = "新项目榜" if mode == "hot_new" else "综合榜"
+        growth_window_days = self._extract_requested_time_window_days() or TIME_WINDOW_DAYS
+        requested_top_n = self._extract_requested_top_n()
+        effective_top_n = requested_top_n if requested_top_n is not None else (
+            HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
+        )
+        creation_window_days = self._extract_requested_creation_window_days()
+        if creation_window_days is None and mode == "hot_new":
+            creation_window_days = NEW_PROJECT_DAYS
+        creation_window_text = f"{creation_window_days}天" if creation_window_days is not None else "未启用"
+
+        logger.info(
+            "[Agent] 本轮请求参数: 榜单=%s，增长窗口=%s天，返回数量=%s，创建窗口=%s，搜索最小Star=%s，扫描范围=%s..%s，增长阈值>=%s",
+            rank_label,
+            growth_window_days,
+            effective_top_n,
+            creation_window_text,
+            STAR_RANGE_MIN,
+            STAR_RANGE_MIN,
+            STAR_RANGE_MAX,
+            STAR_GROWTH_THRESHOLD,
+        )
 
     def _workflow_mode_source(self, effective_mode: str | None) -> str:
         if effective_mode == "hot_new" and self._is_new_project_workflow_request():
@@ -672,8 +702,10 @@ class HotProjectAgent:
             return "tool_args"
         return "normalized"
 
-    @staticmethod
-    def _top_n_source(raw_args: dict, effective_top_n: int) -> str:
+    def _top_n_source(self, raw_args: dict, effective_top_n: int) -> str:
+        explicit_top_n = self._extract_requested_top_n()
+        if explicit_top_n is not None and explicit_top_n == effective_top_n:
+            return "prompt"
         requested_top_n = raw_args.get("top_n")
         if requested_top_n is None:
             return "default"
@@ -845,15 +877,26 @@ class HotProjectAgent:
 
     def _user_explicitly_requested_top_n(self) -> bool:
         """最近一条用户消息是否明确指定了榜单数量。"""
+        return self._extract_requested_top_n() is not None
+
+    def _extract_requested_top_n(self) -> int | None:
+        """从最近一条用户消息中提取榜单数量。"""
         latest_user = self._latest_user_message()
         if not latest_user:
-            return False
+            return None
 
         patterns = [
-            r"(?:top|前)\s*\d+",
-            r"\d+\s*个(?:项目|仓库|结果|条)",
+            r"(?:top|前)\s*(\d+)",
+            r"(\d+)\s*个(?:项目|仓库|结果|条)",
+            r"(\d+)\s*名",
         ]
-        return any(re.search(p, latest_user) for p in patterns)
+        for pattern in patterns:
+            match = re.search(pattern, latest_user)
+            if match:
+                value = int(match.group(1))
+                if value > 0:
+                    return value
+        return None
 
     @staticmethod
     def _serialize_result(result: dict, max_len: int = 8000) -> str:

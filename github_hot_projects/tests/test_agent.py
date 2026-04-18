@@ -288,6 +288,26 @@ class TestAgentStateMachine:
         assert any(f"min_stars={STAR_RANGE_MIN}(default)" in message for message in messages)
         assert any("creation_window_days=None(unused)" in message for message in messages)
 
+    def test_execute_tool_search_logs_request_summary_with_prompt_window_and_top_n(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.current_user_turn = 1
+        agent.state.conversation.append({"role": "user", "content": "生成近10天github综合热榜的前130名报告"})
+
+        with patch(
+            "github_hot_projects.agent.tool_search_hot_projects",
+            return_value={"repos": [], "total": 0, "_raw_repos": []},
+        ):
+            with patch("github_hot_projects.agent.logger.info") as mock_log:
+                agent._execute_tool("search_hot_projects", {"max_pages": 3})
+
+        messages = _render_log_messages(mock_log)
+        assert any("本轮请求参数" in message for message in messages)
+        assert any("榜单=综合榜" in message for message in messages)
+        assert any("增长窗口=10天" in message for message in messages)
+        assert any("返回数量=130" in message for message in messages)
+
     def test_execute_tool_returns_error_for_unknown_tool(self):
         from github_hot_projects.agent import HotProjectAgent
 
@@ -410,6 +430,24 @@ class TestAgentStateMachine:
         assert any("[Agent] Tool 生效参数: rank_candidates" in message for message in messages)
         assert any(f"top_n={HOT_PROJECT_COUNT}(default)" in message for message in messages)
         assert any("mode=comprehensive(default)" in message for message in messages)
+
+    def test_execute_tool_rank_candidates_prefers_prompt_top_n_when_tool_args_missing(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.last_candidates = {"org/repo": {"growth": 100, "star": 1000}}
+        agent.state.conversation.append({"role": "user", "content": "生成近10天github综合热榜的前130名报告"})
+
+        with patch(
+            "github_hot_projects.agent.tool_rank_candidates",
+            return_value={"ranked_projects": [], "_ordered_tuples": [], "total_candidates": 1, "returned": 0, "mode": "comprehensive"},
+        ) as mock_rank:
+            with patch("github_hot_projects.agent.logger.info") as mock_log:
+                agent._execute_tool("rank_candidates", {})
+
+        assert mock_rank.call_args.kwargs["top_n"] == 130
+        messages = _render_log_messages(mock_log)
+        assert any("top_n=130(prompt)" in message for message in messages)
 
     def test_execute_tool_batch_check_growth_requires_search_results(self):
         from github_hot_projects.agent import HotProjectAgent
