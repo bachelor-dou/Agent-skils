@@ -96,6 +96,14 @@ class TestAgentPromptRecognition:
 
         assert agent._resolve_new_project_days("search_hot_projects", {}) == 30
 
+    def test_resolve_new_project_days_supports_recent_numeric_creation_window(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.conversation.append({"role": "user", "content": "给我最近30天创建的新项目热榜前20"})
+
+        assert agent._resolve_new_project_days("search_hot_projects", {}) == 30
+
     def test_new_project_prompt_uses_time_window_but_keeps_default_creation_window(self):
         from github_hot_projects.agent import HotProjectAgent, NEW_PROJECT_DAYS
 
@@ -307,6 +315,25 @@ class TestAgentStateMachine:
         assert any("榜单=综合榜" in message for message in messages)
         assert any("增长窗口=10天" in message for message in messages)
         assert any("返回数量=130" in message for message in messages)
+        assert any("扫描范围=1300..45000" in message for message in messages)
+
+    def test_execute_tool_search_normalizes_invalid_numeric_args(self):
+        from github_hot_projects.agent import HotProjectAgent, STAR_RANGE_MIN
+
+        agent = HotProjectAgent()
+
+        with patch(
+            "github_hot_projects.agent.tool_search_hot_projects",
+            return_value={"repos": [], "total": 0, "_raw_repos": []},
+        ) as mock_search:
+            with patch("github_hot_projects.agent.logger.info") as mock_log:
+                agent._execute_tool("search_hot_projects", {"min_stars": -5, "max_pages": 0})
+
+        assert mock_search.call_args.kwargs["min_stars"] == STAR_RANGE_MIN
+        assert mock_search.call_args.kwargs["max_pages"] == 3
+        messages = _render_log_messages(mock_log)
+        assert any(f"min_stars={STAR_RANGE_MIN}(normalized)" in message for message in messages)
+        assert any("max_pages=3(normalized)" in message for message in messages)
 
     def test_execute_tool_returns_error_for_unknown_tool(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -448,6 +475,25 @@ class TestAgentStateMachine:
         assert mock_rank.call_args.kwargs["top_n"] == 130
         messages = _render_log_messages(mock_log)
         assert any("top_n=130(prompt)" in message for message in messages)
+
+    def test_execute_tool_rank_candidates_normalizes_invalid_top_n(self):
+        from github_hot_projects.agent import HotProjectAgent, HOT_PROJECT_COUNT
+
+        agent = HotProjectAgent()
+        agent.state.last_candidates = {"org/repo": {"growth": 100, "star": 1000}}
+
+        with patch(
+            "github_hot_projects.agent.tool_rank_candidates",
+            return_value={"ranked_projects": [], "_ordered_tuples": [], "total_candidates": 1, "returned": 0, "mode": "comprehensive"},
+        ) as mock_rank:
+            with patch("github_hot_projects.agent.logger.info") as mock_log:
+                agent._execute_tool("rank_candidates", {"top_n": -1, "mode": "bad-mode"})
+
+        assert mock_rank.call_args.kwargs["top_n"] == HOT_PROJECT_COUNT
+        assert mock_rank.call_args.kwargs["mode"] == "comprehensive"
+        messages = _render_log_messages(mock_log)
+        assert any(f"top_n={HOT_PROJECT_COUNT}(normalized)" in message for message in messages)
+        assert any("mode=comprehensive(normalized)" in message for message in messages)
 
     def test_execute_tool_batch_check_growth_requires_search_results(self):
         from github_hot_projects.agent import HotProjectAgent

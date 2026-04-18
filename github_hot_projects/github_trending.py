@@ -1,7 +1,11 @@
 """
-GitHub Trending 爬虫
-====================
+GitHub Trending 爬虫（执行层 · 数据源组件）
+=============================================
 爬取 GitHub Trending 页面，获取当前热门仓库列表。
+
+架构定位：
+  执行层独立数据源，由 agent_tools.tool_fetch_trending() 调用。
+  不依赖项目内部模块，仅使用 requests + 正则解析 HTML。
 
 两种使用路径：
   路径 1 — 直接展示：用户问"Trending 上有哪些项目"，直接返回列表

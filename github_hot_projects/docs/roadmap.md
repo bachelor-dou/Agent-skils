@@ -77,9 +77,6 @@ curl -X POST http://localhost:8000/api/chat \
   -d '{"session_id":"cron","message":"执行完整热门项目发现流程"}'
 ```
 
-### 方向四：MCP Server
-
-将 9 个 Tool 封装为 MCP Protocol 工具，任何 MCP 客户端（VS Code Copilot、Claude Desktop）可直接使用。
 
 ### 方向五：持久化与多用户
 

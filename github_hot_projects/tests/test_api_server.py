@@ -34,6 +34,7 @@ class TestChatEndpoints:
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
         assert "GitHub" in resp.text or "chat" in resp.text.lower()
+        assert "__SESSION_TTL_SECONDS__" not in resp.text
 
     def test_post_chat(self, client):
         """POST /api/chat 创建会话并返回 Agent 回复。"""
@@ -42,6 +43,8 @@ class TestChatEndpoints:
         data = resp.json()
         assert "reply" in data
         assert "session_id" in data
+        assert data["session_ttl_seconds"] > 0
+        assert data["session_expires_at"].endswith("Z")
 
     def test_post_chat_with_session(self, client):
         """复用 session_id 的多轮对话。"""
@@ -65,6 +68,22 @@ class TestChatEndpoints:
 
         resp2 = client.delete(f"/api/sessions/{sid}")
         assert resp2.status_code == 200
+
+    def test_delete_session_clears_pending_replies(self, client):
+        """手动删除会话时应同步清理待发回复缓冲。"""
+        from github_hot_projects import api_server
+
+        resp1 = client.post("/api/chat", json={"message": "创建会话"})
+        sid = resp1.json()["session_id"]
+
+        with api_server._pending_replies_lock:
+            api_server._pending_replies[sid] = ["pending"]
+
+        resp2 = client.delete(f"/api/sessions/{sid}")
+
+        assert resp2.status_code == 200
+        with api_server._pending_replies_lock:
+            assert sid not in api_server._pending_replies
 
     def test_delete_nonexistent_session(self, client):
         """删除不存在的会话应返回 404。"""
@@ -110,6 +129,13 @@ class TestReportEndpoints:
             assert resp.status_code == 404
 
 
+class TestStatusEndpoint:
+    def test_status_includes_session_ttl(self, client):
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["session_ttl_seconds"] > 0
+
+
 class TestReportXSS:
     def test_xss_script_stripped(self, client, tmp_path):
         """报告中的 <script> 标签应被过滤。"""
@@ -131,6 +157,17 @@ class TestReportXSS:
             resp = client.get("/api/reports/xss2.md/html")
             assert resp.status_code == 200
             assert "onerror" not in resp.text
+
+    def test_xss_javascript_href_stripped(self, client, tmp_path):
+        """Markdown 链接中的 javascript: 协议应被替换掉。"""
+        report_file = tmp_path / "xss3.md"
+        report_file.write_text("[click](javascript:alert(1))")
+
+        with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
+            resp = client.get("/api/reports/xss3.md/html")
+            assert resp.status_code == 200
+            assert 'href="javascript:alert(1)"' not in resp.text
+            assert 'href="#"' in resp.text
 
 
 class TestSessionManagement:

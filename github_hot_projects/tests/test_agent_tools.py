@@ -129,6 +129,15 @@ class TestToolRankCandidates:
         )
         assert result["mode"] == "hot_new"
 
+    def test_rank_invalid_numeric_and_mode_fall_back_to_defaults(self, sample_candidates):
+        """非法 top_n / mode 不应静默产生截断错结果。"""
+        from github_hot_projects.agent_tools import tool_rank_candidates
+
+        result = tool_rank_candidates(sample_candidates, top_n=-1, mode="bad-mode")
+
+        assert result["mode"] == "comprehensive"
+        assert result["returned"] == len(sample_candidates)
+
 
 class TestToolGenerateReport:
     def test_generate_report_call(self, tmp_path):

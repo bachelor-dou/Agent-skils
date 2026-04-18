@@ -1,7 +1,12 @@
 """
-Agent Tool 定义
-===============
+Agent Tool 定义（执行层 · 工具中枢）
+====================================
 9 个 Tool 函数 + TOOL_SCHEMAS（供 Agent ReAct 循环调用）。
+
+架构定位：
+  执行层核心，连接 Agent 层与各独立执行组件（ranking/report/growth/trending/tasks）。
+  agent.py → 【agent_tools.py】→ ranking.py / report.py / growth_estimator.py / ...
+  execution/pipeline.py 也通过本模块编排完整流程。
 
 Tool 列表：
   1. search_hot_projects    — 按关键词类别搜索热门仓库
@@ -60,6 +65,41 @@ from .tasks import (
 logger = logging.getLogger("discover_hot")
 
 
+def coerce_positive_int(value: object, default: int, minimum: int = 1) -> int:
+    """将关键数值参数规范到合法正数范围。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= minimum:
+        return value
+    return default
+
+
+def coerce_optional_positive_int(value: object) -> int | None:
+    """将可选正整数参数规范化；非法值回退为未启用。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def coerce_non_negative_int(value: object, default: int) -> int:
+    """将阈值类参数规范到非负整数。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return default
+
+
+def coerce_ranking_mode(mode: object) -> str:
+    """仅允许已知排名模式，非法值回退为默认模式。"""
+    return mode if mode in {"comprehensive", "hot_new"} else DEFAULT_SCORE_MODE
+
+
+def coerce_star_range(min_star: object, max_star: object) -> tuple[int, int]:
+    """规范化 star 扫描区间，并自动修正反向区间。"""
+    low = coerce_positive_int(min_star, STAR_RANGE_MIN)
+    high = coerce_positive_int(max_star, STAR_RANGE_MAX)
+    if high < low:
+        low, high = high, low
+    return low, high
+
+
 # ══════════════════════════════════════════════════════════════
 # Tool 实现
 # ══════════════════════════════════════════════════════════════
@@ -89,6 +129,10 @@ def tool_search_hot_projects(
          "total": int, "categories_searched": list}
     """
     from datetime import timedelta
+
+    min_stars = coerce_positive_int(min_stars, STAR_RANGE_MIN)
+    max_pages = coerce_positive_int(max_pages, 3)
+    new_project_days = coerce_optional_positive_int(new_project_days)
 
     if categories:
         keywords_dict = {k: v for k, v in SEARCH_KEYWORDS.items() if k in categories}
@@ -179,6 +223,9 @@ def tool_scan_star_range(
         new_project_days: 新项目判定窗口（天），指定后在查询中加入 created:>=date 过滤
     """
     from datetime import timedelta
+
+    min_star, max_star = coerce_star_range(min_star, max_star)
+    new_project_days = coerce_optional_positive_int(new_project_days)
 
     if seen_repos is None:
         seen_repos = set()
@@ -309,6 +356,8 @@ def tool_check_repo_growth(
         db:   DB 字典（可选，提供则优先用差值法计算增长）
         time_window_days: 增长统计窗口（天）
     """
+    time_window_days = coerce_positive_int(time_window_days, TIME_WINDOW_DAYS)
+
     parts = repo.split("/", 1)
     if len(parts) != 2:
         return {"error": f"仓库格式错误，应为 owner/repo: {repo}"}
@@ -425,6 +474,9 @@ def tool_batch_check_growth(
     """
     from datetime import timedelta
 
+    growth_threshold = coerce_non_negative_int(growth_threshold, STAR_GROWTH_THRESHOLD)
+    new_project_days = coerce_optional_positive_int(new_project_days)
+    time_window_days = coerce_positive_int(time_window_days, TIME_WINDOW_DAYS)
     effective_force_refresh = force_refresh or time_window_days != TIME_WINDOW_DAYS
 
     # 构建 raw_repos 格式
@@ -577,8 +629,17 @@ def tool_rank_candidates(
                           候选池在 batch_check_growth 阶段已按该窗口预筛；
                           与 new_project_days 一致时，排名阶段可直接按增长排序
     """
+    mode = coerce_ranking_mode(mode)
+    time_window_days = coerce_positive_int(time_window_days, TIME_WINDOW_DAYS)
+    new_project_days = coerce_optional_positive_int(new_project_days)
+    prefiltered_new_project_days = coerce_optional_positive_int(prefiltered_new_project_days)
     if top_n is None:
         top_n = HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
+    else:
+        top_n = coerce_positive_int(
+            top_n,
+            HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT,
+        )
 
     top = step2_rank_and_select(
         candidates, mode=mode, db=db,

@@ -180,6 +180,9 @@
   <script src="/web/chat-favorites.js?v=__ASSET_VER__"></script>
   <script>
     const SESSION_STORAGE_KEY = "gh-hot-session-id";
+    const SESSION_LAST_ACTIVE_KEY = "gh-hot-session-last-active";
+    const SESSION_TTL_SECONDS = Number("__SESSION_TTL_SECONDS__") || 3600;
+    const SESSION_EXPIRED_TEXT = "上一会话已过期，已自动开启新会话。可以直接开始新的提问。";
     const messagesEl = document.getElementById("messages");
     const inputEl = document.getElementById("composer-input");
     const sendButton = document.getElementById("send-button");
@@ -194,6 +197,7 @@
 
     const CHAT_HISTORY_KEY = "gh-hot-chat-history";
 
+  let initialSessionExpired = false;
     let sessionId = getOrCreateSessionId();
 
     let socket = null;
@@ -207,6 +211,9 @@
     let favoritesPanel = null;
 
     restoreMessages();
+    if (initialSessionExpired) {
+      renderSessionIntro(false, SESSION_EXPIRED_TEXT);
+    }
 
     setupComposer();
     setupQuickActions();
@@ -220,6 +227,44 @@
       return `mobile-${Math.random().toString(36).slice(2, 10)}`;
     }
 
+    function getSessionLastActive(sessionIdValue) {
+      try {
+        const raw = localStorage.getItem(`${SESSION_LAST_ACTIVE_KEY}-${sessionIdValue}`);
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function markSessionActive(sessionIdValue = sessionId) {
+      try {
+        localStorage.setItem(`${SESSION_LAST_ACTIVE_KEY}-${sessionIdValue}`, String(Date.now()));
+      } catch (error) {
+      }
+    }
+
+    function clearStoredSessionState(sessionIdValue) {
+      try {
+        localStorage.removeItem(CHAT_HISTORY_KEY + "-" + sessionIdValue);
+        localStorage.removeItem(`${SESSION_LAST_ACTIVE_KEY}-${sessionIdValue}`);
+      } catch (error) {
+      }
+    }
+
+    function isSessionExpired(sessionIdValue) {
+      if (!SESSION_TTL_SECONDS || SESSION_TTL_SECONDS <= 0) {
+        return false;
+      }
+
+      const lastActive = getSessionLastActive(sessionIdValue);
+      if (!lastActive) {
+        return false;
+      }
+
+      return Date.now() - lastActive > SESSION_TTL_SECONDS * 1000;
+    }
+
     function updateConnectionStatus(text, state) {
       // state: "connected" | "connecting" | "disconnected"
       transportStatusEl.textContent = text;
@@ -229,11 +274,32 @@
     function getOrCreateSessionId() {
       const existing = localStorage.getItem(SESSION_STORAGE_KEY);
       if (existing) {
-        return existing;
+        if (isSessionExpired(existing)) {
+          initialSessionExpired = true;
+          clearStoredSessionState(existing);
+        } else {
+          return existing;
+        }
       }
       const sid = createSessionId();
       localStorage.setItem(SESSION_STORAGE_KEY, sid);
       return sid;
+    }
+
+    function refreshExpiredSession(reasonText) {
+      if (!isSessionExpired(sessionId)) {
+        return false;
+      }
+
+      const previousSessionId = sessionId;
+      rejectActiveRequest(new Error("会话已过期"));
+      closeSocket(false);
+      clearStoredSessionState(previousSessionId);
+      const nextSessionId = createSessionId();
+      updateSessionId(nextSessionId);
+      renderSessionIntro(false, reasonText || SESSION_EXPIRED_TEXT);
+      connectWebSocket();
+      return true;
     }
 
     function updateSessionId(nextSessionId) {
@@ -302,9 +368,7 @@
 
     function clearChatHistory() {
       chatHistory = [];
-      try {
-        localStorage.removeItem(CHAT_HISTORY_KEY + "-" + sessionId);
-      } catch (e) {}
+      clearStoredSessionState(sessionId);
     }
 
     function setupComposer() {
@@ -482,6 +546,8 @@
         return;
       }
 
+      refreshExpiredSession("上一会话已过期，已自动开启新会话。本次提问将作为新会话开始。");
+
       addMessage("user", message, { asHtml: false });
       inputEl.value = "";
       autoResize();
@@ -520,7 +586,8 @@
         addMessage("system", `结束旧会话时出现提示：${error.message}` , { asHtml: false });
       }
 
-      clearChatHistory();
+      clearStoredSessionState(previousSessionId);
+      chatHistory = [];
       const nextSessionId = createSessionId();
       updateSessionId(nextSessionId);
       renderSessionIntro(false, "可以直接开始新的提问。");
@@ -598,6 +665,7 @@
       // 处理服务端待发缓冲区中的回复（重连后自动推送）
       socket.addEventListener("message", (event) => {
         if (currentSessionId !== sessionId) return;
+        markSessionActive(currentSessionId);
         if (resolveActiveRequest(event.data)) {
           return;
         }
@@ -678,6 +746,7 @@
       }
 
       const payload = await response.json();
+      markSessionActive(sessionId);
       return payload.reply || "服务端未返回内容";
     }
 

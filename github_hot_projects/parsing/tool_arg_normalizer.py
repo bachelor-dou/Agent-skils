@@ -32,6 +32,7 @@ from ..common.config import (
 )
 
 logger = logging.getLogger("discover_hot")
+_MISSING = object()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -178,8 +179,12 @@ def creation_window_source(args: dict, effective_days: int | None, user_message:
     return "default"
 
 
-def arg_source(args: dict, key: str) -> str:
-    return "tool_args" if key in args else "default"
+def arg_source(args: dict, key: str, effective_value: object = _MISSING) -> str:
+    if key not in args:
+        return "default"
+    if effective_value is _MISSING or args.get(key) == effective_value:
+        return "tool_args"
+    return "normalized"
 
 
 def mode_source(raw_args: dict, effective_mode: str, user_message: str) -> str:

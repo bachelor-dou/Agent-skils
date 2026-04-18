@@ -61,11 +61,11 @@ def extract_creation_window_days(text: str) -> int | None:
 
     numeric_patterns = [
         (r"(\d+)\s*天内创建", 1),
-        (r"近\s*(\d+)\s*天创建", 1),
+        (r"(?:近|最近)\s*(\d+)\s*天创建", 1),
         (r"(\d+)\s*周内创建", 7),
-        (r"近\s*(\d+)\s*周创建", 7),
+        (r"(?:近|最近)\s*(\d+)\s*周创建", 7),
         (r"(\d+)\s*个?月内创建", 30),
-        (r"近\s*(\d+)\s*个?月创建", 30),
+        (r"(?:近|最近)\s*(\d+)\s*个?月创建", 30),
     ]
     for pattern, multiplier in numeric_patterns:
         match = re.search(pattern, text)
@@ -73,10 +73,10 @@ def extract_creation_window_days(text: str) -> int | None:
             return int(match.group(1)) * multiplier
 
     alias_patterns = {
-        7: [r"一周内创建"],
-        14: [r"两周内创建"],
-        30: [r"一个月内创建", r"一月内创建"],
-        60: [r"两个月内创建"],
+        7: [r"一周内创建", r"(?:近|最近)一周创建"],
+        14: [r"两周内创建", r"(?:近|最近)两周创建"],
+        30: [r"一个月内创建", r"一月内创建", r"(?:近|最近)一个月创建", r"(?:近|最近)一月创建"],
+        60: [r"两个月内创建", r"(?:近|最近)两个月创建"],
     }
     for days, patterns in alias_patterns.items():
         if any(re.search(pattern, text) for pattern in patterns):

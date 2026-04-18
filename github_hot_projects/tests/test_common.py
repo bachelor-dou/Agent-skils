@@ -141,6 +141,30 @@ class TestDB:
             assert loaded["date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
             assert "x/y" in loaded["projects"]
 
+    def test_save_db_merges_stale_snapshot_fields_and_new_repos(self, tmp_path):
+        db_file = tmp_path / "merge_db.json"
+
+        with patch("github_hot_projects.common.db.DB_FILE_PATH", str(db_file)):
+            from github_hot_projects.common.db import load_db, save_db
+
+            save_db({"projects": {"a/repo": {"star": 1}}})
+
+            stale_snapshot = load_db()
+            fresh_snapshot = load_db()
+
+            fresh_snapshot["projects"]["a/repo"]["desc"] = "fresh desc"
+            fresh_snapshot["projects"]["b/repo"] = {"star": 2}
+            save_db(fresh_snapshot)
+
+            stale_snapshot["projects"]["a/repo"]["star"] = 3
+            save_db(stale_snapshot)
+
+            merged = load_db()
+            assert merged["projects"]["a/repo"]["star"] == 3
+            assert merged["projects"]["a/repo"]["desc"] == "fresh desc"
+            assert merged["projects"]["b/repo"]["star"] == 2
+            assert stale_snapshot["projects"]["b/repo"]["star"] == 2
+
     def test_load_db_corrupt_json(self, tmp_path):
         db_file = tmp_path / "corrupt.json"
         db_file.write_text("{invalid json")

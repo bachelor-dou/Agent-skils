@@ -38,6 +38,11 @@ from .common.config import (
 )
 from .agent_tools import (
     TOOL_SCHEMAS,
+    coerce_non_negative_int,
+    coerce_optional_positive_int,
+    coerce_positive_int,
+    coerce_ranking_mode,
+    coerce_star_range,
     tool_search_hot_projects,
     tool_scan_star_range,
     tool_check_repo_growth,
@@ -182,8 +187,7 @@ class AgentState:
     seen_repos: set[str] = field(default_factory=set)
     current_user_turn: int = 0
     discovery_turn_id: int | None = None
-    # 对话记忆：用户偏好 + 历史摘要
-    user_preferences: dict = field(default_factory=dict)  # 用户本次会话中的偏好
+    # 对话记忆：历史摘要
     conversation_summary: str = ""  # 早期对话的摘要（压缩后保留）
 
     def __post_init__(self):
@@ -383,12 +387,12 @@ class HotProjectAgent:
         effective_workflow_mode = self._resolve_effective_workflow_mode(name, normalized_args)
 
         if name == "search_hot_projects":
-            min_stars = normalized_args.get("min_stars", STAR_RANGE_MIN)
-            max_pages = normalized_args.get("max_pages", 3)
+            min_stars = coerce_positive_int(normalized_args.get("min_stars"), STAR_RANGE_MIN)
+            max_pages = coerce_positive_int(normalized_args.get("max_pages"), 3)
             log_effective_tool_params(name, [
                 ("workflow_mode", effective_workflow_mode, workflow_mode_source(effective_workflow_mode, user_msg)),
-                ("min_stars", min_stars, arg_source(normalized_args, "min_stars")),
-                ("max_pages", max_pages, arg_source(normalized_args, "max_pages")),
+                ("min_stars", min_stars, arg_source(args, "min_stars", min_stars)),
+                ("max_pages", max_pages, arg_source(args, "max_pages", max_pages)),
                 ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
             ])
             result = tool_search_hot_projects(
@@ -405,11 +409,21 @@ class HotProjectAgent:
             return result
 
         elif name == "scan_star_range":
-            min_star = normalized_args.get("min_star", STAR_RANGE_MIN)
-            max_star = normalized_args.get("max_star", STAR_RANGE_MAX)
+            min_star, max_star = coerce_star_range(
+                normalized_args.get("min_star"),
+                normalized_args.get("max_star"),
+            )
+            star_range_source = "default"
+            if "min_star" in args or "max_star" in args:
+                requested_min = args.get("min_star", STAR_RANGE_MIN)
+                requested_max = args.get("max_star", STAR_RANGE_MAX)
+                if requested_min == min_star and requested_max == max_star:
+                    star_range_source = "tool_args"
+                else:
+                    star_range_source = "normalized"
             log_effective_tool_params(name, [
                 ("workflow_mode", effective_workflow_mode, workflow_mode_source(effective_workflow_mode, user_msg)),
-                ("star_range", f"{min_star}..{max_star}", "tool_args" if "min_star" in normalized_args or "max_star" in normalized_args else "default"),
+                ("star_range", f"{min_star}..{max_star}", star_range_source),
                 ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
             ])
             result = tool_scan_star_range(
@@ -442,10 +456,14 @@ class HotProjectAgent:
             if not state.last_search_repos:
                 return {"error": "没有搜索结果，请先调用 search_hot_projects"}
             force_refresh = bool(normalized_args.get("force_refresh", False)) or self._is_realtime_refresh_request()
+            growth_threshold = coerce_non_negative_int(
+                normalized_args.get("growth_threshold"),
+                STAR_GROWTH_THRESHOLD,
+            )
             log_effective_tool_params(name, [
                 ("workflow_mode", effective_workflow_mode, workflow_mode_source(effective_workflow_mode, user_msg)),
                 ("candidate_repo_count", len(state.last_search_repos), "state"),
-                ("growth_threshold", normalized_args.get("growth_threshold", 800), arg_source(normalized_args, "growth_threshold")),
+                ("growth_threshold", growth_threshold, arg_source(args, "growth_threshold", growth_threshold)),
                 ("growth_window_days", effective_time_window_days, time_window_source(normalized_args, user_msg)),
                 ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
                 ("force_refresh", force_refresh, force_refresh_source(normalized_args, force_refresh)),
@@ -454,7 +472,7 @@ class HotProjectAgent:
                 state.token_mgr,
                 repos=state.last_search_repos,
                 db=state.db,
-                growth_threshold=normalized_args.get("growth_threshold", 800),
+                growth_threshold=growth_threshold,
                 new_project_days=effective_new_project_days,
                 time_window_days=effective_time_window_days,
                 force_refresh=force_refresh,
@@ -469,8 +487,8 @@ class HotProjectAgent:
         elif name == "rank_candidates":
             if not state.last_candidates:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
-            mode = normalized_args.get("mode", "comprehensive")
-            requested_top_n = normalized_args.get("top_n")
+            mode = coerce_ranking_mode(normalized_args.get("mode", "comprehensive"))
+            requested_top_n = coerce_optional_positive_int(normalized_args.get("top_n"))
             explicit_top_n = self._extract_requested_top_n()
             if explicit_top_n is not None:
                 effective_top_n = explicit_top_n
@@ -685,9 +703,9 @@ class HotProjectAgent:
         if len(conv) <= MAX_CONVERSATION_MESSAGES:
             return
 
-        # 分离 system prompt
-        system_msgs = [m for m in conv if m.get("role") == "system"]
-        non_system = [m for m in conv if m.get("role") != "system"]
+        # 分离 system prompt（只保留初始 System Prompt，丢弃旧压缩摘要消息）
+        initial_system = [m for m in conv if m.get("role") == "system" and "[对话历史摘要]" not in (m.get("content") or "")]
+        non_system = [m for m in conv if m.get("role") != "system" or "[对话历史摘要]" in (m.get("content") or "")]
 
         if len(non_system) <= KEEP_RECENT_MESSAGES:
             return
@@ -728,7 +746,7 @@ class HotProjectAgent:
             ),
         }
 
-        self.state.conversation = system_msgs + [summary_msg] + recent_msgs
+        self.state.conversation = initial_system + [summary_msg] + recent_msgs
         logger.info(
             f"[Agent] 对话历史已压缩: {len(old_msgs)} 条旧消息 → 摘要, "
             f"保留 {len(recent_msgs)} 条近期消息"

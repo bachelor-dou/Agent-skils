@@ -1,7 +1,21 @@
 """
-报告生成
-========
+报告生成（执行层 · 报告组件）
+================================
 为 Top N 项目生成 LLM 描述，并输出带结构化卡片的 Markdown 报告。
+
+架构定位：
+  执行层独立组件，由 agent_tools.tool_generate_report() 调用。
+
+工作流程：
+  1. 遍历已排名项目，优先复用 DB 缓存描述，否则调用 LLM 生成 200-400 字中文摘要
+  2. 每个项目输出结构化卡片：排名、名称（带复制图标 SVG）、增长/总星、语言、描述
+  3. 输出到 report/ 目录，文件名为日期格式 (YYYY-MM-DD.md)
+  4. 支持 comprehensive / hot_new 两种标题样式 + 自定义时间窗口
+
+关键实现细节：
+  - SVG 复制图标：内联 clip-path 图标，前端 JS 绑定点击复制仓库名
+  - LLM 描述容错：调用失败时回退到 GitHub 原始 description
+  - 原子写入：报告先写 .tmp 再 os.replace，避免中间状态
 """
 
 import logging

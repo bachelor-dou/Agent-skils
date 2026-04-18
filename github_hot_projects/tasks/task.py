@@ -321,11 +321,15 @@ class CalcGrowthTask(Task):
         if growth == GROWTH_ESTIMATION_UNRESOLVED:
             logger.warning(
                 f"  增长估算未决: {self.full_name}，"
-                "采样数据不足，未写入 checkpoint/DB，本轮跳过。"
+                "采样数据不足，标记为 unresolved 写入 checkpoint。"
             )
             unresolved_count = self._ctx.get("unresolved_count")
             if unresolved_count is not None:
                 unresolved_count[0] += 1
+            # 写入 checkpoint 标记 unresolved 状态，下次运行跳过而非重复估算
+            if self._ctx.get("use_checkpoint", True):
+                checkpoint[self.full_name] = {"growth": "unresolved", "star": current_star}
+                self._ctx["checkpoint_dirty"][0] = True
             return
 
         if self._ctx.get("use_checkpoint", True):
@@ -403,6 +407,11 @@ def _submit_growth_tasks(
             if fn in checkpoint:
                 cp = checkpoint[fn]
                 growth = cp["growth"]
+                # 跳过上轮标记为 unresolved 的仓库（不重复估算，直接从 pending 移除）
+                if growth == "unresolved":
+                    del pending[fn]
+                    resumed_count += 1
+                    continue
                 current_star = cp["star"]
                 created_at = pending[fn].get("created_at", "")
                 repo_item = pending[fn]["repo_item"]

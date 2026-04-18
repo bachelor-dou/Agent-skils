@@ -34,8 +34,8 @@ import asyncio
 import threading
 import collections
 import re
-from datetime import datetime
-from html import escape
+from datetime import datetime, timezone
+from html import escape, unescape
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -115,6 +115,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
+    session_ttl_seconds: int
+    session_expires_at: str
 
 
 # ══════════════════════════════════════════════════════════════
@@ -132,12 +134,20 @@ _pending_replies: dict[str, list[str]] = {}
 _pending_replies_lock = threading.Lock()
 
 
+def _format_session_expiry(expires_at_ts: float | None = None) -> str:
+    """返回会话过期时间的 UTC 时间戳字符串。"""
+    expires_at = expires_at_ts if expires_at_ts is not None else time.time() + _SESSION_TTL
+    return datetime.fromtimestamp(expires_at, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _cleanup_expired_sessions() -> None:
     """清理过期会话。调用者需持有 _sessions_lock。"""
     now = time.time()
     expired = [sid for sid, (_, ts) in _sessions.items() if now - ts > _SESSION_TTL]
     for sid in expired:
         del _sessions[sid]
+        with _pending_replies_lock:
+            _pending_replies.pop(sid, None)
         logger.info(f"会话过期已清理: {sid}")
 
 
@@ -153,6 +163,8 @@ def get_agent(session_id: str) -> HotProjectAgent:
             # 淘汰最久未访问的会话
             oldest_sid = min(_sessions, key=lambda k: _sessions[k][1])
             del _sessions[oldest_sid]
+            with _pending_replies_lock:
+                _pending_replies.pop(oldest_sid, None)
             logger.info(f"会话数达上限，淘汰最旧: {oldest_sid}")
         agent = HotProjectAgent()
         _sessions[session_id] = (agent, time.time())
@@ -205,8 +217,53 @@ def _build_page_response(path: str, missing_detail: str) -> HTMLResponse:
     """统一返回 no-cache 页面响应，自动替换 __ASSET_VER__ 占位符。"""
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail=missing_detail)
-    content = _load_web_text_asset(path).replace("__ASSET_VER__", ASSET_VERSION)
+    content = _render_web_template(
+        path,
+        {"__SESSION_TTL_SECONDS__": str(_SESSION_TTL)},
+    )
     return HTMLResponse(content, headers=PAGE_NO_CACHE_HEADERS)
+
+
+def _is_safe_report_url(url: str) -> bool:
+    """仅允许报告 HTML 中出现安全协议或站内相对链接。"""
+    if not url:
+        return False
+
+    normalized = unescape(url).strip()
+    if not normalized:
+        return False
+
+    if normalized.startswith(("#", "/", "./", "../", "//")):
+        return True
+
+    compact = re.sub(r"[\x00-\x20]+", "", normalized)
+    if compact.startswith(("#", "/", "./", "../", "//")):
+        return True
+
+    scheme_match = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):", compact)
+    if not scheme_match:
+        return True
+
+    return scheme_match.group(1).lower() in {"http", "https", "mailto"}
+
+
+def _sanitize_report_html_urls(html_text: str) -> str:
+    """对渲染后的 HTML 再做一层链接协议白名单过滤。"""
+    pattern = re.compile(
+        r'(?P<attr>\b(?:href|src))\s*=\s*(?P<quote>["\'])(?P<value>.*?)(?P=quote)',
+        re.IGNORECASE,
+    )
+
+    def _replace(match: re.Match[str]) -> str:
+        attr = match.group("attr")
+        quote = match.group("quote")
+        value = match.group("value")
+        if _is_safe_report_url(value):
+            return match.group(0)
+        fallback = "#" if attr.lower() == "href" else ""
+        return f"{attr}={quote}{fallback}{quote}"
+
+    return pattern.sub(_replace, html_text)
 
 
 def _render_report_html(name: str, markdown_text: str) -> str:
@@ -223,8 +280,8 @@ def _render_report_html(name: str, markdown_text: str) -> str:
         extensions=["extra", "sane_lists", "toc", "nl2br"],
         output_format="html5",
     )
-    article_html = md.convert(sanitized_text)
-    toc_html = getattr(md, "toc", "")
+    article_html = _sanitize_report_html_urls(md.convert(sanitized_text))
+    toc_html = _sanitize_report_html_urls(getattr(md, "toc", ""))
     if not toc_html.strip():
         toc_html = '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
 
@@ -382,6 +439,7 @@ async def status():
         "active_sessions": active,
         "data_dir": DATA_DIR,
         "log_path": APP_LOG_PATH,
+        "session_ttl_seconds": _SESSION_TTL,
     }
 
 
@@ -427,7 +485,12 @@ def chat(req: ChatRequest):
             status_code=503,
             detail="未配置任何 GitHub Token，无法运行。请设置 GITHUB_TOKENS 环境变量。",
         ) from exc
-    return ChatResponse(session_id=req.session_id, reply=reply)
+    return ChatResponse(
+        session_id=req.session_id,
+        reply=reply,
+        session_ttl_seconds=_SESSION_TTL,
+        session_expires_at=_format_session_expiry(),
+    )
 
 
 @app.get("/api/reports")
@@ -475,6 +538,8 @@ async def delete_session(session_id: str):
     with _sessions_lock:
         if session_id in _sessions:
             del _sessions[session_id]
+            with _pending_replies_lock:
+                _pending_replies.pop(session_id, None)
             return {"message": f"会话 {session_id} 已清除"}
     raise HTTPException(status_code=404, detail="会话不存在")
 

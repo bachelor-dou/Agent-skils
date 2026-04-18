@@ -1,9 +1,24 @@
 """
-评分排序
-========
-对候选仓库进行评分排序，支持 comprehensive（综合）和 hot_new（新项目专榜）两种模式。
+评分排序（执行层 · 评分组件）
+================================
+对候选仓库进行评分排序，支持两种模式。
+
+架构定位：
+  执行层独立组件，由 agent_tools.tool_rank_candidates() 调用。
 
 原 scorer.py，重命名为 ranking.py 以更准确反映职责。
+
+评分模式：
+  1. comprehensive（综合排名）
+     score = growth * log10(1 + growth_rate)
+     • growth     = 绝对增长量，反映项目热度
+     • growth_rate = growth / star，反映爆发力
+     • 当 rate > 0.5，启用 √(0.5/rate) 折扣，避免低基数项目虞高
+     • 同分时按 star 降序排列
+  2. hot_new（新项目专榜）
+     • 仅保留创建时间 <= new_project_days 的仓库
+     • 如果候选池已在 batch_check_growth 阶段按相同窗口预筛，直接按增长量降序
+     • 否则从 DB 补充 created_at 后再筛选
 """
 
 import logging

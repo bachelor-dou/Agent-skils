@@ -25,6 +25,7 @@ DB 结构：
   但不清空 projects 数据，保留全部历史记录。
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -42,6 +43,10 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _lock_file_path() -> str:
+    return DB_FILE_PATH + ".lock"
+
+
 def _format_utc_timestamp(ts: datetime | None = None) -> str:
     return (ts or _utc_now()).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -55,6 +60,19 @@ def _parse_refresh_timestamp(value: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _merge_project_records(disk_project: dict, memory_project: dict) -> dict:
+    """按字段合并单个仓库记录，避免旧快照整条覆盖。"""
+    merged = dict(disk_project)
+    for key, value in memory_project.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
 
 
 def load_db() -> dict:
@@ -72,8 +90,14 @@ def load_db() -> dict:
 
     try:
         with _db_lock:
-            with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
-                db = json.load(f)
+            lock_fd = open(_lock_file_path(), "w")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH)  # 共享锁（允许并发读）
+                with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
+                    db = json.load(f)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
     except (json.JSONDecodeError, IOError) as e:
         logger.warning(f"DB 文件读取失败: {e}，重新初始化。")
         return default_db
@@ -106,14 +130,56 @@ def load_db() -> dict:
 
 
 def save_db(db: dict) -> None:
-    """保存 DB 到磁盘，自动更新 date 为今天。线程安全 + 原子写入。"""
+    """保存 DB 到磁盘，自动更新 date 为今天。
+
+    采用 read-merge-write 策略：在排他锁内先读取磁盘最新版本，
+    将当前内存中的 projects 合并进去（内存侧优先），再写回。
+    这样可以避免长会话持有旧快照时覆盖其他会话的新增数据。
+    """
     db["date"] = _utc_now().strftime("%Y-%m-%d")
     try:
         with _db_lock:
-            temp_path = DB_FILE_PATH + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(db, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, DB_FILE_PATH)
+            lock_fd = open(_lock_file_path(), "w")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)  # 排他锁（阻塞其他读写）
+
+                # 读取磁盘最新版并合并 projects
+                disk_db: dict = {}
+                if os.path.exists(DB_FILE_PATH):
+                    try:
+                        with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
+                            disk_db = json.load(f)
+                    except (json.JSONDecodeError, IOError):
+                        disk_db = {}
+
+                disk_projects = disk_db.get("projects", {})
+                mem_projects = db.get("projects", {})
+                merged_projects = {
+                    name: dict(info) if isinstance(info, dict) else info
+                    for name, info in disk_projects.items()
+                }
+                for name, info in mem_projects.items():
+                    if isinstance(info, dict) and isinstance(merged_projects.get(name), dict):
+                        merged_projects[name] = _merge_project_records(merged_projects[name], info)
+                    elif isinstance(info, dict):
+                        merged_projects[name] = dict(info)
+                    else:
+                        merged_projects[name] = info
+
+                merged_db = dict(disk_db)
+                merged_db.update(db)
+                merged_db["projects"] = merged_projects
+                merged_db["valid"] = True
+                db.clear()
+                db.update(merged_db)
+
+                temp_path = DB_FILE_PATH + ".tmp"
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(db, f, ensure_ascii=False, indent=2)
+                os.replace(temp_path, DB_FILE_PATH)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
         logger.info(f"DB 已保存: {len(db.get('projects', {}))} 个项目。")
     except IOError as e:
         logger.error(f"DB 保存失败: {e}")

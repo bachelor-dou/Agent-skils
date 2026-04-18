@@ -1,7 +1,10 @@
 """
-Star 增长估算器
-===============
+Star 增长估算器（执行层 · 增长组件）
+======================================
 三条估算路径（按优先级递降）：
+
+架构定位：
+  执行层独立组件，由 agent_tools.tool_check_repo_growth() 和 tasks/task.py CalcGrowthTask 调用。
 
   A. DB 差值法   — DB 有效 + 已有仓库 → current_star - db_star（0 次请求）
   B. REST 二分法 — 新仓库/DB 无效 → stargazers 分页二分查找窗口边界（~5-10 次请求）
