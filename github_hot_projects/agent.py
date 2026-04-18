@@ -317,15 +317,51 @@ class HotProjectAgent:
             "tools": TOOL_SCHEMAS,
             "tool_choice": "auto",
             "temperature": 0.3,
-            "max_tokens": 4096,
+            "max_tokens": 16384,
         }
 
         for attempt in range(3):
             try:
                 resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=300)
                 if resp.status_code == 200:
-                    return resp.json()
-                logger.warning(f"LLM 调用失败: status={resp.status_code}, attempt={attempt + 1}")
+                    try:
+                        data = resp.json()
+                    except (ValueError, Exception) as e:
+                        logger.error(
+                            "[Agent] LLM 响应 JSON 解析失败: %s, body=%s",
+                            e, resp.text[:500],
+                        )
+                        continue
+                    # 诊断日志：记录 finish_reason 和 token 用量
+                    choice = (data.get("choices") or [{}])[0]
+                    finish = choice.get("finish_reason", "unknown")
+                    usage = data.get("usage", {})
+                    detail = usage.get("completion_tokens_details", {})
+                    logger.info(
+                        "[Agent] LLM 响应: finish=%s, prompt_tokens=%s, "
+                        "completion_tokens=%s, reasoning_tokens=%s",
+                        finish,
+                        usage.get("prompt_tokens"),
+                        usage.get("completion_tokens"),
+                        detail.get("reasoning_tokens"),
+                    )
+                    msg = choice.get("message", {})
+                    content = msg.get("content") or ""
+                    has_tools = bool(msg.get("tool_calls"))
+                    if not content and not has_tools:
+                        logger.warning(
+                            "[Agent] LLM 返回空 content 且无 tool_calls "
+                            "(finish=%s, reasoning_tokens=%s), attempt=%d",
+                            finish,
+                            detail.get("reasoning_tokens"),
+                            attempt + 1,
+                        )
+                        continue  # 重试，可能是 reasoning 耗尽 token
+                    return data
+                logger.warning(
+                    "LLM 调用失败: status=%s, body=%s, attempt=%d",
+                    resp.status_code, resp.text[:300], attempt + 1,
+                )
             except requests.RequestException as e:
                 logger.error(f"LLM 请求异常: {e}, attempt={attempt + 1}")
 

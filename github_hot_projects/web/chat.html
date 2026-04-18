@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes">
   <title>GitHub Hot Projects</title>
-  <link rel="stylesheet" href="/web/chat.css?v=20260417-favorites-links">
+  <link rel="stylesheet" href="/web/chat.css?v=20260418-darkmode-fix">
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
@@ -172,8 +172,8 @@
     <article class="fullscreen-body" id="fullscreen-body"></article>
   </div>
 
-  <script src="/web/favorites.js?v=20260417-favorites-github"></script>
-  <script src="/web/chat-favorites.js?v=20260417-favorites-github"></script>
+  <script src="/web/favorites.js?v=20260418-darkmode-fix"></script>
+  <script src="/web/chat-favorites.js?v=20260418-darkmode-fix"></script>
   <script>
     const SESSION_STORAGE_KEY = "gh-hot-session-id";
     const messagesEl = document.getElementById("messages");
@@ -251,8 +251,8 @@
       try {
         localStorage.setItem(CHAT_HISTORY_KEY + "-" + sessionId, JSON.stringify(chatHistory));
       } catch (e) {
-        // localStorage 满时提醒用户
-        addMessage("system", "本地存储空间已满，历史消息可能无法保存。建议点击"重新开始"清理旧记录。", { asHtml: false });
+        // localStorage 满时静默失败，不调用 addMessage 避免无限递归
+        console.warn("localStorage 已满，聊天历史无法保存", e);
       }
     }
 
