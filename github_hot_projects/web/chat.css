@@ -151,8 +151,43 @@ h1 {
 .status-actions {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  margin-left: 2px;
+  gap: 14px;
+  margin-left: 4px;
+}
+
+.status-session-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(23, 50, 77, 0.16);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--brand);
+  box-shadow: 0 4px 12px rgba(23, 50, 77, 0.08);
+  cursor: pointer;
+  flex-shrink: 0;
+  touch-action: manipulation;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.status-session-button:hover {
+  transform: translateY(-1px);
+  background: rgba(248, 216, 176, 0.7);
+  box-shadow: 0 10px 22px rgba(23, 50, 77, 0.12);
+}
+
+.status-session-button[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 .status-dot {
@@ -238,6 +273,7 @@ h1 {
 }
 
 .status-help-button:focus-visible,
+.status-session-button:focus-visible,
 .usage-help-close:focus-visible {
   outline: none;
   box-shadow: 0 0 0 4px rgba(47, 91, 130, 0.14);
@@ -537,6 +573,10 @@ h1 {
   border-bottom-left-radius: 8px;
 }
 
+.message--intro {
+  padding-top: 15px;
+}
+
 .message.user {
   align-self: flex-end;
   background: var(--user);
@@ -622,8 +662,8 @@ h1 {
 
 .composer-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 132px;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   align-items: stretch;
 }
 
@@ -932,8 +972,14 @@ textarea:focus {
   }
 
   .status-actions {
-    gap: 8px;
-    margin-left: 1px;
+    gap: 12px;
+    margin-left: 3px;
+  }
+
+  .status-session-button {
+    min-height: 24px;
+    padding: 0 9px;
+    font-size: 11px;
   }
 
   .status-dot {
@@ -982,8 +1028,8 @@ textarea:focus {
 
   .composer-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 50px;
-    gap: 6px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
     width: 100%;
     align-items: stretch;
   }
@@ -1167,7 +1213,7 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  touch-action: pinch-zoom;
+  touch-action: manipulation;
 }
 
 .fullscreen-overlay[hidden] {
@@ -1211,6 +1257,8 @@ textarea:focus {
   color: var(--ink);
   -webkit-overflow-scrolling: touch;
   touch-action: pan-x pan-y pinch-zoom;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .fullscreen-body h1,
@@ -1275,6 +1323,8 @@ textarea:focus {
   border-collapse: collapse;
   margin: 10px 0;
   font-size: 14px;
+  display: block;
+  overflow-x: auto;
 }
 
 .fullscreen-body th,
@@ -1497,6 +1547,17 @@ textarea:focus {
     background: rgba(40, 44, 55, 0.9);
     border-color: rgba(200, 210, 225, 0.12);
     color: var(--brand);
+  }
+
+  .status-session-button {
+    background: rgba(40, 44, 55, 0.9);
+    border-color: rgba(200, 210, 225, 0.12);
+    color: var(--brand);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+  }
+
+  .status-session-button:hover {
+    background: rgba(74, 57, 32, 0.9);
   }
 
   .usage-help-overlay {

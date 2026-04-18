@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes">
   <title>GitHub Hot Projects</title>
-  <link rel="stylesheet" href="/web/chat.css?v=20260418-darkmode-fix">
+  <link rel="stylesheet" href="/web/chat.css?v=__ASSET_VER__">
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
@@ -27,6 +27,11 @@
         <span class="status-sep">·</span>
         <div class="status-cluster status-cluster--report">
           <span class="status-text">报告 <strong id="report-count">0</strong></span>
+          <button
+            type="button"
+            class="status-session-button"
+            id="end-session-button"
+          >新会话</button>
           <div class="status-actions">
             <button
               type="button"
@@ -60,7 +65,6 @@
         </div>
         <div class="composer-row">
           <textarea id="composer-input" placeholder="例如：生成综合热榜 / 前50名 AI Agent 方向 / 增长>=500的新项目"></textarea>
-          <button id="end-session-button" class="composer-secondary-button" type="button">重新开始</button>
         </div>
         <div class="session-actions">
           <button id="send-button" class="composer-primary-button" type="button">发送</button>
@@ -172,8 +176,8 @@
     <article class="fullscreen-body" id="fullscreen-body"></article>
   </div>
 
-  <script src="/web/favorites.js?v=20260418-darkmode-fix"></script>
-  <script src="/web/chat-favorites.js?v=20260418-darkmode-fix"></script>
+  <script src="/web/favorites.js?v=__ASSET_VER__"></script>
+  <script src="/web/chat-favorites.js?v=__ASSET_VER__"></script>
   <script>
     const SESSION_STORAGE_KEY = "gh-hot-session-id";
     const messagesEl = document.getElementById("messages");
@@ -244,6 +248,8 @@
       }
       addMessage("agent", introText || "欢迎，你可以点击快捷按钮生成综合榜、新项目榜、查看 Trending，也可以输入框自定义参数（如类别、数量、增长阈值等）。", {
         asHtml: false,
+        hideLabel: true,
+        variant: "intro",
       });
     }
 
@@ -424,8 +430,11 @@
     function addMessage(role, text, options = {}) {
       const item = document.createElement("article");
       item.className = `message ${role}`;
+      if (options.variant) {
+        item.classList.add(`message--${options.variant}`);
+      }
 
-      if (role !== "system") {
+      if (role !== "system" && !options.hideLabel) {
         const label = document.createElement("div");
         label.className = "label";
         label.textContent = role === "user" ? "You" : "Agent";
@@ -514,7 +523,7 @@
       clearChatHistory();
       const nextSessionId = createSessionId();
       updateSessionId(nextSessionId);
-      renderSessionIntro(false, "已经为你清空当前对话，你可以直接开始新的提问。");
+      renderSessionIntro(false, "可以直接开始新的提问。");
       connectWebSocket();
       setSending(false);
       endSessionButton.disabled = false;
@@ -852,7 +861,6 @@
 
         body.innerHTML = content.innerHTML;
         overlay.hidden = false;
-        document.body.style.overflow = "hidden";
       }
 
       messagesEl.addEventListener("dblclick", (e) => {
@@ -863,7 +871,6 @@
 
       function closeFullscreen() {
         overlay.hidden = true;
-        document.body.style.overflow = "";
       }
 
       closeBtn.addEventListener("click", closeFullscreen);

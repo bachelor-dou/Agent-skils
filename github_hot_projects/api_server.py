@@ -46,6 +46,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import markdown
 
+import hashlib
+
 from .agent import HotProjectAgent
 from .common.config import DATA_DIR, LOG_DIR, REPORT_DIR
 
@@ -54,6 +56,19 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 CHAT_PAGE_PATH = os.path.join(WEB_DIR, "chat.html")
 REPORT_PAGE_TEMPLATE_PATH = os.path.join(WEB_DIR, "report.html")
 APP_LOG_PATH = ""
+
+
+def _compute_asset_version() -> str:
+    """根据 web/ 目录下所有文件的修改时间生成版本哈希（服务启动时计算一次）。"""
+    h = hashlib.md5(usedforsecurity=False)
+    for name in sorted(os.listdir(WEB_DIR)):
+        fpath = os.path.join(WEB_DIR, name)
+        if os.path.isfile(fpath):
+            h.update(f"{name}:{os.path.getmtime(fpath)}".encode())
+    return h.hexdigest()[:10]
+
+
+ASSET_VERSION = _compute_asset_version()
 PAGE_NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
@@ -178,18 +193,20 @@ def _load_web_text_asset(path: str) -> str:
 
 
 def _render_web_template(path: str, replacements: dict[str, str]) -> str:
-    """将占位符模板渲染为最终 HTML。"""
+    """将占位符模板渲染为最终 HTML（自动包含 __ASSET_VER__）。"""
     document = _load_web_text_asset(path)
+    replacements.setdefault("__ASSET_VER__", ASSET_VERSION)
     for placeholder, value in replacements.items():
         document = document.replace(placeholder, value)
     return document
 
 
-def _build_page_response(path: str, missing_detail: str) -> FileResponse:
-    """统一返回 no-cache 页面响应。"""
+def _build_page_response(path: str, missing_detail: str) -> HTMLResponse:
+    """统一返回 no-cache 页面响应，自动替换 __ASSET_VER__ 占位符。"""
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail=missing_detail)
-    return FileResponse(path, headers=PAGE_NO_CACHE_HEADERS)
+    content = _load_web_text_asset(path).replace("__ASSET_VER__", ASSET_VERSION)
+    return HTMLResponse(content, headers=PAGE_NO_CACHE_HEADERS)
 
 
 def _render_report_html(name: str, markdown_text: str) -> str:
