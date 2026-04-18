@@ -241,6 +241,24 @@ class TestGitHubAPI:
         assert result is None
         assert mock_get.call_count == 3
 
+    def test_auto_split_star_range_falls_back_to_another_token_when_preferred_is_rate_limited(self):
+        from github_hot_projects.common.exceptions import RateLimitError
+        from github_hot_projects.common.github_api import auto_split_star_range
+
+        token_mgr = MagicMock()
+        token_mgr.tokens = ["ghp_a", "ghp_b"]
+
+        with patch(
+            "github_hot_projects.common.github_api.get_search_total_count",
+            side_effect=[RateLimitError(token_idx=0, reset_time=9999999999.0), 500],
+        ) as mock_total_count:
+            with patch("github_hot_projects.common.github_api.time.sleep"):
+                segments = auto_split_star_range(token_mgr, 100, 200, token_idx=0)
+
+        assert segments == [(100, 200)]
+        assert mock_total_count.call_args_list[0].args[2] == 0
+        assert mock_total_count.call_args_list[1].args[2] == 1
+
     def test_get_stargazers_page_success(self, mock_token_mgr):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

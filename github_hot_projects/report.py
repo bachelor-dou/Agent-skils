@@ -309,6 +309,7 @@ def _render_repo_card(
     detailed_desc: str,
     db_date: str,
     hot_new_window: int,
+    time_window_days: int,
 ) -> str:
     html_url = f"https://github.com/{full_name}"
     readme_url = saved.get("readme_url") or f"{html_url}#readme"
@@ -322,7 +323,7 @@ def _render_repo_card(
     intro_sections = _resolve_intro_sections(saved, detailed_desc, hot_new_window)
     badge_items = [
         _render_stat_badge("star", STAR_ICON_SVG, "总 Star", _format_number(star)),
-        _render_stat_badge("growth", TREND_ICON_SVG, f"{TIME_WINDOW_DAYS}天增长", f"+{_format_number(growth)}"),
+        _render_stat_badge("growth", TREND_ICON_SVG, f"{time_window_days}天增长", f"+{_format_number(growth)}"),
         _render_stat_badge("refresh", CLOCK_ICON_SVG, refresh_badge_label, refresh_badge_value or "未知"),
     ]
     if language:
@@ -359,14 +360,20 @@ def step3_generate_report(
     db: dict,
     mode: str = "comprehensive",
     new_project_days: int | None = None,
+    time_window_days: int = TIME_WINDOW_DAYS,
 ) -> str:
     """为 Top N 项目生成 LLM 描述并输出 Markdown 报告。"""
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
+    if mode == "comprehensive" and time_window_days != TIME_WINDOW_DAYS:
+        suffix = f"{suffix}_{time_window_days}d" if suffix else f"_{time_window_days}d"
+        title_prefix = f"{title_prefix}（近{time_window_days}天增长）"
     if mode == "hot_new" and new_project_days is not None:
         suffix = f"{suffix}_{new_project_days}d"
         title_prefix = f"{title_prefix}（近{new_project_days}天）"
+    if mode == "hot_new" and time_window_days != TIME_WINDOW_DAYS:
+        suffix = f"{suffix}_win{time_window_days}d"
     report_path = os.path.join(REPORT_DIR, f"{today}{suffix}.md")
     db_projects = db.get("projects", {})
 
@@ -398,7 +405,7 @@ def step3_generate_report(
     lines: list[str] = [f"# {title_prefix} — {today}\n"]
     summary_parts = [
         f"共 {len(top_projects)} 个项目",
-        f"增长统计窗口: {TIME_WINDOW_DAYS} 天",
+        f"增长统计窗口: {time_window_days} 天",
         f"增长阈值: >={STAR_GROWTH_THRESHOLD} stars",
         f"最低 star: >={MIN_STAR_FILTER}",
         f"数据快照: {db.get('date', today) or today}",
@@ -425,6 +432,7 @@ def step3_generate_report(
                 detailed_desc,
                 db.get("date", today),
                 hot_new_window,
+                time_window_days,
             )
         )
         lines.append("")

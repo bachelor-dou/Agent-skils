@@ -26,6 +26,7 @@ from ..common.config import (
     MIN_STAR_FILTER,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
+    TIME_WINDOW_DAYS,
 )
 from ..common.db import save_db, update_db_project, get_cached_growth, set_growth_cache, is_project_refresh_fresh
 from ..common.github_api import search_github_repos
@@ -293,9 +294,13 @@ class CalcGrowthTask(Task):
         logger.info(
             f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
         )
+        time_window_days = TIME_WINDOW_DAYS
+        if self._ctx is not None:
+            time_window_days = self._ctx.get("time_window_days", TIME_WINDOW_DAYS)
         growth = estimate_star_growth_binary(
             self._token_mgr, owner, repo_name, self.current_star,
             token_idx=token_idx,
+            time_window_days=time_window_days,
         )
         if growth >= 0 and growth > self.current_star:
             growth = self.current_star
@@ -323,17 +328,19 @@ class CalcGrowthTask(Task):
                 unresolved_count[0] += 1
             return
 
-        checkpoint[self.full_name] = {"growth": growth, "star": current_star}
-        self._ctx["checkpoint_dirty"][0] = True
-        self._ctx["completed_since_save"][0] += 1
+        if self._ctx.get("use_checkpoint", True):
+            checkpoint[self.full_name] = {"growth": growth, "star": current_star}
+            self._ctx["checkpoint_dirty"][0] = True
+            self._ctx["completed_since_save"][0] += 1
 
         if growth >= 0:
             update_db_project(db_projects, self.full_name, current_star, self.repo_item)
-            set_growth_cache(db_projects, self.full_name, growth)
+            if self._ctx.get("cache_growth", True):
+                set_growth_cache(db_projects, self.full_name, growth)
             if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
 
-        if self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
+        if self._ctx.get("use_checkpoint", True) and self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
             _save_checkpoint(checkpoint)
             self._ctx["checkpoint_dirty"][0] = False
             self._ctx["completed_since_save"][0] = 0
@@ -347,9 +354,10 @@ class CalcGrowthTask(Task):
             db_projects = self._ctx["db_projects"]
             checkpoint = self._ctx["checkpoint"]
             update_db_project(db_projects, self.full_name, fallback_star, self.repo_item)
-            checkpoint[self.full_name] = {"growth": -1, "star": fallback_star}
-            self._ctx["checkpoint_dirty"][0] = True
-            self._ctx["completed_since_save"][0] += 1
+            if self._ctx.get("use_checkpoint", True):
+                checkpoint[self.full_name] = {"growth": -1, "star": fallback_star}
+                self._ctx["checkpoint_dirty"][0] = True
+                self._ctx["completed_since_save"][0] += 1
 
     def __str__(self) -> str:
         return f"CalcGrowth({self.full_name})"
@@ -378,8 +386,9 @@ def _submit_growth_tasks(
     db_projects = db.get("projects", {})
     growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
     force_refresh = bool(growth_ctx.get("force_refresh", False))
+    use_checkpoint = bool(growth_ctx.get("use_checkpoint", not force_refresh))
 
-    checkpoint = {} if force_refresh else _load_checkpoint()
+    checkpoint = {} if not use_checkpoint else _load_checkpoint()
     growth_ctx["checkpoint"] = checkpoint
 
     pending = {
@@ -388,7 +397,7 @@ def _submit_growth_tasks(
     }
 
     resumed_count = 0
-    if not force_refresh:
+    if use_checkpoint:
         # 从 checkpoint 恢复
         for fn in list(pending.keys()):
             if fn in checkpoint:
@@ -448,9 +457,9 @@ def _submit_growth_tasks(
                     _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
                 del pending[full_name]
     else:
-        logger.info("强制刷新模式：跳过 checkpoint、growth_cache 和 DB 差值，全部走实时增长估算。")
+        logger.info("强制刷新/自定义窗口模式：跳过 checkpoint、growth_cache 和 DB 差值，全部走实时增长估算。")
 
-    if checkpoint_dirty:
+    if use_checkpoint and checkpoint_dirty:
         _save_checkpoint(checkpoint)
 
     # 非 DB 差值：提交 CalcGrowthTask 到池子

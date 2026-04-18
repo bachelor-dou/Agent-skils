@@ -90,9 +90,14 @@
         下面这些是当前前端公开给用户的常用参数入口，你可以直接把条件写进一句话里。
       </p>
       <p class="usage-help-note">
-        当前增长统计窗口固定为 7 天，这里不能直接指定；你能指定的是榜单数量、筛选范围、新项目窗口、Trending 周期等条件。
+        现在可以直接指定增长统计窗口，例如“近10天热榜”“近30天综合榜”；只有“30天内创建的新项目”这类明确创建时间语义，才会走新项目创建窗口。
       </p>
       <div class="usage-help-grid">
+        <article class="usage-help-item">
+          <h3>增长窗口</h3>
+          <p>默认：7 天</p>
+          <p>示例：近 10 天热榜、近 30 天综合榜</p>
+        </article>
         <article class="usage-help-item">
           <h3>榜单数量</h3>
           <p>默认：综合榜 100，新项目榜 20</p>
@@ -121,7 +126,7 @@
         <article class="usage-help-item">
           <h3>新项目窗口</h3>
           <p>默认：45 天</p>
-          <p>示例：近 30 天新项目、近一个月新项目榜</p>
+          <p>示例：30 天内创建的新项目、一个月内创建的新项目榜</p>
         </article>
         <article class="usage-help-item">
           <h3>Trending 周期</h3>

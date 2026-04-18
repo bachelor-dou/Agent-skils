@@ -169,7 +169,7 @@ def tool_scan_star_range(
     使用 TokenWorkerPool + ScanSegmentTask 并行扫描各子区间。
 
     阶段隔离：
-      Phase 0 — 串行：auto_split_star_range 递归分段（Pool 未启动，token_idx=0）
+    Phase 0 — 串行：auto_split_star_range 递归分段（主线程优先 token_idx=0，限流时自动切换其他 token）
       Phase 1 — 并行：ScanSegmentTask 提交到 Pool，N Worker 并行扫描
 
     Args:
@@ -192,7 +192,7 @@ def tool_scan_star_range(
         created_after = cutoff.strftime("%Y-%m-%d")
         extra_query = f"created:>={created_after}"
 
-    # ── Phase 0: 串行分段（Pool 未启动，token_idx=0 独占） ──
+    # ── Phase 0: 串行分段（主线程优先 token_idx=0，必要时自动切换其他 token） ──
     segments = auto_split_star_range(
         token_mgr, min_star, max_star, token_idx=0, extra_query=extra_query
     )
@@ -295,6 +295,7 @@ def tool_check_repo_growth(
     token_mgr: TokenManager,
     repo: str,
     db: dict | None = None,
+    time_window_days: int = TIME_WINDOW_DAYS,
 ) -> dict:
     """
     Tool 3: 查询单个仓库近期 star 增长，实时获取项目详情并生成 LLM 描述。
@@ -306,6 +307,7 @@ def tool_check_repo_growth(
     Args:
         repo: "owner/repo" 格式
         db:   DB 字典（可选，提供则优先用差值法计算增长）
+        time_window_days: 增长统计窗口（天）
     """
     parts = repo.split("/", 1)
     if len(parts) != 2:
@@ -330,15 +332,25 @@ def tool_check_repo_growth(
         and db.get("valid")
         and db_project
         and is_project_refresh_fresh(db_project)
+        and time_window_days == TIME_WINDOW_DAYS
     )
     if can_use_db_diff:
         saved_star = db_project.get("star", 0)
         growth = current_star - saved_star
         method = "DB差值法"
     else:
-        growth = estimate_star_growth_binary(token_mgr, owner, repo_name, current_star, token_idx=0)
-        if db and db.get("valid") and db_project:
+        growth = estimate_star_growth_binary(
+            token_mgr,
+            owner,
+            repo_name,
+            current_star,
+            token_idx=0,
+            time_window_days=time_window_days,
+        )
+        if db and db.get("valid") and db_project and time_window_days == TIME_WINDOW_DAYS:
             method = "仓库基线过期，二分法/采样外推"
+        elif db and db_project and time_window_days != TIME_WINDOW_DAYS:
+            method = f"自定义{time_window_days}天窗口，二分法/采样外推"
         else:
             method = "二分法/采样外推"
 
@@ -375,7 +387,7 @@ def tool_check_repo_growth(
         "current_star": current_star,
         "growth": growth_value,
         "growth_status": growth_status,
-        "time_window_days": TIME_WINDOW_DAYS,
+        "time_window_days": time_window_days,
         "method": method,
         "meets_threshold": meets_threshold,
         "warning": growth_warning,
@@ -393,6 +405,7 @@ def tool_batch_check_growth(
     db: dict,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
     new_project_days: int | None = None,
+    time_window_days: int = TIME_WINDOW_DAYS,
     force_refresh: bool = False,
 ) -> dict:
     """
@@ -407,9 +420,12 @@ def tool_batch_check_growth(
         db:               DB 字典
         growth_threshold: 增长阈值
         new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
+        time_window_days: 增长统计窗口（天）
         force_refresh:    是否强制实时刷新（不复用 DB 与缓存）
     """
     from datetime import timedelta
+
+    effective_force_refresh = force_refresh or time_window_days != TIME_WINDOW_DAYS
 
     # 构建 raw_repos 格式
     raw_repos: dict[str, dict] = {}
@@ -506,7 +522,10 @@ def tool_batch_check_growth(
             "db_projects": db.get("projects", {}),
             "candidate_map": candidate_map,
             "growth_threshold": growth_threshold,
-            "force_refresh": force_refresh,
+            "force_refresh": effective_force_refresh,
+            "time_window_days": time_window_days,
+            "use_checkpoint": not effective_force_refresh,
+            "cache_growth": time_window_days == TIME_WINDOW_DAYS,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
@@ -532,7 +551,8 @@ def tool_batch_check_growth(
         "unresolved_sampling_count": growth_ctx["unresolved_count"][0],
         "skipped_by_creation_time": skipped_count,
         "threshold": growth_threshold,
-        "force_refresh": force_refresh,
+        "force_refresh": effective_force_refresh,
+        "time_window_days": time_window_days,
     }
 
 
@@ -543,6 +563,7 @@ def tool_rank_candidates(
     db: dict | None = None,
     new_project_days: int | None = None,
     prefiltered_new_project_days: int | None = None,
+    time_window_days: int = TIME_WINDOW_DAYS,
 ) -> dict:
     """
     Tool 5: 对候选列表评分排序。
@@ -569,7 +590,7 @@ def tool_rank_candidates(
         save_db(db)
 
     # 将评分持久化到 DB（跨会话可查）
-    if db is not None:
+    if db is not None and time_window_days == TIME_WINDOW_DAYS:
         db_projects = db.get("projects", {})
         for name, info in top:
             score = info.get("_score")
@@ -625,6 +646,7 @@ def tool_generate_report(
     db: dict,
     mode: str = "comprehensive",
     new_project_days: int | None = None,
+    time_window_days: int = TIME_WINDOW_DAYS,
 ) -> dict:
     """
     Tool 7: 生成完整 Markdown 报告。
@@ -636,6 +658,7 @@ def tool_generate_report(
         db,
         mode=mode,
         new_project_days=new_project_days,
+        time_window_days=time_window_days,
     )
     return {"report_path": report_path, "project_count": len(top_projects)}
 
@@ -822,7 +845,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "查询单个GitHub仓库的实时详细信息：当前star、近期增长、语言、简介、创建时间，"
                 "并调用LLM生成项目详细描述（README浓缩摘要）。"
-                f"增长窗口为近{TIME_WINDOW_DAYS}天。"
+                f"默认增长窗口为近{TIME_WINDOW_DAYS}天；如用户明确说近10天/近30天，则应传对应的time_window_days。"
             ),
             "parameters": {
                 "type": "object",
@@ -830,6 +853,10 @@ TOOL_SCHEMAS = [
                     "repo": {
                         "type": "string",
                         "description": "仓库全名，格式为 owner/repo，如 vllm-project/vllm",
+                    },
+                    "time_window_days": {
+                        "type": "integer",
+                        "description": "增长统计窗口（天）。如用户说近10天/近30天，则传对应值；默认不传时使用系统默认窗口。",
                     },
                 },
                 "required": ["repo"],
@@ -843,6 +870,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "批量计算多个仓库的star增长并筛选满足阈值的候选。"
                 "通常在search_hot_projects之后调用。"
+                "指定time_window_days时，按对应增长窗口计算近期增长。"
                 "指定new_project_days时，先按创建时间筛选新项目再计算增长，大幅减少请求量。"
                 "指定force_refresh=true时，强制走实时估算，不复用DB差值和增长缓存。"
             ),
@@ -857,9 +885,13 @@ TOOL_SCHEMAS = [
                     "new_project_days": {
                         "type": "integer",
                         "description": (
-                            "新项目筛选窗口（天）。指定后只对创建时间在该窗口内的仓库计算增长。"
-                            "不传则对所有仓库计算增长（综合排名场景）。"
+                            "新项目创建窗口（天）。仅在用户明确提到“30天内创建的新项目”这类创建时间语义时传。"
+                            "不传则使用默认新项目创建窗口，或在综合排名场景下不做创建时间筛选。"
                         ),
+                    },
+                    "time_window_days": {
+                        "type": "integer",
+                        "description": "增长统计窗口（天）。如用户说近10天/近30天热榜，应传对应值。",
                     },
                     "force_refresh": {
                         "type": "boolean",
@@ -905,8 +937,8 @@ TOOL_SCHEMAS = [
                     "new_project_days": {
                         "type": "integer",
                         "description": (
-                            "hot_new模式下的新项目判定窗口（天）。"
-                            f"默认{NEW_PROJECT_DAYS}天。如用户说'近一个月的新项目'则传30。"
+                            "hot_new 模式下的新项目创建窗口（天）。"
+                            f"默认{NEW_PROJECT_DAYS}天。仅在用户明确说“30天内创建的新项目”时才传具体值。"
                         ),
                     },
                 },

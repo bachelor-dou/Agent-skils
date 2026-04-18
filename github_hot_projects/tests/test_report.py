@@ -105,6 +105,39 @@ class TestReport:
         assert "⭐1200" in content
         assert "30天内新项目" in content
 
+    def test_generate_report_comprehensive_custom_time_window(self, tmp_path):
+        db = {
+            "date": "2026-04-17",
+            "projects": {
+                "hot-org/hot-repo": {
+                    "desc": "",
+                    "short_desc": "A hot repository",
+                    "language": "Python",
+                    "topics": ["ai"],
+                    "created_at": "2026-04-01T00:00:00Z",
+                    "refreshed_at": "2026-04-17T03:25:00Z",
+                    "readme_url": "https://github.com/hot-org/hot-repo/blob/HEAD/README.md",
+                },
+            },
+        }
+        top_projects = [("hot-org/hot-repo", {"growth": 2000, "star": 15000})]
+
+        with patch("github_hot_projects.report.REPORT_DIR", str(tmp_path)):
+            with patch("github_hot_projects.report.call_llm_describe", return_value="测试描述内容"):
+                from github_hot_projects.report import step3_generate_report
+                path = step3_generate_report(
+                    top_projects,
+                    db,
+                    mode="comprehensive",
+                    time_window_days=10,
+                )
+
+        assert path.endswith("_10d.md")
+        content = open(path, "r", encoding="utf-8").read()
+        assert "增长统计窗口: 10 天" in content
+        assert "10天增长" in content
+        assert "近10天增长" in content
+
     def test_generate_report_uses_db_cache(self, tmp_path):
         """DB 中已有描述的项目不调用 LLM。"""
         db = {

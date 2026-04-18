@@ -36,9 +36,10 @@ GROWTH_ESTIMATION_UNRESOLVED = -2
 def estimate_star_growth_binary(
     token_mgr: TokenManager, owner: str, repo: str, total_stars: int,
     token_idx: int = 0,
+    time_window_days: int = TIME_WINDOW_DAYS,
 ) -> int:
     """
-    使用 REST stargazers API + 二分法，估算近 TIME_WINDOW_DAYS 天的 star 增量。
+    使用 REST stargazers API + 二分法，估算近指定窗口的 star 增量。
 
     原理：
     ────────────────────────────────────────────
@@ -67,7 +68,7 @@ def estimate_star_growth_binary(
 
     per_page = 100
     total_pages = math.ceil(total_stars / per_page)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=TIME_WINDOW_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=time_window_days)
 
     # ── 快速检查：最新一页 ──
     last_page_data = get_stargazers_page(token_mgr, owner, repo, total_pages, token_idx, per_page)
@@ -76,7 +77,7 @@ def estimate_star_growth_binary(
         logger.info(
             f"  [GROWTH] {owner}/{repo} 最后一页(page={total_pages})不可访问，降级为采样外推。"
         )
-        return estimate_by_sampling(token_mgr, owner, repo, token_idx)
+        return estimate_by_sampling(token_mgr, owner, repo, token_idx, time_window_days=time_window_days)
 
     if not last_page_data:
         return 0
@@ -108,7 +109,7 @@ def estimate_star_growth_binary(
             logger.info(
                 f"  [GROWTH] {owner}/{repo} page={mid} 不可访问，降级为采样外推。"
             )
-            return estimate_by_sampling(token_mgr, owner, repo, token_idx)
+            return estimate_by_sampling(token_mgr, owner, repo, token_idx, time_window_days=time_window_days)
 
         if not page_data:
             consecutive_failures += 1
@@ -116,7 +117,7 @@ def estimate_star_growth_binary(
                 logger.info(
                     f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 页空数据，降级为采样外推。"
                 )
-                return estimate_by_sampling(token_mgr, owner, repo, token_idx)
+                return estimate_by_sampling(token_mgr, owner, repo, token_idx, time_window_days=time_window_days)
             lo = mid + 1
             continue
 
@@ -127,7 +128,7 @@ def estimate_star_growth_binary(
                 logger.info(
                     f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 次无法解析时间戳，降级为采样外推。"
                 )
-                return estimate_by_sampling(token_mgr, owner, repo, token_idx)
+                return estimate_by_sampling(token_mgr, owner, repo, token_idx, time_window_days=time_window_days)
             lo = mid + 1
             continue
 
@@ -161,6 +162,7 @@ def estimate_star_growth_binary(
 def estimate_by_sampling(
     token_mgr: TokenManager, owner: str, repo: str,
     token_idx: int = 0,
+    time_window_days: int = TIME_WINDOW_DAYS,
 ) -> int:
     """
     采样外推法（增强版）：多批次 GraphQL 游标翻页采集 ~3000 条 star，
@@ -174,7 +176,7 @@ def estimate_by_sampling(
             3. 分段速率：按 100 条一段，越新的段权重越高（线性加权 1,2,...,n）
             4. 外推：rate × window_seconds = 整个窗口的预估增长
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=TIME_WINDOW_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=time_window_days)
     all_timestamps: list[datetime] = []
     cursor: str | None = None
     max_batches = MAX_GRAPHQL_SAMPLING_BATCHES
@@ -218,7 +220,7 @@ def estimate_by_sampling(
         return in_window
 
     # ── 全部采样都在窗口内 → 分段加权速率外推 ──
-    window_seconds = TIME_WINDOW_DAYS * 86400
+    window_seconds = time_window_days * 86400
     time_span = (all_timestamps[-1] - all_timestamps[0]).total_seconds()
 
     if time_span <= 0:

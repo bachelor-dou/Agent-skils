@@ -157,6 +157,51 @@ def get_search_total_count(token_mgr: TokenManager, query: str, token_idx: int) 
     return 0
 
 
+def _get_search_total_count_with_fallback(
+    token_mgr: TokenManager,
+    query: str,
+    preferred_token_idx: int,
+) -> tuple[int, int]:
+    """优先使用指定 token 获取 total_count，限流或失效时自动尝试其他 token。"""
+    token_count = len(getattr(token_mgr, "tokens", []))
+    if token_count <= 1:
+        return get_search_total_count(token_mgr, query, preferred_token_idx), preferred_token_idx
+
+    token_order = [preferred_token_idx] + [
+        idx for idx in range(token_count) if idx != preferred_token_idx
+    ]
+    earliest_rate_limit: tuple[int, float] | None = None
+    last_token_invalid: TokenInvalidError | None = None
+
+    for token_idx in token_order:
+        try:
+            total = get_search_total_count(token_mgr, query, token_idx)
+            return total, token_idx
+        except RateLimitError as exc:
+            logger.warning(
+                "total_count 查询命中限流: query='%s', token=%s, reset=%s，尝试其他 token。",
+                query,
+                token_idx,
+                int(exc.reset_time),
+            )
+            if earliest_rate_limit is None or exc.reset_time < earliest_rate_limit[1]:
+                earliest_rate_limit = (token_idx, exc.reset_time)
+        except TokenInvalidError as exc:
+            logger.warning(
+                "total_count 查询 token 失效: query='%s', token=%s，尝试其他 token。",
+                query,
+                token_idx,
+            )
+            last_token_invalid = exc
+
+    if earliest_rate_limit is not None:
+        token_idx, reset_time = earliest_rate_limit
+        raise RateLimitError(token_idx=token_idx, reset_time=reset_time)
+    if last_token_invalid is not None:
+        raise last_token_invalid
+    return get_search_total_count(token_mgr, query, preferred_token_idx), preferred_token_idx
+
+
 def auto_split_star_range(
     token_mgr: TokenManager,
     low: int,
@@ -170,7 +215,8 @@ def auto_split_star_range(
     递归自动分段：将 [low, high] 星数范围拆成若干子区间，
     使每个子区间的 total_count <= max_results。
 
-    在 WorkerPool 启动前由主线程调用，使用固定 token_idx。
+    在 WorkerPool 启动前由主线程调用，优先使用给定 token_idx；
+    若该 token 限流或失效，会自动尝试其他可用 token。
 
     Args:
         extra_query: 附加查询条件（如 "created:>=2026-03-10"），会与 stars 条件合并
@@ -184,7 +230,7 @@ def auto_split_star_range(
     query = f"stars:{low}..{high}"
     if extra_query:
         query = f"{query} {extra_query}"
-    total = get_search_total_count(token_mgr, query, token_idx)
+    total, active_token_idx = _get_search_total_count_with_fallback(token_mgr, query, token_idx)
     time.sleep(SEARCH_REQUEST_INTERVAL)
 
     if total <= max_results:
@@ -196,8 +242,8 @@ def auto_split_star_range(
         f"  区间 stars:{low}..{high} → total_count={total}，"
         f"细分 → [{low}..{mid}] + [{mid + 1}..{high}]"
     )
-    left = auto_split_star_range(token_mgr, low, mid, token_idx, max_results, min_span, extra_query)
-    right = auto_split_star_range(token_mgr, mid + 1, high, token_idx, max_results, min_span, extra_query)
+    left = auto_split_star_range(token_mgr, low, mid, active_token_idx, max_results, min_span, extra_query)
+    right = auto_split_star_range(token_mgr, mid + 1, high, active_token_idx, max_results, min_span, extra_query)
     return left + right
 
 
