@@ -32,6 +32,12 @@ nohup python -m github_hot_projects >> github_hot_projects/logs/server.log 2>&1 
 ```bash
 pkill -f "python -m github_hot_projects" || true; cd /root/code/Agent-skils && nohup python -m github_hot_projects >> github_hot_projects/logs/server.log 2>&1 &
 ```
+### 其它入口
+
+```bash
+python -m github_hot_projects.agent_cli  # 终端交互模式
+```
+
 
 ### 4. 查看日志 / 停止服务
 
@@ -56,11 +62,7 @@ python -m github_hot_projects
 
 > **安全组**：阿里云 ECS 控制台 → 安全组 → 入方向 → 添加规则：端口 8000/TCP，授权对象 0.0.0.0/0
 
-### 其它入口
 
-```bash
-python -m github_hot_projects.agent_cli  # 终端交互模式
-```
 
 ## 入口脚本职责
 
