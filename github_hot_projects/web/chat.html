@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.1, maximum-scale=10.0, user-scalable=yes">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes">
   <title>GitHub Hot Projects</title>
   <link rel="stylesheet" href="/web/chat.css?v=20260417-favorites-links">
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
@@ -251,7 +251,8 @@
       try {
         localStorage.setItem(CHAT_HISTORY_KEY + "-" + sessionId, JSON.stringify(chatHistory));
       } catch (e) {
-        // localStorage 满时静默失败
+        // localStorage 满时提醒用户
+        addMessage("system", "本地存储空间已满，历史消息可能无法保存。建议点击"重新开始"清理旧记录。", { asHtml: false });
       }
     }
 
@@ -565,7 +566,18 @@
         return;
       }
 
+      // 连接超时：30 秒内未 open 则放弃
+      const connectTimeout = setTimeout(() => {
+        if (socket && socket.readyState === WebSocket.CONNECTING) {
+          socket.close();
+          socketReady = false;
+          updateConnectionStatus("普通模式", "disconnected");
+          scheduleReconnect();
+        }
+      }, 30000);
+
       socket.addEventListener("open", () => {
+        clearTimeout(connectTimeout);
         if (currentSessionId !== sessionId) {
           return;
         }
@@ -591,6 +603,7 @@
       });
 
       socket.addEventListener("close", (event) => {
+        clearTimeout(connectTimeout);
         if (currentSessionId !== sessionId) {
           return;
         }
@@ -603,6 +616,7 @@
       });
 
       socket.addEventListener("error", () => {
+        clearTimeout(connectTimeout);
         if (currentSessionId !== sessionId) {
           return;
         }

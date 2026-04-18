@@ -1440,3 +1440,189 @@ textarea:focus {
   height: 28px;
   margin-left: 10px;
 }
+
+/* ── 深色模式 ── */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #151921;
+    --panel: rgba(30, 34, 44, 0.92);
+    --panel-strong: #1e222c;
+    --ink: #e1e4ea;
+    --muted: #8b919d;
+    --brand: #9bc4ed;
+    --brand-soft: #6fa8d6;
+    --accent: #e0a050;
+    --accent-soft: #4a3920;
+    --agent: #252a34;
+    --user: #1e3350;
+    --ok: #4ade80;
+    --border: rgba(200, 210, 225, 0.1);
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  }
+
+  html, body {
+    background: linear-gradient(180deg, #13161d 0%, #1a1e28 100%);
+  }
+
+  .hero {
+    background: linear-gradient(135deg, #0f1a2a, #1a3050);
+  }
+
+  .status-strip {
+    background: rgba(30, 34, 44, 0.92);
+  }
+
+  .messages {
+    background: linear-gradient(180deg, rgba(25, 28, 36, 0.9), rgba(20, 23, 30, 0.85));
+  }
+
+  .composer {
+    background: rgba(30, 34, 44, 0.94);
+  }
+
+  textarea {
+    background: #20242e;
+    border-color: rgba(200, 210, 225, 0.12);
+    color: var(--ink);
+  }
+
+  textarea:focus {
+    border-color: rgba(100, 160, 220, 0.45);
+    box-shadow: 0 0 0 4px rgba(100, 160, 220, 0.1);
+  }
+
+  .status-help-button {
+    background: rgba(40, 44, 55, 0.9);
+    border-color: rgba(200, 210, 225, 0.12);
+    color: var(--brand);
+  }
+
+  .usage-help-overlay {
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .usage-help-card {
+    background: linear-gradient(180deg, #1e222c, #22262f);
+    border-color: rgba(200, 210, 225, 0.1);
+  }
+
+  .usage-help-item {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(200, 210, 225, 0.08);
+  }
+
+  .usage-help-examples {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .favorites-overlay {
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .favorites-card {
+    background: linear-gradient(180deg, #1e222c, #22262f);
+    border-color: rgba(200, 210, 225, 0.1);
+  }
+
+  .favorite-item {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(200, 210, 225, 0.08);
+  }
+
+  .quick-actions button {
+    background: linear-gradient(135deg, #9c6230, #7a4a1d);
+    border-color: rgba(160, 100, 40, 0.3);
+  }
+
+  .composer-secondary-button {
+    background: rgba(50, 55, 65, 0.7);
+    border-color: rgba(200, 210, 225, 0.12);
+    color: var(--brand);
+  }
+
+  .report-head {
+    background: linear-gradient(180deg, rgba(30, 34, 44, 0.9), rgba(35, 39, 48, 0.85));
+  }
+
+  .report-list {
+    background: linear-gradient(180deg, rgba(25, 28, 36, 0.7), rgba(20, 23, 30, 0.5));
+  }
+
+  .report-card {
+    background: rgba(40, 44, 55, 0.75);
+    border-color: rgba(200, 210, 225, 0.08);
+  }
+
+  .empty {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(200, 210, 225, 0.1);
+  }
+
+  .message.system {
+    background: rgba(40, 44, 55, 0.7);
+    border-color: rgba(200, 210, 225, 0.1);
+  }
+
+  .fullscreen-overlay {
+    background: #13161d;
+  }
+
+  .fullscreen-header {
+    background: #1a1e28;
+    border-color: rgba(200, 210, 225, 0.1);
+  }
+
+  .mobile-tabs {
+    background: #1e222c;
+    border-color: rgba(200, 210, 225, 0.1);
+  }
+}
+
+/* ── 减弱动画偏好 ── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── 打印样式 ── */
+
+@media print {
+  body {
+    background: #fff;
+    padding: 0;
+  }
+
+  .mobile-tabs,
+  .composer,
+  .report-panel,
+  .quick-actions,
+  .status-strip,
+  .fullscreen-overlay,
+  .usage-help-overlay,
+  .favorites-overlay {
+    display: none !important;
+  }
+
+  .shell {
+    display: block;
+    max-width: 100%;
+  }
+
+  .chat-panel {
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+  }
+
+  .messages {
+    overflow: visible;
+    max-height: none;
+  }
+}

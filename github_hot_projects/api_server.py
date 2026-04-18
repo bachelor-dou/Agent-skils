@@ -26,6 +26,7 @@ API 接口：
 """
 
 import logging
+import logging.handlers
 import os
 import glob
 import time
@@ -61,7 +62,7 @@ PAGE_NO_CACHE_HEADERS = {
 
 
 def setup_app_logging() -> str:
-    """配置 API 业务日志：仅写入日期文件，不污染 uvicorn 访问日志输出。"""
+    """配置 API 业务日志：使用 RotatingFileHandler 防止单日志过大，不污染 uvicorn 访问日志输出。"""
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(
         LOG_DIR,
@@ -75,7 +76,9 @@ def setup_app_logging() -> str:
         except Exception:
             pass
 
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
@@ -293,7 +296,7 @@ def _is_rate_limited(ip: str) -> bool:
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):
-    """统一安全中间件：黑名单 → 敏感路径 → 速率限制。"""
+    """统一安全中间件：黑名单 → 敏感路径 → 速率限制 → 请求日志。"""
 
     async def dispatch(self, request: Request, call_next):
         client_ip = _get_client_ip(request)
@@ -314,7 +317,15 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             logger.warning(f"速率限制触发: {client_ip} {request.url.path}")
             return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
 
-        return await call_next(request)
+        # 4. 请求日志 + 响应计时
+        start = time.time()
+        response = await call_next(request)
+        duration_ms = (time.time() - start) * 1000
+        logger.info(
+            "%s %s %s %.0fms %s",
+            request.method, request.url.path, client_ip, duration_ms, response.status_code,
+        )
+        return response
 
 
 app = FastAPI(

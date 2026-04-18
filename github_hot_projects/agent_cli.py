@@ -16,6 +16,7 @@ Agent CLI 交互入口
 """
 
 import logging
+import logging.handlers
 import os
 from datetime import datetime
 
@@ -27,18 +28,26 @@ except ImportError:  # pragma: no cover - Linux 通常可用，兜底给极简�
 from .common.config import LOG_DIR
 from .agent import HotProjectAgent
 
+logger = logging.getLogger("discover_hot")
+
 
 def setup_logging() -> str:
-    """配置日志：仅落盘，避免污染交互输入区域。"""
+    """配置日志：文件使用 RotatingFileHandler 防止单日志过大。"""
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(
         LOG_DIR,
         f"agent-{datetime.now().strftime('%Y-%m-%d')}.log",
     )
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        handlers=[file_handler],
         force=True,
     )
     return log_path
@@ -65,6 +74,7 @@ def main() -> None:
         try:
             user_input = input("你> ").strip()
         except (EOFError, KeyboardInterrupt):
+            logger.info("用户中断会话 (KeyboardInterrupt/EOF)")
             print("\n再见！")
             break
 

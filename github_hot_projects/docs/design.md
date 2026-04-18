@@ -30,8 +30,19 @@ Python 3.10+, requests, FastAPI, JSON 文件存储, OpenAI 兼容 LLM (SiliconFl
 │                      Web 展示层                          │
 │   web/chat.html  web/chat.css  web/report.*           │
 ├─────────────────────────────────────────────────────────┤
+│                     输入解析层                            │
+│   parsing/intent_detector.py  (意图识别: 纯函数)        │
+│   parsing/param_extractor.py  (参数提取: 纯函数)        │
+│   parsing/tool_arg_normalizer.py (参数归一化+日志)      │
+├─────────────────────────────────────────────────────────┤
 │                      Agent 层                            │
 │   agent.py（ReAct 循环 + 状态管理 + 对话压缩）           │
+│   → 调用 parsing/ 解析用户意图与参数                     │
+│   → 调用 agent_tools.py 执行具体工具                     │
+├─────────────────────────────────────────────────────────┤
+│                     执行编排层                            │
+│   execution/pipeline.py (DiscoveryPipeline 统一流水线)  │
+│   → scheduled_update.py 通过 Pipeline 复用完整流程      │
 ├─────────────────────────────────────────────────────────┤
 │                      工具层                              │
 │   agent_tools.py（9 个 Tool 函数 + TOOL_SCHEMAS）       │

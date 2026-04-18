@@ -92,7 +92,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
                     f"attempt={attempt + 1}/3"
                 )
         except requests.RequestException as e:
-            logger.error(f"LLM 请求异常: {repo_name}, attempt={attempt + 1}/3, {e}")
+            logger.error(f"LLM 请求异常: {repo_name}, attempt={attempt + 1}/3", exc_info=True)
         time.sleep(2)
 
     logger.warning(f"LLM 3 次重试均失败，跳过描述: {repo_name}")

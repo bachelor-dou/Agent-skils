@@ -36,6 +36,7 @@
 # ============================================================
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 from datetime import datetime
@@ -48,31 +49,30 @@ from github_hot_projects.common.config import (
     LOG_DIR,
     STAR_GROWTH_THRESHOLD,
 )
-from github_hot_projects.common.db import load_db, save_db
+from github_hot_projects.common.db import load_db
 from github_hot_projects.common.token_manager import TokenManager
-from github_hot_projects.agent_tools import (
-    tool_search_hot_projects,
-    tool_scan_star_range,
-    tool_batch_check_growth,
-    tool_rank_candidates,
-    tool_generate_report,
-    tool_fetch_trending,
-)
+from github_hot_projects.execution.pipeline import DiscoveryPipeline
 
 
 def setup_logging() -> str:
-    """配置日志：同时输出到终端和文件。"""
+    """配置日志：同时输出到终端和文件，文件使用 RotatingFileHandler 防止过大。"""
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(
         LOG_DIR,
         f"scheduled-{datetime.now().strftime('%Y-%m-%d')}.log",
+    )
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
+            file_handler,
             logging.StreamHandler(),
         ],
         force=True,
@@ -84,7 +84,7 @@ logger = logging.getLogger("scheduled_update")
 
 
 def run_update(top_n: int, mode: str) -> None:
-    """执行完整的搜索→增长→排名→报告流程。"""
+    """执行完整的搜索→增长→排名→报告流程（委托给 DiscoveryPipeline）。"""
     token_mgr = TokenManager()
     db = load_db()
 
@@ -93,91 +93,14 @@ def run_update(top_n: int, mode: str) -> None:
         f"DB projects={len(db.get('projects', {}))}, valid={db.get('valid')}"
     )
 
-    # ── 1. 搜索阶段（三源并行采集） ──
-    # 1a. 全类别关键词搜索
-    logger.info("Step 1a: 关键词搜索（全类别）")
-    search_result = tool_search_hot_projects(token_mgr)
-    all_repos = search_result.pop("_raw_repos", [])
-    seen = {r["full_name"] for r in all_repos}
-    logger.info(f"  关键词搜索: {len(all_repos)} 个仓库")
+    pipeline = DiscoveryPipeline(token_mgr, db)
+    result = pipeline.run(mode=mode, top_n=top_n)
 
-    # 1b. Star 范围扫描
-    logger.info("Step 1b: Star 范围扫描")
-    scan_result = tool_scan_star_range(token_mgr, seen_repos=seen)
-    scan_repos = scan_result.pop("_raw_repos", [])
-    for r in scan_repos:
-        if r["full_name"] not in seen:
-            seen.add(r["full_name"])
-            all_repos.append(r)
-    logger.info(f"  范围扫描补充: {len(scan_repos)} 个, 累计 {len(all_repos)} 个")
-
-    # 1c. GitHub Trending 三档补源
-    logger.info("Step 1c: Trending 补源（daily+weekly+monthly）")
-    trending_result = tool_fetch_trending(include_all_periods=True)
-    trending_repos = trending_result.pop("_raw_repos", [])
-    added = 0
-    for r in trending_repos:
-        fn = r["full_name"]
-        if fn not in seen:
-            seen.add(fn)
-            all_repos.append({
-                "full_name": fn,
-                "star": r["star"],
-                "description": r.get("description", ""),
-                "language": r.get("language", ""),
-                "_raw": {
-                    "full_name": fn,
-                    "stargazers_count": r["star"],
-                    "forks_count": r.get("forks", 0),
-                    "description": r.get("description", ""),
-                    "language": r.get("language", ""),
-                    "topics": [],
-                },
-            })
-            added += 1
-    logger.info(f"  Trending 补充: {added} 个, 最终 {len(all_repos)} 个仓库")
-
-    if not all_repos:
-        logger.error("搜索阶段未获取到任何仓库，终止。")
-        return
-
-    # ── 2. 批量增长计算 ──
-    logger.info("Step 2: 批量增长计算")
-    growth_result = tool_batch_check_growth(
-        token_mgr, all_repos, db,
-        growth_threshold=STAR_GROWTH_THRESHOLD,
-    )
-    candidates = growth_result.get("candidates", {})
-    logger.info(
-        f"  候选: {len(candidates)} / {growth_result.get('total_checked', 0)} "
-        f"(阈值: >={STAR_GROWTH_THRESHOLD})"
-    )
-    save_db(db)
-
-    if not candidates:
-        logger.warning("无候选项目（全部低于增长阈值），终止。")
-        return
-
-    # ── 3. 排序 ──
-    logger.info(f"Step 3: 排名 (mode={mode}, top_n={top_n})")
-    rank_result = tool_rank_candidates(
-        candidates, top_n=top_n, mode=mode, db=db,
-    )
-    logger.info(f"  排名完成: {rank_result.get('returned', 0)} 个项目")
-
-    top_projects = rank_result.pop("_ordered_tuples", [])
-    if not top_projects:
-        logger.error("排名结果为空，终止。")
-        return
-
-    # ── 4. 生成报告 ──
-    logger.info("Step 4: 生成报告")
-    report_result = tool_generate_report(top_projects, db, mode=mode)
-    save_db(db)
-
-    report_path = report_result.get("report_path", "")
+    report_path = result.get("report_path", "")
     if report_path:
         logger.info(f"定时更新完成! 报告: {report_path}")
+    elif result.get("error"):
+        logger.error(f"定时更新失败: {result['error']}")
     else:
         logger.error("报告生成失败。")
 

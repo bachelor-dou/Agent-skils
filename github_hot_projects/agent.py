@@ -7,20 +7,18 @@ Agent 接收自然语言指令，通过 LLM 自主规划步骤，
 调用 Tool 执行操作，观察结果后决定下一步行动，
 直到得出最终回复。
 
+架构分层：
+  - parsing/   — 输入解析层：意图识别、参数提取、Tool 参数规范化
+  - agent.py   — Agent 层：ReAct 循环、Tool 路由、状态管理
+  - execution/ — 执行层：Tool 实现、统一发现管道
+
 核心类：
   - HotProjectAgent: ReAct Agent 主体
   - AgentState:      Agent 运行状态（会话历史、候选缓存、DB 等）
-
-设计特点：
-  - 多轮对话：保持会话历史，支持追问和增量操作
-  - 状态缓存：搜索结果、候选列表在会话内复用，避免重复请求
-  - Tool 路由：LLM 通过 Function Calling 选择 Tool，Agent 执行并返回结果
-  - 可扩展：新增 Tool 只需在 agent_tools.py 添加实现 + schema
 """
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 
 import requests
@@ -52,6 +50,30 @@ from .agent_tools import (
 )
 from .common.db import load_db, save_db
 from .common.token_manager import TokenManager
+from .parsing import (
+    is_new_project_workflow,
+    is_comprehensive_ranking,
+    is_realtime_refresh,
+    latest_user_message,
+    extract_time_window_days,
+    extract_creation_window_days,
+    has_explicit_creation_window,
+    extract_top_n,
+    has_explicit_top_n,
+    normalize_tool_args,
+    resolve_time_window_days,
+    resolve_new_project_days,
+    resolve_workflow_mode,
+    log_effective_tool_params,
+    log_request_summary,
+    workflow_mode_source,
+    time_window_source,
+    creation_window_source,
+    arg_source,
+    mode_source,
+    top_n_source,
+    force_refresh_source,
+)
 
 logger = logging.getLogger("discover_hot")
 
@@ -317,6 +339,7 @@ class HotProjectAgent:
         处理状态缓存（搜索结果、候选列表等在 Tool 间共享）。
         """
         state = self.state
+        user_msg = self._latest_user_message()
         normalized_args = self._normalize_tool_args(name, args)
         self._maybe_reset_discovery_state(name, normalized_args)
         effective_new_project_days = self._resolve_new_project_days(name, normalized_args)
@@ -326,11 +349,11 @@ class HotProjectAgent:
         if name == "search_hot_projects":
             min_stars = normalized_args.get("min_stars", STAR_RANGE_MIN)
             max_pages = normalized_args.get("max_pages", 3)
-            self._log_effective_tool_params(name, [
-                ("workflow_mode", effective_workflow_mode, self._workflow_mode_source(effective_workflow_mode)),
-                ("min_stars", min_stars, self._arg_source(normalized_args, "min_stars")),
-                ("max_pages", max_pages, self._arg_source(normalized_args, "max_pages")),
-                ("creation_window_days", effective_new_project_days, self._creation_window_source(normalized_args, effective_new_project_days)),
+            log_effective_tool_params(name, [
+                ("workflow_mode", effective_workflow_mode, workflow_mode_source(effective_workflow_mode, user_msg)),
+                ("min_stars", min_stars, arg_source(normalized_args, "min_stars")),
+                ("max_pages", max_pages, arg_source(normalized_args, "max_pages")),
+                ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
             ])
             result = tool_search_hot_projects(
                 state.token_mgr,
@@ -348,10 +371,10 @@ class HotProjectAgent:
         elif name == "scan_star_range":
             min_star = normalized_args.get("min_star", STAR_RANGE_MIN)
             max_star = normalized_args.get("max_star", STAR_RANGE_MAX)
-            self._log_effective_tool_params(name, [
-                ("workflow_mode", effective_workflow_mode, self._workflow_mode_source(effective_workflow_mode)),
+            log_effective_tool_params(name, [
+                ("workflow_mode", effective_workflow_mode, workflow_mode_source(effective_workflow_mode, user_msg)),
                 ("star_range", f"{min_star}..{max_star}", "tool_args" if "min_star" in normalized_args or "max_star" in normalized_args else "default"),
-                ("creation_window_days", effective_new_project_days, self._creation_window_source(normalized_args, effective_new_project_days)),
+                ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
             ])
             result = tool_scan_star_range(
                 state.token_mgr,
@@ -368,9 +391,9 @@ class HotProjectAgent:
             repo = normalized_args.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
-            self._log_effective_tool_params(name, [
+            log_effective_tool_params(name, [
                 ("repo", repo, "tool_args"),
-                ("growth_window_days", effective_time_window_days, self._time_window_source(normalized_args)),
+                ("growth_window_days", effective_time_window_days, time_window_source(normalized_args, user_msg)),
             ])
             return tool_check_repo_growth(
                 state.token_mgr,
@@ -383,13 +406,13 @@ class HotProjectAgent:
             if not state.last_search_repos:
                 return {"error": "没有搜索结果，请先调用 search_hot_projects"}
             force_refresh = bool(normalized_args.get("force_refresh", False)) or self._is_realtime_refresh_request()
-            self._log_effective_tool_params(name, [
-                ("workflow_mode", effective_workflow_mode, self._workflow_mode_source(effective_workflow_mode)),
+            log_effective_tool_params(name, [
+                ("workflow_mode", effective_workflow_mode, workflow_mode_source(effective_workflow_mode, user_msg)),
                 ("candidate_repo_count", len(state.last_search_repos), "state"),
-                ("growth_threshold", normalized_args.get("growth_threshold", 800), self._arg_source(normalized_args, "growth_threshold")),
-                ("growth_window_days", effective_time_window_days, self._time_window_source(normalized_args)),
-                ("creation_window_days", effective_new_project_days, self._creation_window_source(normalized_args, effective_new_project_days)),
-                ("force_refresh", force_refresh, self._force_refresh_source(normalized_args, force_refresh)),
+                ("growth_threshold", normalized_args.get("growth_threshold", 800), arg_source(normalized_args, "growth_threshold")),
+                ("growth_window_days", effective_time_window_days, time_window_source(normalized_args, user_msg)),
+                ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
+                ("force_refresh", force_refresh, force_refresh_source(normalized_args, force_refresh)),
             ])
             result = tool_batch_check_growth(
                 state.token_mgr,
@@ -423,12 +446,12 @@ class HotProjectAgent:
             else:
                 effective_top_n = requested_top_n
 
-            self._log_effective_tool_params(name, [
-                ("mode", mode, self._mode_source(args, mode)),
-                ("top_n", effective_top_n, self._top_n_source(args, effective_top_n)),
+            log_effective_tool_params(name, [
+                ("mode", mode, mode_source(args, mode, user_msg)),
+                ("top_n", effective_top_n, top_n_source(args, effective_top_n, user_msg)),
                 ("candidate_count", len(state.last_candidates), "state"),
                 ("growth_window_days", state.last_time_window_days, "state"),
-                ("creation_window_days", effective_new_project_days, self._creation_window_source(normalized_args, effective_new_project_days)),
+                ("creation_window_days", effective_new_project_days, creation_window_source(normalized_args, effective_new_project_days, user_msg)),
             ])
 
             result = tool_rank_candidates(
@@ -457,7 +480,7 @@ class HotProjectAgent:
             if not state.last_ranked:
                 return {"error": "没有排序结果，请先调用 rank_candidates"}
             report_new_project_days = state.last_candidate_new_project_days if state.last_mode == "hot_new" else None
-            self._log_effective_tool_params(name, [
+            log_effective_tool_params(name, [
                 ("mode", state.last_mode, "state"),
                 ("ranked_count", len(state.last_ranked), "state"),
                 ("growth_window_days", state.last_time_window_days, "state"),
@@ -480,11 +503,11 @@ class HotProjectAgent:
             )
 
         elif name == "fetch_trending":
-            self._log_effective_tool_params(name, [
-                ("since", normalized_args.get("since", "weekly"), self._arg_source(normalized_args, "since")),
-                ("language", normalized_args.get("language", "") or "all", self._arg_source(normalized_args, "language")),
-                ("spoken_language", normalized_args.get("spoken_language", "") or "all", self._arg_source(normalized_args, "spoken_language")),
-                ("include_all_periods", normalized_args.get("include_all_periods", False), self._arg_source(normalized_args, "include_all_periods")),
+            log_effective_tool_params(name, [
+                ("since", normalized_args.get("since", "weekly"), arg_source(normalized_args, "since")),
+                ("language", normalized_args.get("language", "") or "all", arg_source(normalized_args, "language")),
+                ("spoken_language", normalized_args.get("spoken_language", "") or "all", arg_source(normalized_args, "spoken_language")),
+                ("include_all_periods", normalized_args.get("include_all_periods", False), arg_source(normalized_args, "include_all_periods")),
             ])
             result = tool_fetch_trending(
                 since=normalized_args.get("since", "weekly"),
@@ -519,103 +542,21 @@ class HotProjectAgent:
 
     def _latest_user_message(self) -> str:
         """返回最近一条用户消息的小写文本。"""
-        for msg in reversed(self.state.conversation):
-            if msg.get("role") == "user":
-                return (msg.get("content") or "").lower()
-        return ""
+        return latest_user_message(self.state.conversation)
+
+    # ── 以下方法委托给 parsing 层，保持 API 兼容 ──
 
     def _normalize_tool_args(self, tool_name: str, args: dict) -> dict:
-        """在执行前修正易被 LLM 误判的榜单参数。"""
-        normalized_args = dict(args)
-        ranking_tools = {
-            "search_hot_projects",
-            "scan_star_range",
-            "batch_check_growth",
-            "rank_candidates",
-        }
-
-        if tool_name not in ranking_tools:
-            return normalized_args
-
-        has_new_project_intent = self._is_new_project_workflow_request()
-        has_creation_window_request = self._has_explicit_creation_window_request()
-
-        if "new_project_days" in normalized_args and not has_creation_window_request:
-            logger.info(
-                "[Agent] 当前请求未显式指定新项目创建窗口，忽略 new_project_days=%s。",
-                normalized_args.get("new_project_days"),
-            )
-            normalized_args.pop("new_project_days", None)
-
-        if tool_name == "rank_candidates":
-            if has_new_project_intent:
-                if normalized_args.get("mode") != "hot_new":
-                    logger.info("[Agent] 检测到明确新项目意图，将 rank mode 修正为 hot_new。")
-                normalized_args["mode"] = "hot_new"
-            elif normalized_args.get("mode") == "hot_new":
-                logger.info("[Agent] 当前请求未显式指定新项目语义，将 rank mode 从 hot_new 修正为 comprehensive。")
-                normalized_args["mode"] = "comprehensive"
-
-        return normalized_args
+        return normalize_tool_args(tool_name, args, self._latest_user_message())
 
     def _resolve_time_window_days(self, tool_name: str, args: dict) -> int:
-        """解析增长统计窗口。用户说的“近N天”默认指该窗口，而不是创建窗口。"""
-        time_window_tools = {"check_repo_growth", "batch_check_growth", "generate_report"}
-        if tool_name not in time_window_tools:
-            return TIME_WINDOW_DAYS
-
-        explicit_days = args.get("time_window_days")
-        if isinstance(explicit_days, int) and explicit_days > 0:
-            return explicit_days
-
-        extracted_days = self._extract_requested_time_window_days()
-        if extracted_days is not None:
-            return extracted_days
-
-        return TIME_WINDOW_DAYS
+        return resolve_time_window_days(tool_name, args, self._latest_user_message())
 
     def _resolve_new_project_days(self, tool_name: str, args: dict) -> int | None:
-        """为 hot_new 工作流补齐默认的新项目窗口。"""
-        hot_new_tools = {
-            "search_hot_projects",
-            "scan_star_range",
-            "batch_check_growth",
-            "rank_candidates",
-        }
-        if tool_name not in hot_new_tools:
-            return None
-
-        creation_window_days = self._extract_requested_creation_window_days()
-        if creation_window_days is not None:
-            return creation_window_days
-
-        explicit_days = args.get("new_project_days")
-        if isinstance(explicit_days, int) and explicit_days > 0:
-            return explicit_days
-
-        if args.get("mode") == "hot_new":
-            return NEW_PROJECT_DAYS
-
-        if self._is_new_project_workflow_request():
-            return NEW_PROJECT_DAYS
-
-        return None
+        return resolve_new_project_days(tool_name, args, self._latest_user_message())
 
     def _resolve_effective_workflow_mode(self, tool_name: str, args: dict) -> str | None:
-        """返回当前 Tool 所处的榜单模式。"""
-        ranking_tools = {
-            "search_hot_projects",
-            "scan_star_range",
-            "batch_check_growth",
-            "rank_candidates",
-        }
-        if tool_name not in ranking_tools:
-            return None
-
-        if tool_name == "rank_candidates":
-            return args.get("mode", "comprehensive")
-
-        return "hot_new" if self._is_new_project_workflow_request() else "comprehensive"
+        return resolve_workflow_mode(tool_name, args, self._latest_user_message())
 
     def _maybe_reset_discovery_state(self, tool_name: str, args: dict) -> None:
         """在新一轮榜单构建开始前，清理上一轮的候选/去重状态。"""
@@ -637,266 +578,31 @@ class HotProjectAgent:
         self.state.seen_repos.clear()
         self.state.discovery_turn_id = current_turn
         logger.info("[Agent] 检测到新一轮榜单构建，已重置候选、排序和去重状态。")
-        self._log_request_summary()
-
-    def _log_request_summary(self) -> None:
-        """用中文输出当前用户请求的关键参数摘要。"""
-        mode = "hot_new" if self._is_new_project_workflow_request() else "comprehensive"
-        rank_label = "新项目榜" if mode == "hot_new" else "综合榜"
-        growth_window_days = self._extract_requested_time_window_days() or TIME_WINDOW_DAYS
-        requested_top_n = self._extract_requested_top_n()
-        effective_top_n = requested_top_n if requested_top_n is not None else (
-            HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
-        )
-        creation_window_days = self._extract_requested_creation_window_days()
-        if creation_window_days is None and mode == "hot_new":
-            creation_window_days = NEW_PROJECT_DAYS
-        creation_window_text = f"{creation_window_days}天" if creation_window_days is not None else "未启用"
-
-        logger.info(
-            "[Agent] 本轮请求参数: 榜单=%s，增长窗口=%s天，返回数量=%s，创建窗口=%s，搜索最小Star=%s，扫描范围=%s..%s，增长阈值>=%s",
-            rank_label,
-            growth_window_days,
-            effective_top_n,
-            creation_window_text,
-            STAR_RANGE_MIN,
-            STAR_RANGE_MIN,
-            STAR_RANGE_MAX,
-            STAR_GROWTH_THRESHOLD,
-        )
-
-    def _workflow_mode_source(self, effective_mode: str | None) -> str:
-        if effective_mode == "hot_new" and self._is_new_project_workflow_request():
-            return "prompt"
-        if effective_mode == "comprehensive" and self._is_explicit_comprehensive_ranking_request():
-            return "prompt"
-        return "default"
-
-    def _time_window_source(self, args: dict) -> str:
-        explicit_days = args.get("time_window_days")
-        if isinstance(explicit_days, int) and explicit_days > 0:
-            return "tool_args"
-        if self._extract_requested_time_window_days() is not None:
-            return "prompt"
-        return "default"
-
-    def _creation_window_source(self, args: dict, effective_days: int | None) -> str:
-        if effective_days is None:
-            return "unused"
-        if self._extract_requested_creation_window_days() is not None:
-            return "prompt"
-        explicit_days = args.get("new_project_days")
-        if isinstance(explicit_days, int) and explicit_days > 0:
-            return "tool_args"
-        return "default"
-
-    @staticmethod
-    def _arg_source(args: dict, key: str) -> str:
-        return "tool_args" if key in args else "default"
-
-    def _mode_source(self, raw_args: dict, effective_mode: str) -> str:
-        requested_mode = raw_args.get("mode")
-        if requested_mode is None:
-            return self._workflow_mode_source(effective_mode)
-        if requested_mode == effective_mode:
-            return "tool_args"
-        return "normalized"
-
-    def _top_n_source(self, raw_args: dict, effective_top_n: int) -> str:
-        explicit_top_n = self._extract_requested_top_n()
-        if explicit_top_n is not None and explicit_top_n == effective_top_n:
-            return "prompt"
-        requested_top_n = raw_args.get("top_n")
-        if requested_top_n is None:
-            return "default"
-        if requested_top_n == effective_top_n:
-            return "tool_args"
-        return "normalized"
-
-    def _force_refresh_source(self, raw_args: dict, effective_force_refresh: bool) -> str:
-        if bool(raw_args.get("force_refresh", False)):
-            return "tool_args"
-        if effective_force_refresh:
-            return "prompt"
-        return "default"
-
-    def _log_effective_tool_params(self, tool_name: str, params: list[tuple[str, object, str]]) -> None:
-        rendered: list[str] = []
-        for key, value, source in params:
-            if isinstance(value, (list, dict, tuple)):
-                value_text = json.dumps(value, ensure_ascii=False, default=str)
-            else:
-                value_text = str(value)
-            rendered.append(f"{key}={value_text}({source})")
-        if rendered:
-            logger.info("[Agent] Tool 生效参数: %s | %s", tool_name, " | ".join(rendered))
+        log_request_summary(self._latest_user_message())
 
     def _is_explicit_comprehensive_ranking_request(self) -> bool:
-        """最近一条用户消息明确表达综合榜意图时返回 True。"""
-        latest_user = self._latest_user_message()
-        if not latest_user:
-            return False
-
-        direct_markers = (
-            "综合热榜",
-            "综合榜",
-            "综合排名",
-            "综合热门",
-            "comprehensive",
-        )
-        if any(marker in latest_user for marker in direct_markers):
-            return True
-
-        has_comprehensive_intent = "综合" in latest_user
-        has_hot_ranking_intent = any(
-            marker in latest_user
-            for marker in [
-                "热榜", "榜单", "排名", "top", "前", "热门",
-            ]
-        )
-        return has_comprehensive_intent and has_hot_ranking_intent
+        return is_comprehensive_ranking(self._latest_user_message())
 
     def _extract_requested_time_window_days(self) -> int | None:
-        """从最近一条用户消息中提取增长统计窗口天数。"""
-        latest_user = self._latest_user_message()
-        if not latest_user:
-            return None
-
-        numeric_patterns = [
-            (r"(?:近|最近|过去)\s*(\d+)\s*天", 1),
-            (r"(?:近|最近|过去)\s*(\d+)\s*周", 7),
-            (r"(?:近|最近|过去)\s*(\d+)\s*个?月", 30),
-        ]
-        for pattern, multiplier in numeric_patterns:
-            match = re.search(pattern, latest_user)
-            if match:
-                return int(match.group(1)) * multiplier
-
-        alias_patterns = {
-            7: [r"近一周", r"最近一周", r"过去一周"],
-            14: [r"近两周", r"最近两周", r"过去两周"],
-            30: [r"近一个月", r"最近一个月", r"过去一个月", r"近一月", r"最近一月", r"过去一月"],
-            60: [r"近两个月", r"最近两个月", r"过去两个月"],
-        }
-        for days, patterns in alias_patterns.items():
-            if any(re.search(pattern, latest_user) for pattern in patterns):
-                return days
-
-        return None
+        return extract_time_window_days(self._latest_user_message())
 
     def _extract_requested_creation_window_days(self) -> int | None:
-        """从最近一条用户消息中提取“创建时间窗口”。仅对明确“创建于/天内创建”语义生效。"""
-        latest_user = self._latest_user_message()
-        if not latest_user:
-            return None
-
-        numeric_patterns = [
-            (r"(\d+)\s*天内创建", 1),
-            (r"近\s*(\d+)\s*天创建", 1),
-            (r"(\d+)\s*周内创建", 7),
-            (r"近\s*(\d+)\s*周创建", 7),
-            (r"(\d+)\s*个?月内创建", 30),
-            (r"近\s*(\d+)\s*个?月创建", 30),
-        ]
-        for pattern, multiplier in numeric_patterns:
-            match = re.search(pattern, latest_user)
-            if match:
-                return int(match.group(1)) * multiplier
-
-        alias_patterns = {
-            7: [r"一周内创建"],
-            14: [r"两周内创建"],
-            30: [r"一个月内创建", r"一月内创建"],
-            60: [r"两个月内创建"],
-        }
-        for days, patterns in alias_patterns.items():
-            if any(re.search(pattern, latest_user) for pattern in patterns):
-                return days
-
-        return None
+        return extract_creation_window_days(self._latest_user_message())
 
     def _has_explicit_creation_window_request(self) -> bool:
-        """是否明确提到了新项目创建时间窗口。"""
-        return self._extract_requested_creation_window_days() is not None
+        return has_explicit_creation_window(self._latest_user_message())
 
     def _is_new_project_workflow_request(self) -> bool:
-        """最近一条用户消息表达新项目榜意图时返回 True。"""
-        latest_user = self._latest_user_message()
-        if not latest_user:
-            return False
-
-        markers = (
-            "新项目榜",
-            "新项目热榜",
-            "新项目排名",
-            "新仓库榜",
-            "新仓库热榜",
-            "新创建",
-            "新创建的仓库",
-            "刚创建",
-            " new project",
-            " new repo",
-            "hot_new",
-        )
-        if any(marker in latest_user for marker in markers):
-            return True
-
-        has_new_project_intent = any(
-            marker in latest_user
-            for marker in [
-                "新项目", "新仓库", "新创建", "刚创建", "new project", "new repo",
-            ]
-        )
-        has_hot_ranking_intent = any(
-            marker in latest_user
-            for marker in [
-                "热榜", "榜单", "排名", "top", "前", "热门", "比较火",
-            ]
-        )
-        return has_new_project_intent and has_hot_ranking_intent
+        return is_new_project_workflow(self._latest_user_message())
 
     def _is_realtime_refresh_request(self) -> bool:
-        """最近一条用户消息包含实时强刷语义时返回 True。"""
-        latest_user = self._latest_user_message()
-        if not latest_user:
-            return False
-
-        # 1) 强触发词：出现即强制刷新
-        hard_triggers = [
-            "强制刷新", "立即刷新", "重新跑", "实时热榜",
-            "realtime", "force refresh",
-        ]
-        if any(k in latest_user for k in hard_triggers):
-            return True
-
-        # 2) 语义组合触发：只接受明确的当前时态词 + 排名词 + GitHub/项目语境
-        has_current_time_intent = any(k in latest_user for k in ["实时", "当前", "现在", "此刻", "最新"])
-        has_ranking_intent = any(k in latest_user for k in ["热榜", "榜单", "排名", "top", "前"])
-        has_github_intent = any(k in latest_user for k in ["github", "社区", "项目"])
-        return has_current_time_intent and has_ranking_intent and has_github_intent
+        return is_realtime_refresh(self._latest_user_message())
 
     def _user_explicitly_requested_top_n(self) -> bool:
-        """最近一条用户消息是否明确指定了榜单数量。"""
-        return self._extract_requested_top_n() is not None
+        return has_explicit_top_n(self._latest_user_message())
 
     def _extract_requested_top_n(self) -> int | None:
-        """从最近一条用户消息中提取榜单数量。"""
-        latest_user = self._latest_user_message()
-        if not latest_user:
-            return None
-
-        patterns = [
-            r"(?:top|前)\s*(\d+)",
-            r"(\d+)\s*个(?:项目|仓库|结果|条)",
-            r"(\d+)\s*名",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, latest_user)
-            if match:
-                value = int(match.group(1))
-                if value > 0:
-                    return value
-        return None
+        return extract_top_n(self._latest_user_message())
 
     @staticmethod
     def _serialize_result(result: dict, max_len: int = 8000) -> str:
