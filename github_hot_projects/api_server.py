@@ -266,11 +266,225 @@ def _sanitize_report_html_urls(html_text: str) -> str:
     return pattern.sub(_replace, html_text)
 
 
+def _slugify_report_anchor(text: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return slug or "section"
+
+
+def _split_report_paragraphs(text: str) -> list[str]:
+    return [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+
+
+def _safe_report_href(url: str) -> str:
+    return url if _is_safe_report_url(url) else "#"
+
+
+def _parse_structured_report(markdown_text: str) -> dict | None:
+    lines = markdown_text.splitlines()
+    title = next((line[2:].strip() for line in lines if line.startswith("# ")), "")
+    summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
+    repos: list[dict] = []
+    idx = 0
+
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        heading_match = re.match(r"##\s+(?P<rank>\d+)\.\s+(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$", stripped)
+        if not heading_match:
+            idx += 1
+            continue
+
+        rank = int(heading_match.group("rank"))
+        repo_name = heading_match.group("repo")
+        idx += 1
+
+        link = ""
+        metadata: dict[str, str] = {}
+        sections: list[dict[str, str]] = []
+
+        while idx < len(lines):
+            current = lines[idx].rstrip()
+            compact = current.strip()
+            if compact.startswith("## "):
+                break
+            if not compact:
+                idx += 1
+                continue
+            if compact == "---":
+                idx += 1
+                break
+            if compact.startswith("链接:") or compact.startswith("链接："):
+                link = compact.split(":", 1)[1].strip() if ":" in compact else compact.split("：", 1)[1].strip()
+                idx += 1
+                continue
+
+            meta_match = re.match(r"-\s*(?P<label>[^:：]+)[:：]\s*(?P<value>.+)", compact)
+            if meta_match:
+                metadata[meta_match.group("label").strip()] = meta_match.group("value").strip()
+                idx += 1
+                continue
+
+            if compact.startswith("### "):
+                section_title = compact[4:].strip()
+                idx += 1
+                block_lines: list[str] = []
+                while idx < len(lines):
+                    block_line = lines[idx]
+                    block_compact = block_line.strip()
+                    if block_compact.startswith("### ") or block_compact.startswith("## "):
+                        break
+                    if block_compact == "---":
+                        break
+                    block_lines.append(block_line)
+                    idx += 1
+                sections.append({
+                    "title": section_title,
+                    "content": "\n".join(block_lines).strip(),
+                })
+                continue
+
+            idx += 1
+
+        repos.append(
+            {
+                "rank": rank,
+                "repo": repo_name,
+                "link": link,
+                "metadata": metadata,
+                "sections": sections,
+            }
+        )
+
+    if not repos:
+        return None
+    if not any(repo["metadata"].get("创建时间") and repo["metadata"].get("总 Star") for repo in repos):
+        return None
+
+    return {
+        "title": title,
+        "summary": summary,
+        "repos": repos,
+    }
+
+
+def _render_report_stat(label: str, value: str, kind: str = "") -> str:
+    class_name = f"repo-stat repo-stat--{kind}" if kind else "repo-stat"
+    return (
+        f'<div class="{class_name}">'
+        '<div class="repo-stat__body">'
+        f'<span class="repo-stat__label">{escape(label)}</span>'
+        f'<strong class="repo-stat__value">{escape(value)}</strong>'
+        '</div>'
+        '</div>'
+    )
+
+
+def _render_structured_report_html(parsed: dict) -> tuple[str, str]:
+    article_parts: list[str] = []
+    toc_items: list[str] = []
+
+    for repo in parsed["repos"]:
+        repo_name = repo["repo"]
+        metadata = repo["metadata"]
+        repo_link = _safe_report_href(repo.get("link") or f"https://github.com/{repo_name}")
+        readme_link = _safe_report_href(f"{repo_link}#readme") if repo_link != "#" else "#"
+        anchor = f"repo-{repo['rank']}-{_slugify_report_anchor(repo_name)}"
+        topic_values = [item.strip() for item in re.split(r"[，,]", metadata.get("主题标签", "")) if item.strip()]
+        growth_label = next((label for label in metadata if "增长" in label), "")
+        growth_value = metadata.get(growth_label, "") if growth_label else ""
+
+        stat_items: list[str] = []
+        if metadata.get("总 Star"):
+            stat_items.append(_render_report_stat("总 Star", metadata["总 Star"], "star"))
+        if growth_label and growth_value:
+            stat_items.append(_render_report_stat(growth_label, growth_value, "growth"))
+        if metadata.get("主语言"):
+            stat_items.append(_render_report_stat("主语言", metadata["主语言"], "language"))
+
+        created_value = escape(metadata.get("创建时间", "未知"))
+        status_value = metadata.get("项目状态", "")
+        created_extra = ""
+        if status_value:
+            created_extra = f' <span class="repo-stat__tag repo-stat__tag--new" title="{escape(status_value)}">NEW</span>'
+        stat_items.append(
+            '<div class="repo-stat repo-stat--created">'
+            '<div class="repo-stat__body">'
+            '<span class="repo-stat__label">创建时间</span>'
+            f'<strong class="repo-stat__value">{created_value}{created_extra}</strong>'
+            '</div>'
+            '</div>'
+        )
+
+        section_items: list[str] = []
+        toc_section_items: list[str] = []
+        for section in repo["sections"]:
+            section_anchor = f"{anchor}-{_slugify_report_anchor(section['title'])}"
+            paragraphs = _split_report_paragraphs(section["content"]) or ["暂无补充信息，可进入仓库查看 README。"]
+            paragraphs_html = "".join(f"<p>{escape(paragraph)}</p>" for paragraph in paragraphs)
+            section_items.append(
+                '<section class="repo-panel">'
+                f'<h3 id="{section_anchor}">{escape(section["title"])}</h3>'
+                f'{paragraphs_html}'
+                '</section>'
+            )
+            toc_section_items.append(
+                f'<li><a href="#{section_anchor}">{escape(section["title"])}</a></li>'
+            )
+
+        topics_html = ""
+        if topic_values:
+            tags_html = "".join(f'<span class="repo-topic">{escape(topic)}</span>' for topic in topic_values[:6])
+            topics_html = f'<div class="repo-card__topics">{tags_html}</div>'
+
+        actions_html = (
+            '<div class="repo-card__actions">'
+            f'<a class="repo-card__action" href="{escape(repo_link)}" target="_blank" rel="noreferrer">打开仓库</a>'
+            f'<a class="repo-card__action repo-card__action--ghost" href="{escape(readme_link)}" target="_blank" rel="noreferrer">查看 README</a>'
+            '</div>'
+        )
+
+        article_parts.append(
+            '<section class="repo-card repo-card--markdown">'
+            f'<h2 id="{anchor}">{repo["rank"]}. {escape(repo_name)}</h2>'
+            f'<div class="repo-card__stats">{"".join(stat_items)}</div>'
+            f'{topics_html}'
+            f'<div class="repo-card__grid">{"".join(section_items)}</div>'
+            f'{actions_html}'
+            '</section>'
+        )
+
+        nested_toc = f'<ul>{"".join(toc_section_items)}</ul>' if toc_section_items else ""
+        toc_items.append(
+            f'<li><a href="#{anchor}">{repo["rank"]}. {escape(repo_name)}</a>{nested_toc}</li>'
+        )
+
+    toc_html = f'<nav class="toc"><ul>{"".join(toc_items)}</ul></nav>' if toc_items else '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
+    article_html = "".join(article_parts) if article_parts else '<p>当前报告暂无项目内容。</p>'
+    return article_html, toc_html
+
+
 def _render_report_html(name: str, markdown_text: str) -> str:
     """将 Markdown 报告渲染为移动端友好的 HTML 页面。"""
     lines = markdown_text.splitlines()
     title = next((line[2:].strip() for line in lines if line.startswith("# ")), name)
     summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
+    structured_report = _parse_structured_report(markdown_text)
+
+    if structured_report is not None:
+        article_html, toc_html = _render_structured_report_html(structured_report)
+        safe_title = escape(structured_report.get("title") or title)
+        safe_summary = escape(structured_report.get("summary") or "这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。")
+        safe_name = escape(name)
+        return _render_web_template(
+            REPORT_PAGE_TEMPLATE_PATH,
+            {
+                "__REPORT_NAME__": safe_name,
+                "__REPORT_TITLE__": safe_title,
+                "__REPORT_SUMMARY__": safe_summary,
+                "__REPORT_TOC_HTML__": toc_html,
+                "__REPORT_ARTICLE_HTML__": article_html,
+            },
+        )
+
     # 预处理：移除 Markdown 中的原始 HTML 标签，防止 XSS
     sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*>.*?</\1>', '', markdown_text, flags=re.DOTALL | re.IGNORECASE)
     sanitized_text = re.sub(r'<(script|iframe|object|embed|form|input|style)[^>]*/?\s*>', '', sanitized_text, flags=re.IGNORECASE)

@@ -1,21 +1,21 @@
 """
 报告生成（执行层 · 报告组件）
 ================================
-为 Top N 项目生成 LLM 描述，并输出带结构化卡片的 Markdown 报告。
+为 Top N 项目生成 LLM 描述，并输出纯 Markdown 报告。
 
 架构定位：
-  执行层独立组件，由 agent_tools.tool_generate_report() 调用。
+    执行层独立组件，由 agent_tools.tool_generate_report() 调用。
 
 工作流程：
-  1. 遍历已排名项目，优先复用 DB 缓存描述，否则调用 LLM 生成 200-400 字中文摘要
-  2. 每个项目输出结构化卡片：排名、名称（带复制图标 SVG）、增长/总星、语言、描述
-  3. 输出到 report/ 目录，文件名为日期格式 (YYYY-MM-DD.md)
-  4. 支持 comprehensive / hot_new 两种标题样式 + 自定义时间窗口
+    1. 遍历已排名项目，优先复用 DB 缓存描述，否则调用 LLM 生成 200-400 字中文摘要
+    2. 每个项目输出可直接阅读的 Markdown 条目，避免将前端 HTML 混入 .md 文件
+    3. 输出到 report/ 目录，文件名为日期格式 (YYYY-MM-DD.md)
+    4. 支持 comprehensive / hot_new 两种标题样式 + 自定义时间窗口
 
 关键实现细节：
-  - SVG 复制图标：内联 clip-path 图标，前端 JS 绑定点击复制仓库名
-  - LLM 描述容错：调用失败时回退到 GitHub 原始 description
-  - 原子写入：报告先写 .tmp 再 os.replace，避免中间状态
+    - LLM 描述容错：调用失败时回退到 GitHub 原始 description
+    - 单项目始终展示创建时间；若仍处于新项目窗口，则额外标记 NEW
+    - 原子写入：报告先写 .tmp 再 os.replace，避免中间状态
 """
 
 import logging
@@ -281,6 +281,15 @@ def _resolve_intro_sections(saved: dict, detailed_desc: str, hot_new_window: int
     ]
 
 
+def _normalize_markdown_blocks(text: str) -> list[str]:
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+    if not blocks and text.strip():
+        blocks = [text.strip()]
+    if not blocks:
+        blocks = ["暂无补充信息，可进入仓库查看 README。"]
+    return blocks
+
+
 def _render_stat_badge(kind: str, icon_svg: str, label: str, value: str) -> str:
     return (
         f'<div class="repo-stat repo-stat--{kind}">'
@@ -433,25 +442,40 @@ def step3_generate_report(
         star = info["star"]
         saved = db_projects.get(full_name, {})
         detailed_desc = desc_results.get(full_name, "")
-        safe_full_name = escape(full_name)
+        language = (saved.get("language") or "").strip()
+        created_at = _format_date(saved.get("created_at", "")) or "未知"
+        topics = [topic for topic in saved.get("topics", []) if topic][:6]
+        intro_sections = _resolve_intro_sections(saved, detailed_desc, hot_new_window)
+        html_url = f"https://github.com/{full_name}"
 
-        lines.append(
-            f"## {idx}. {safe_full_name}（+{growth}，⭐{star}） <button class=\"repo-copy-btn repo-copy-btn--title repo-copy-btn--icon\" type=\"button\" data-repo=\"{safe_full_name}\" title=\"复制 {safe_full_name}\" aria-label=\"复制 {safe_full_name}\">{REPO_COPY_ICON_SVG}</button>\n"
-        )
-        lines.append(
-            _render_repo_card(
-                full_name,
-                info,
-                saved,
-                detailed_desc,
-                db.get("date", today),
-                hot_new_window,
-                time_window_days,
-            )
-        )
+        lines.extend([
+            f"## {idx}. {full_name}",
+            "",
+            f"链接: {html_url}",
+            "",
+            f"- 创建时间: {created_at}",
+        ])
+        if _is_recent_project(saved.get("created_at", ""), hot_new_window):
+            lines.append(f"- 项目状态: NEW（{hot_new_window}天内）")
+        if language:
+            lines.append(f"- 主语言: {language}")
+        lines.append(f"- 总 Star: {_format_number(star)}")
+        lines.append(f"- 近{time_window_days}天增长: +{_format_number(growth)}")
+        if topics:
+            lines.append(f"- 主题标签: {', '.join(topics)}")
         lines.append("")
 
-    report_content = "\n".join(lines)
+        for title, content in intro_sections:
+            lines.append(f"### {title}")
+            lines.append("")
+            lines.extend(_normalize_markdown_blocks(content))
+            lines.append("")
+
+        if idx != len(top_projects):
+            lines.append("---")
+            lines.append("")
+
+    report_content = "\n".join(lines).rstrip() + "\n"
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report_content)

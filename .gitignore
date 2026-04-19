@@ -10,7 +10,7 @@ logs/
 *.log
 
 # Data
-*.json
+*.lock
 !github_hot_projects/requirements.txt
 
 # Environment

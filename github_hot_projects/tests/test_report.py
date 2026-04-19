@@ -5,6 +5,7 @@
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -13,6 +14,8 @@ import pytest
 class TestReport:
     def test_generate_report_comprehensive(self, tmp_path):
         """综合模式报告生成 + 文件输出。"""
+        recent_created_at = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        older_created_at = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
         db = {
             "date": "2026-04-17",
             "projects": {
@@ -21,7 +24,7 @@ class TestReport:
                     "short_desc": "A hot repository",
                     "language": "Python",
                     "topics": ["ai", "agent"],
-                    "created_at": "2026-04-01T00:00:00Z",
+                    "created_at": older_created_at,
                     "refreshed_at": "2026-04-17T03:25:00Z",
                     "readme_url": "https://github.com/hot-org/hot-repo/blob/HEAD/README.md",
                 },
@@ -30,7 +33,7 @@ class TestReport:
                     "short_desc": "A new repository",
                     "language": "TypeScript",
                     "topics": ["web", "ui"],
-                    "created_at": "2026-04-10T00:00:00Z",
+                    "created_at": recent_created_at,
                     "refreshed_at": "2026-04-17T03:30:00Z",
                     "readme_url": "https://github.com/new-org/new-repo/blob/HEAD/README.md",
                 },
@@ -50,26 +53,26 @@ class TestReport:
         assert os.path.exists(path)
         content = open(path, "r", encoding="utf-8").read()
         assert "GitHub 热门项目" in content
-        assert "hot-org/hot-repo" in content
-        assert "+2000" in content
-        assert "⭐15000" in content
-        assert "repo-card" in content
-        assert "repo-panel" in content
-        assert "总 Star" in content
-        assert "最近刷新" in content
+        assert "## 1. hot-org/hot-repo" in content
+        assert "## 2. new-org/new-repo" in content
+        assert "链接: https://github.com/hot-org/hot-repo" in content
+        assert "- 创建时间: " in content
+        assert "- 总 Star: 15,000" in content
+        assert "- 近7天增长: +2,000" in content
+        assert "- 项目状态: NEW（45天内）" in content
+        assert "- 主题标签: ai, agent" in content
         assert "项目定位与用途" in content
         assert "解决的问题" in content
         assert "使用场景" in content
-        assert "查看 README" in content
-        assert "repo-copy-btn" in content
-        assert "repo-copy-btn--icon" in content
-        assert 'data-repo="hot-org/hot-repo"' in content
-        assert 'aria-label="复制 hot-org/hot-repo"' in content
-        assert "repo-copy-icon" in content
+        assert "repo-card" not in content
+        assert "repo-copy-btn" not in content
+        assert "最近刷新" not in content
+        assert "## 1. hot-org/hot-repo（+2000，⭐15000）" not in content
         assert "测试描述内容" in content
 
     def test_generate_report_hot_new(self, tmp_path):
         """新项目榜报告需区分创建窗口和增长统计窗口。"""
+        recent_created_at = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         db = {
             "date": "2026-04-17",
             "projects": {
@@ -78,7 +81,7 @@ class TestReport:
                     "short_desc": "A new repository",
                     "language": "TypeScript",
                     "topics": ["web"],
-                    "created_at": "2026-04-10T00:00:00Z",
+                    "created_at": recent_created_at,
                     "refreshed_at": "2026-04-17T03:30:00Z",
                 },
             },
@@ -102,8 +105,11 @@ class TestReport:
         assert "新项目热度榜" in content
         assert "新项目创建窗口: <= 30 天" in content
         assert "增长统计窗口: 7 天" in content
-        assert "⭐1200" in content
-        assert "30天内新项目" in content
+        assert "## 1. new-org/new-repo" in content
+        assert "⭐1200" not in content
+        assert "- 总 Star: 1,200" in content
+        assert "- 近7天增长: +800" in content
+        assert "- 项目状态: NEW（30天内）" in content
 
     def test_generate_report_comprehensive_custom_time_window(self, tmp_path):
         db = {
@@ -135,8 +141,7 @@ class TestReport:
         assert path.endswith("_10d.md")
         content = open(path, "r", encoding="utf-8").read()
         assert "增长统计窗口: 10 天" in content
-        assert "10天增长" in content
-        assert "近10天增长" in content
+        assert "- 近10天增长: +2,000" in content
 
     def test_generate_report_uses_db_cache(self, tmp_path):
         """DB 中已有描述的项目不调用 LLM。"""
@@ -157,6 +162,7 @@ class TestReport:
                 mock_llm.assert_not_called()
 
         content = open(path, "r", encoding="utf-8").read()
+        assert "## 1. cached/repo" in content
         assert "这是一个缓存项目" in content
         assert "它减少重复劳动" in content
         assert "适合测试缓存命中" in content

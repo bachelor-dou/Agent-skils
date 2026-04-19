@@ -328,7 +328,7 @@ h1 {
 
 .content .repo-card {
   margin: 16px 0 32px;
-  padding: 22px;
+  padding: 20px;
   border-radius: 26px;
   background:
     radial-gradient(circle at top right, rgba(248, 216, 176, 0.22), transparent 28%),
@@ -340,16 +340,16 @@ h1 {
 .content .repo-card__stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
 .content .repo-stat {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  min-height: 56px;
-  padding: 10px 14px;
-  border-radius: 18px;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-radius: 16px;
   background: rgba(24, 52, 78, 0.05);
   border: 1px solid rgba(24, 52, 78, 0.08);
 }
@@ -380,11 +380,11 @@ h1 {
 .content .repo-stat__body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .content .repo-stat__label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -392,27 +392,53 @@ h1 {
 }
 
 .content .repo-stat__value {
-  font-size: 15px;
+  font-size: 14px;
   color: var(--brand);
+}
+
+.content .repo-stat--created .repo-stat__value {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.content .repo-stat__tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.content .repo-stat__tag--new {
+  background: rgba(210, 38, 38, 0.12);
+  border: 1px solid rgba(210, 38, 38, 0.20);
+  color: #b42318;
 }
 
 .content .repo-card__topics {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .content .repo-topic {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
-  padding: 0 12px;
+  min-height: 28px;
+  padding: 0 10px;
   border-radius: 999px;
   background: rgba(215, 137, 57, 0.12);
   border: 1px solid rgba(215, 137, 57, 0.18);
   color: #7a4a19;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
@@ -420,21 +446,21 @@ h1 {
 .content .repo-card__grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 18px;
+  gap: 12px;
+  margin-top: 16px;
 }
 
 .content .repo-panel {
   min-height: 100%;
-  padding: 18px 16px;
-  border-radius: 20px;
+  padding: 16px 14px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(24, 52, 78, 0.08);
 }
 
 .content .repo-panel h3 {
   margin: 0 0 10px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -444,8 +470,8 @@ h1 {
 .content .repo-panel p {
   margin: 0;
   color: #1f2937;
-  font-size: 15px;
-  line-height: 1.84;
+  font-size: 14px;
+  line-height: 1.8;
 }
 
 .content .repo-panel p + p {
@@ -455,24 +481,30 @@ h1 {
 .content .repo-card__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 18px;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 .content .repo-card__action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 42px;
-  padding: 0 16px;
+  min-height: 38px;
+  padding: 0 14px;
   border-radius: 999px;
   background: var(--brand);
   border: 1px solid var(--brand);
   color: #fff;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.02em;
   text-decoration: none;
+}
+
+.content .repo-card--markdown h2 {
+  margin: 0 0 14px;
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .content .repo-card__action--ghost {
@@ -622,7 +654,7 @@ h1 {
   }
 
   .content .repo-card {
-    padding: 18px 16px;
+    padding: 16px 14px;
     border-radius: 22px;
   }
 

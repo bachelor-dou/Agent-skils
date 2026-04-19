@@ -122,6 +122,53 @@ class TestReportEndpoints:
             assert '/web/report.css' in resp.text
             assert '/web/report.js' in resp.text
 
+    def test_get_report_html_renders_structured_markdown_report(self, client, tmp_path):
+        """纯 Markdown 报告应在 HTML 视图中被渲染成结构化卡片。"""
+        report_file = tmp_path / "2026-04-18_10d.md"
+        report_file.write_text(
+            "\n".join(
+                [
+                    "# GitHub 热门项目 — 2026-04-18",
+                    "",
+                    "> 共 1 个项目 | 增长统计窗口: 10 天",
+                    "",
+                    "## 1. hot-org/hot-repo",
+                    "",
+                    "链接: https://github.com/hot-org/hot-repo",
+                    "",
+                    "- 创建时间: 2026-04-10",
+                    "- 项目状态: NEW（45天内）",
+                    "- 主语言: Python",
+                    "- 总 Star: 15,000",
+                    "- 近10天增长: +2,000",
+                    "- 主题标签: ai, agent",
+                    "",
+                    "### 项目定位与用途",
+                    "",
+                    "这是一个测试项目。",
+                    "",
+                    "### 解决的问题",
+                    "",
+                    "它用于验证 HTML 渲染。",
+                    "",
+                    "### 使用场景",
+                    "",
+                    "适合在测试中验证结构化报告。",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
+            resp = client.get("/api/reports/2026-04-18_10d.md/html")
+            assert resp.status_code == 200
+            assert 'repo-card--markdown' in resp.text
+            assert 'repo-stat__tag--new' in resp.text
+            assert '打开仓库' in resp.text
+            assert '查看 README' in resp.text
+            assert '最近刷新' not in resp.text
+
     def test_get_report_html_not_found(self, client, tmp_path):
         """不存在的报告应返回 404。"""
         with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
