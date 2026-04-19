@@ -168,15 +168,81 @@ class TestAgentStateMachine:
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
-        with patch.object(
-            agent,
-            "_call_llm",
-            return_value={"choices": [{"message": {"content": "直接回复", "tool_calls": []}}]},
-        ):
-            reply = agent.chat("你好")
+        with patch.object(agent, "_maybe_handle_confirmation_gate", return_value=(None, False)):
+            with patch.object(
+                agent,
+                "_call_llm",
+                return_value={"choices": [{"message": {"content": "直接回复", "tool_calls": []}}]},
+            ):
+                reply = agent.chat("你好")
 
         assert reply == "直接回复"
         assert agent.state.conversation[-1] == {"role": "assistant", "content": "直接回复"}
+
+    def test_chat_requests_confirmation_before_tool_execution(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_build_confirmation_message", return_value="收到！我理解为：综合热榜，统计近10天增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。") as mock_confirm:
+            with patch.object(agent, "_call_llm") as mock_llm:
+                reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
+
+        assert "确认请回复“开始”" in reply
+        mock_confirm.assert_called_once()
+        mock_llm.assert_not_called()
+        assert agent.state.awaiting_confirmation is True
+
+    def test_chat_executes_after_confirmation_ack(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_build_confirmation_message", return_value="收到！我理解为：综合热榜，统计近10天增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。"):
+            first_reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
+
+        assert "确认请回复“开始”" in first_reply
+
+        with patch.object(
+            agent,
+            "_call_llm",
+            return_value={"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
+        ) as mock_llm:
+            reply = agent.chat("开始")
+
+        assert reply == "这是最终结果"
+        assert agent.state.awaiting_confirmation is False
+        assert mock_llm.call_args.kwargs["execution_confirmed"] is True
+
+    def test_chat_reconfirms_when_user_modifies_unconfirmed_request(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_build_confirmation_message", side_effect=[
+            "收到！我理解为：综合热榜，统计近10天增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            "收到！我理解为：综合热榜，统计近10天增长，返回前50名。确认请回复“开始”，或直接告诉我需要修改的地方。",
+        ]) as mock_confirm:
+            first_reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
+            second_reply = agent.chat("改成前50名")
+
+        assert "前100名" in first_reply
+        assert "前50名" in second_reply
+        assert mock_confirm.call_count == 2
+        assert agent.state.awaiting_confirmation is True
+
+    def test_chat_returns_scoped_capability_reply_for_greeting(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_call_llm") as mock_llm:
+            reply = agent.chat("你好")
+
+        assert "GitHub 热门项目助手" in reply
+        assert "编程问题" not in reply
+        mock_llm.assert_not_called()
+        assert agent.state.awaiting_confirmation is False
 
     def test_chat_executes_tool_then_returns_final_reply(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -196,9 +262,10 @@ class TestAgentStateMachine:
             {"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
         ]
 
-        with patch.object(agent, "_call_llm", side_effect=llm_responses):
-            with patch.object(agent, "_execute_tool", return_value={"found": True, "info": {"star": 1}}) as mock_exec:
-                reply = agent.chat("查一下 org/repo")
+        with patch.object(agent, "_maybe_handle_confirmation_gate", return_value=(None, False)):
+            with patch.object(agent, "_call_llm", side_effect=llm_responses):
+                with patch.object(agent, "_execute_tool", return_value={"found": True, "info": {"star": 1}}) as mock_exec:
+                    reply = agent.chat("查一下 org/repo")
 
         assert reply == "这是最终结果"
         mock_exec.assert_called_once_with("get_db_info", {"repo": "org/repo"})
@@ -212,9 +279,10 @@ class TestAgentStateMachine:
             {"choices": [{"message": {"content": "已处理错误", "tool_calls": []}}]},
         ]
 
-        with patch.object(agent, "_call_llm", side_effect=llm_responses):
-            with patch.object(agent, "_execute_tool", side_effect=RuntimeError("boom")):
-                reply = agent.chat("测一下异常")
+        with patch.object(agent, "_maybe_handle_confirmation_gate", return_value=(None, False)):
+            with patch.object(agent, "_call_llm", side_effect=llm_responses):
+                with patch.object(agent, "_execute_tool", side_effect=RuntimeError("boom")):
+                    reply = agent.chat("测一下异常")
 
         assert reply == "已处理错误"
         tool_messages = [msg for msg in agent.state.conversation if msg.get("role") == "tool"]
@@ -229,9 +297,10 @@ class TestAgentStateMachine:
             {"choices": [{"message": {"content": "已处理", "tool_calls": []}}]},
         ]
 
-        with patch.object(agent, "_call_llm", side_effect=llm_responses):
-            with patch.object(agent, "_execute_tool", return_value={"ok": True}) as mock_exec:
-                reply = agent.chat("测一下非法参数")
+        with patch.object(agent, "_maybe_handle_confirmation_gate", return_value=(None, False)):
+            with patch.object(agent, "_call_llm", side_effect=llm_responses):
+                with patch.object(agent, "_execute_tool", return_value={"ok": True}) as mock_exec:
+                    reply = agent.chat("测一下非法参数")
 
         mock_exec.assert_not_called()
         tool_messages = [msg for msg in agent.state.conversation if msg.get("role") == "tool"]
@@ -245,9 +314,10 @@ class TestAgentStateMachine:
             "choices": [{"message": {"content": "继续", "tool_calls": [_tool_call("get_db_info", "{}")]}}]
         }
 
-        with patch.object(agent, "_call_llm", side_effect=[looping_response] * MAX_TOOL_CALLS_PER_TURN):
-            with patch.object(agent, "_execute_tool", return_value={"ok": True}):
-                reply = agent.chat("无限循环")
+        with patch.object(agent, "_maybe_handle_confirmation_gate", return_value=(None, False)):
+            with patch.object(agent, "_call_llm", side_effect=[looping_response] * MAX_TOOL_CALLS_PER_TURN):
+                with patch.object(agent, "_execute_tool", return_value={"ok": True}):
+                    reply = agent.chat("无限循环")
 
         assert "已达到单轮最大 Tool 调用次数" in reply
 
@@ -313,6 +383,23 @@ class TestAgentStateHelpers:
 
         assert "_repos_note" in result
         assert "结果已截断" in result or "已截取前" in result
+
+    def test_build_confirmation_message_disables_thinking(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.conversation.append({"role": "user", "content": "给我实时综合热榜前一百名，增长窗口10天"})
+
+        with patch.object(
+            agent,
+            "_request_llm",
+            return_value={"choices": [{"message": {"content": "收到！我理解为：综合热榜，统计近10天的增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。"}}]},
+        ) as mock_request:
+            reply = agent._build_confirmation_message()
+
+        assert "确认请回复“开始”" in reply
+        assert mock_request.call_args.kwargs["enable_thinking"] is False
+        assert mock_request.call_args.kwargs["max_tokens"] == 256
 
     def test_compress_conversation_preserves_recent_messages_and_adds_summary(self):
         from github_hot_projects.agent import HotProjectAgent, KEEP_RECENT_MESSAGES, MAX_CONVERSATION_MESSAGES
