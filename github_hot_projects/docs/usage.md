@@ -83,7 +83,7 @@ nohup python -m github_hot_projects >> github_hot_projects/logs/server.log 2>&1 
 最近有什么新冒出来的爆款？          → hot_new 新项目排名
 近一个月新项目前20                  → hot_new + new_project_days=30
 看看 GitHub Trending 上有什么       → weekly trending
-看看中文社区月度趋势                → monthly + spoken_language=zh
+看看月度趋势                        → monthly trending
 
 # 报告 & 描述
 给 langchain-ai/langchain 生成描述

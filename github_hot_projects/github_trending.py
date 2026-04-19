@@ -12,9 +12,11 @@ GitHub Trending 爬虫（执行层 · 数据源组件）
   路径 2 — 候选补充：将 Trending 仓库加入候选池，走正常评分流程
 
 支持参数：
-  since:           daily / weekly / monthly
-  language:        编程语言筛选（如 python, javascript）
-  spoken_language: 自然语言筛选（如 zh, en）
+    since:           daily / weekly / monthly
+
+说明：
+    仓库主语言会从 Trending 页面中解析出来并保留在返回结果里，
+    但不再作为用户可指定的筛选条件。
 """
 
 import logging
@@ -33,18 +35,12 @@ _USER_AGENT = (
 )
 
 
-def fetch_trending(
-    since: str = DEFAULT_TRENDING_SINCE,
-    language: str = "",
-    spoken_language: str = "",
-) -> list[dict]:
+def fetch_trending(since: str = DEFAULT_TRENDING_SINCE) -> list[dict]:
     """
     爬取 GitHub Trending 仓库列表。
 
     Args:
         since:           时间范围 ("daily" | "weekly" | "monthly")，默认 weekly
-        language:        编程语言筛选，如 "python"，"" 表示全部
-        spoken_language: 自然语言代码，如 "zh"，"" 表示全部
 
     Returns:
         [{"full_name": "owner/repo",
@@ -60,10 +56,6 @@ def fetch_trending(
     params: dict[str, str] = {}
     if normalized_since:
         params["since"] = normalized_since
-    if language:
-        params["language"] = language.lower()
-    if spoken_language:
-        params["spoken_language_code"] = spoken_language
 
     try:
         resp = requests.get(
@@ -80,10 +72,7 @@ def fetch_trending(
     return _parse_trending_html(resp.text, normalized_since)
 
 
-def fetch_trending_all(
-    language: str = "",
-    spoken_language: str = "",
-) -> list[dict]:
+def fetch_trending_all() -> list[dict]:
     """
     抓取 daily / weekly / monthly 三个时间维度的 Trending，按仓库去重汇总。
 
@@ -92,11 +81,7 @@ def fetch_trending_all(
     merged: dict[str, dict] = {}
 
     for since in TRENDING_PERIODS:
-        repos = fetch_trending(
-            since=since,
-            language=language,
-            spoken_language=spoken_language,
-        )
+        repos = fetch_trending(since=since)
         for repo in repos:
             full_name = repo["full_name"]
             existing = merged.get(full_name)

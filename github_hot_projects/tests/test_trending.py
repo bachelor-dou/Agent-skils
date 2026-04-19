@@ -78,6 +78,18 @@ class TestTrendingParser:
             call_args = mock_get.call_args
             assert call_args[1]["params"]["since"] == "weekly"
 
+    def test_fetch_trending_does_not_send_language_filters(self):
+        """Trending 请求不再携带语言筛选参数。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = TRENDING_HTML_FIXTURE
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("github_hot_projects.github_trending.requests.get", return_value=mock_resp) as mock_get:
+            from github_hot_projects.github_trending import fetch_trending
+            fetch_trending(since="weekly")
+            assert mock_get.call_args.kwargs["params"] == {"since": "weekly"}
+
 
 class TestTrendingAll:
     def test_fetch_trending_all_dedup(self):

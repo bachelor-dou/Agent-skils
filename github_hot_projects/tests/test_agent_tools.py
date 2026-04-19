@@ -175,6 +175,7 @@ class TestToolFetchTrending:
             assert "repos" in result
             assert len(result["repos"]) == 1
             assert result["repos"][0]["full_name"] == "trending-org/trending-repo"
+            assert "language" not in result
 
 
 class TestToolScanStarRange:

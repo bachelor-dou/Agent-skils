@@ -128,7 +128,7 @@ class KeywordSearchTask(Task):
     total_keywords: int = 0
     max_pages: int = 3
     created_after: str = ""
-    min_stars_override: int = 0
+    project_min_star_override: int = 0
     _raw_repos: dict = field(default=None, repr=False)
 
     def execute(self, token_idx: int | None) -> list[dict]:
@@ -138,7 +138,7 @@ class KeywordSearchTask(Task):
             f"'{self.keyword}' (类别: {self.category}{worker_suffix})"
         )
         collected: list[dict] = []
-        min_stars = self.min_stars_override if self.min_stars_override else MIN_STAR_FILTER
+        project_min_star = self.project_min_star_override if self.project_min_star_override else MIN_STAR_FILTER
         query = self.keyword
         if self.created_after:
             query = f"{query} created:>={self.created_after}"
@@ -156,7 +156,7 @@ class KeywordSearchTask(Task):
                 if not full_name:
                     continue
                 current_star = repo_item.get("stargazers_count", 0)
-                if current_star < min_stars:
+                if current_star < project_min_star:
                     continue
                 collected.append({
                     "full_name": full_name,
@@ -194,7 +194,7 @@ class ScanSegmentTask(Task):
     high: int = 0
     total_segments: int = 0
     created_after: str = ""
-    min_stars_override: int = 0
+    min_star_filter_override: int = 0
     page_numbers: list[int] | None = None
     retry_round: int = 0
     _raw_repos: dict = field(default=None, repr=False)
@@ -213,7 +213,7 @@ class ScanSegmentTask(Task):
             f"{query}{worker_suffix}{retry_suffix}{page_suffix}"
         )
         collected: list[dict] = []
-        min_stars = self.min_stars_override if self.min_stars_override else MIN_STAR_FILTER
+        min_star_filter = self.min_star_filter_override if self.min_star_filter_override else MIN_STAR_FILTER
         pages = self.page_numbers if self.page_numbers is not None else list(range(1, 11))
         stop_on_empty = self.page_numbers is None
 
@@ -240,7 +240,7 @@ class ScanSegmentTask(Task):
                 if not full_name:
                     continue
                 current_star = repo_item.get("stargazers_count", 0)
-                if current_star < min_stars:
+                if current_star < min_star_filter:
                     continue
                 collected.append({
                     "full_name": full_name,

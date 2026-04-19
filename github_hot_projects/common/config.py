@@ -38,7 +38,7 @@ LLM_MODEL: str = os.environ.get(
 # 阈值与数量
 # ──────────────────────────────────────────────────────────────
 STAR_GROWTH_THRESHOLD: int = 800       # 窗口期 star 增长阈值
-MIN_STAR_FILTER: int = 1000            # 最低 star 过滤线
+MIN_STAR_FILTER: int = 1000            # 关键词搜索项目最低 star 过滤线
 HOT_PROJECT_COUNT: int = 100           # 综合热门项目默认输出数量（上限，有几个出几个）
 HOT_NEW_PROJECT_COUNT: int = 20        # 新项目榜默认输出数量（未指定 top_n 时使用）
 TIME_WINDOW_DAYS: int = 7              # 时间窗口（天）
@@ -49,8 +49,8 @@ GROWTH_CACHE_TTL_HOURS: int = 36       # 增长缓存有效期（小时），跨
 # ──────────────────────────────────────────────────────────────
 # Star 范围扫描（补充关键词搜索未覆盖的热门仓库）
 # ──────────────────────────────────────────────────────────────
-STAR_RANGE_MIN: int = 1300
-STAR_RANGE_MAX: int = 45000
+STAR_RANGE_MIN: int = 1300             # Star 范围扫描下界
+STAR_RANGE_MAX: int = 45000            # Star 范围扫描上界
 
 # ──────────────────────────────────────────────────────────────
 # 评分模式

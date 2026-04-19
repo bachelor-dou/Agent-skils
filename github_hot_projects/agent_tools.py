@@ -108,9 +108,11 @@ def coerce_star_range(min_star: object, max_star: object) -> tuple[int, int]:
 def tool_search_hot_projects(
     token_mgr: TokenManager,
     categories: list[str] | None = None,
-    min_stars: int = STAR_RANGE_MIN,
+    project_min_star: int = MIN_STAR_FILTER,
     max_pages: int = 3,
     new_project_days: int | None = None,
+    *,
+    min_stars: int | None = None,
 ) -> dict:
     """
     Tool 1: 按关键词类别搜索 GitHub 热门仓库（并行）。
@@ -120,7 +122,7 @@ def tool_search_hot_projects(
     Args:
         token_mgr:        TokenManager 实例
         categories:       搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
-        min_stars:        最低 star 过滤线
+        project_min_star: 关键词搜索项目最低 star 过滤线
         max_pages:        每个关键词搜索的最大页数
         new_project_days: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
 
@@ -130,7 +132,10 @@ def tool_search_hot_projects(
     """
     from datetime import timedelta
 
-    min_stars = coerce_positive_int(min_stars, STAR_RANGE_MIN)
+    if min_stars is not None and project_min_star == MIN_STAR_FILTER:
+        project_min_star = min_stars
+
+    project_min_star = coerce_positive_int(project_min_star, MIN_STAR_FILTER)
     max_pages = coerce_positive_int(max_pages, 3)
     new_project_days = coerce_optional_positive_int(new_project_days)
 
@@ -167,7 +172,7 @@ def tool_search_hot_projects(
                     total_keywords=total_keywords,
                     max_pages=max_pages,
                     created_after=created_after,
-                    min_stars_override=min_stars,
+                    project_min_star_override=project_min_star,
                     _raw_repos=raw_repos,
                 ))
         pool.wait_all_done()
@@ -180,7 +185,7 @@ def tool_search_hot_projects(
     for fn, info in raw_repos.items():
         repo_item = info["repo_item"]
         star = info["star"]
-        if star < min_stars:
+        if star < project_min_star:
             continue
         repos.append({
             "full_name": fn,
@@ -258,7 +263,7 @@ def tool_scan_star_range(
                 high=high,
                 total_segments=len(segments),
                 created_after=created_after,
-                min_stars_override=min_star_filter,
+                min_star_filter_override=min_star_filter,
                 _raw_repos=raw_repos,
             )
             segment_tasks.append(task)
@@ -279,7 +284,7 @@ def tool_scan_star_range(
                 high=task.high,
                 total_segments=task.total_segments,
                 created_after=task.created_after,
-                min_stars_override=task.min_stars_override,
+                min_star_filter_override=task.min_star_filter_override,
                 page_numbers=list(task.failed_pages),
                 retry_round=1,
                 _raw_repos=raw_repos,
@@ -747,8 +752,6 @@ def tool_get_db_info(db: dict, repo: str | None = None) -> dict:
 
 def tool_fetch_trending(
     since: str = "weekly",
-    language: str = "",
-    spoken_language: str = "",
     include_all_periods: bool = False,
 ) -> dict:
     """
@@ -760,8 +763,6 @@ def tool_fetch_trending(
 
     Args:
         since:           时间范围 ("daily" | "weekly" | "monthly")，默认 weekly
-        language:        编程语言筛选，如 "python"，""=全部
-        spoken_language: 自然语言代码，如 "zh"，""=全部
         include_all_periods:
                          为 True 时抓取 daily / weekly / monthly 三档并去重汇总
     """
@@ -769,13 +770,9 @@ def tool_fetch_trending(
 
     normalized_since = since if since in {"daily", "weekly", "monthly"} else "weekly"
     if include_all_periods:
-        repos = fetch_trending_all(language=language, spoken_language=spoken_language)
+        repos = fetch_trending_all()
     else:
-        repos = fetch_trending(
-            since=normalized_since,
-            language=language,
-            spoken_language=spoken_language,
-        )
+        repos = fetch_trending(since=normalized_since)
 
     period_label = {"daily": "今日增长", "weekly": "本周增长", "monthly": "本月增长"}
 
@@ -813,7 +810,6 @@ def tool_fetch_trending(
     result = {
         "repos": display_repos,
         "count": len(display_repos),
-        "language": language or "all",
         "include_all_periods": include_all_periods,
         "_raw_repos": repos,  # 内部使用
     }
@@ -849,10 +845,10 @@ TOOL_SCHEMAS = [
                             "不传则搜索全部类别。"
                         ),
                     },
-                    "min_stars": {
+                    "project_min_star": {
                         "type": "integer",
-                        "description": f"最低star过滤线，默认{STAR_RANGE_MIN}",
-                        "default": STAR_RANGE_MIN,
+                        "description": f"关键词搜索项目最低 star 过滤线，默认{MIN_STAR_FILTER}",
+                        "default": MIN_STAR_FILTER,
                     },
                     "max_pages": {
                         "type": "integer",
@@ -862,8 +858,10 @@ TOOL_SCHEMAS = [
                     "new_project_days": {
                         "type": "integer",
                         "description": (
-                            "新项目筛选窗口（天）。指定后在搜索查询中加入 created:>=date 过滤，"
-                            "只返回该天数内创建的仓库"
+                            "新项目创建时间窗口（天）。指定后只搜索创建时间在该天数以内的仓库（GitHub API created:>=date）。"
+                            "例如用户说'近20天内新创建的项目'则传 20。"
+                            "与 time_window_days（增长统计窗口）是完全独立的参数。"
+                            "如果用户意图不涉及新项目过滤，不要传此参数。"
                         ),
                     },
                 },
@@ -880,7 +878,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "min_star": {
                         "type": "integer",
-                        "description": f"最低星数，默认{STAR_RANGE_MIN}",
+                        "description": f"扫描区间最低星数，默认{STAR_RANGE_MIN}",
                         "default": STAR_RANGE_MIN,
                     },
                     "max_star": {
@@ -891,8 +889,10 @@ TOOL_SCHEMAS = [
                     "new_project_days": {
                         "type": "integer",
                         "description": (
-                            "新项目筛选窗口（天）。指定后在查询中加入 created:>=date 过滤，"
-                            "只扫描该天数内创建的仓库"
+                            "新项目创建时间窗口（天）。指定后只扫描创建时间在该天数以内的仓库。"
+                            "例如用户说'近20天内新创建的项目'则传 20。"
+                            "与 time_window_days（增长统计窗口）完全独立。"
+                            "如果用户意图不涉及新项目过滤，不要传此参数。"
                         ),
                     },
                 },
@@ -946,13 +946,18 @@ TOOL_SCHEMAS = [
                     "new_project_days": {
                         "type": "integer",
                         "description": (
-                            "新项目创建窗口（天）。仅在用户明确提到“30天内创建的新项目”这类创建时间语义时传。"
-                            "不传则使用默认新项目创建窗口，或在综合排名场景下不做创建时间筛选。"
+                            "新项目创建时间窗口（天）。指定后先按创建时间过滤，只对N天内创建的项目计算增长。"
+                            "例如用户说'近20天内新创建的项目'则传 20。"
+                            "与 time_window_days 完全独立：new_project_days 过滤创建时间，time_window_days 决定增长统计区间。"
+                            "两者可同时指定。如果用户未提及新项目/新创建，不要传此参数。"
                         ),
                     },
                     "time_window_days": {
                         "type": "integer",
-                        "description": "增长统计窗口（天）。如用户说近10天/近30天热榜，应传对应值。",
+                        "description": (
+                            "增长统计窗口（天）。计算最近N天的star增长量。"
+                            "例如用户说'近10天热榜'则传 10。与 new_project_days（创建时间过滤）完全独立。"
+                        ),
                     },
                     "force_refresh": {
                         "type": "boolean",
@@ -998,8 +1003,10 @@ TOOL_SCHEMAS = [
                     "new_project_days": {
                         "type": "integer",
                         "description": (
-                            "hot_new 模式下的新项目创建窗口（天）。"
-                            f"默认{NEW_PROJECT_DAYS}天。仅在用户明确说“30天内创建的新项目”时才传具体值。"
+                            "新项目创建时间窗口（天）。hot_new 模式下用于筛选创建时间在N天以内的项目。"
+                            f"默认{NEW_PROJECT_DAYS}天。"
+                            "例如用户说'近20天内新创建项目的榜单'则传 20。"
+                            "用户明确提到天数时必须传入用户指定的值，不要用默认值覆盖。"
                         ),
                     },
                 },
@@ -1076,14 +1083,6 @@ TOOL_SCHEMAS = [
                             "适合综合排名和新项目排名的候选补充阶段。"
                         ),
                         "default": False,
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "编程语言筛选，如python、javascript，不传则全部",
-                    },
-                    "spoken_language": {
-                        "type": "string",
-                        "description": "自然语言代码，如zh（中文）、en（英文），不传则全部",
                     },
                 },
             },

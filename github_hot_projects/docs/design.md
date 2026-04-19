@@ -341,7 +341,7 @@ graph TD
 
 | 常量 | 默认值 | 说明 |
 |------|--------|------|
-| `MIN_STAR_FILTER` | 1000 | 搜索最低 star |
+| `MIN_STAR_FILTER` | 1000 | 关键词搜索最低 star |
 | `STAR_GROWTH_THRESHOLD` | 800 | 增长门槛 |
 | `HOT_PROJECT_COUNT` | 100 | 综合榜默认 Top N |
 | `HOT_NEW_PROJECT_COUNT` | 20 | 新项目榜默认 Top N |
@@ -358,7 +358,7 @@ graph TD
 | 参数 | 影响 Tool | 默认 | 说明 |
 |------|----------|------|------|
 | `categories` | search | 全部 25 类 | 搜索类别 |
-| `min_stars` | search | 1000 | 最低 star |
+| `project_min_star` | search | 1000 | 关键词搜索项目最低 star |
 | `top_n` | rank | 100（综合）/ 20（新项目） | 返回前 N |
 | `time_window_days` | check_repo_growth, batch_check_growth | 7 | 增长统计窗口 |
 | `growth_threshold` | batch_check | 800 | 增长阈值 |
@@ -390,13 +390,13 @@ graph TD
 | T5 | API Server _tool_execution_lock 防多会话并发 Tool |
 | T6 | _sessions_lock 保护会话字典读写 |
 | `categories` | search | 全部 25 类 | 搜索类别 |
-| `min_stars` | search | 1300 | 搜索最低 star 过滤线 |
+| `project_min_star` | search | 1000 | 关键词搜索项目最低 star 过滤线 |
 | `min_star` / `max_star` | scan | 1300 / 45000 | Star 范围扫描上下界 |
 | `top_n` | rank | 综合榜 100 / 新项目榜 20 | 返回前 N 个项目 |
 | `time_window_days` | check_repo_growth / batch_check / report | 7 | 增长统计窗口 |
 | `growth_threshold` | batch_check | 800 | 候选筛选阈值 |
 | `new_project_days` | search / scan / batch_check / rank | 仅 hot_new 默认为 45 | 新项目创建窗口 |
-| `since` / `language` / `spoken_language` | fetch_trending | weekly / all / all | Trending 浏览参数 |
+| `since` | fetch_trending | weekly | Trending 浏览参数 |
 |------|---------|----------|
 | 加搜索关键词 | `config.py` SEARCH_KEYWORDS | 无需改其他文件 |
 | 加新 Tool | `agent_tools.py` + `agent.py` SYSTEM_PROMPT + TOOL_SCHEMAS + 本文档 | 4 处同步 |
