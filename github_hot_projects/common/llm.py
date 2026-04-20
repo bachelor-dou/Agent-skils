@@ -12,24 +12,29 @@ import time
 
 import requests
 
-from .config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
+from .config import (
+    LLM_API_KEY, LLM_API_URL, LLM_MODEL,
+    LLM_LITE_API_KEY, LLM_LITE_API_URL, LLM_LITE_MODEL,
+)
 
 logger = logging.getLogger("discover_hot")
 
 
-def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
+def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
+                      detail_level: str = "standard") -> str:
     """
-    调用 LLM 生成三段式项目介绍。
+    调用 LLM 生成项目介绍。
 
     Args:
         repo_name: "owner/repo"
         repo_info: DB 中的仓库信息字典（含 short_desc / language / topics / readme_url）
         html_url:  项目 GitHub 页面 URL
+        detail_level: "standard"=260-520字三段式, "detailed"=800-1500字六段式
 
     Returns:
-        LLM 生成的三段式描述文本；失败 3 次后返回空字符串。
+        LLM 生成的描述文本；失败 3 次后返回空字符串。
     """
-    if not LLM_API_URL or not LLM_API_KEY:
+    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY:
         logger.warning("LLM 未配置，跳过描述生成。")
         return ""
 
@@ -49,30 +54,46 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str) -> str:
         f"输出要求：\n"
         f"1. 只能基于下方明确提供的信息，不要把项目地址或 README 链接当作已读取内容。\n"
         f"2. 不要补充未在输入中出现、且无法确认的外部知识；信息不足时使用保守表述。\n"
-        f"3. 必须严格输出以下三个字段，字段名保持原样：\n"
-        f"项目定位与用途：...\n"
-        f"解决的问题：...\n"
-        f"使用场景：...\n"
-        f"4. 每个字段建议 70-160 字，总长度控制在 260-520 字。\n"
-        f"5. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
-        + "\n".join(info_parts) + "\n"
     )
+    if detail_level == "detailed":
+        prompt += (
+            f"3. 必须严格输出以下六个字段，字段名保持原样：\n"
+            f"项目定位与用途：...\n"
+            f"解决的问题：...\n"
+            f"使用场景：...\n"
+            f"技术架构与特性：...\n"
+            f"核心依赖与生态：...\n"
+            f"已知局限或注意事项：...\n"
+            f"4. 每个字段建议 120-250 字，总长度控制在 800-1500 字。\n"
+            f"5. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
+        )
+    else:
+        prompt += (
+            f"3. 必须严格输出以下三个字段，字段名保持原样：\n"
+            f"项目定位与用途：...\n"
+            f"解决的问题：...\n"
+            f"使用场景：...\n"
+            f"4. 每个字段建议 70-160 字，总长度控制在 260-520 字。\n"
+            f"5. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
+        )
+    prompt += "\n".join(info_parts) + "\n"
 
     headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Authorization": f"Bearer {LLM_LITE_API_KEY}",
         "Content-Type": "application/json",
     }
+    max_tokens = 2048 if detail_level == "detailed" else 1536
     payload = {
-        "model": LLM_MODEL,
+        "model": LLM_LITE_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 1536,
+        "max_tokens": max_tokens,
         "enable_thinking": False,
     }
 
     for attempt in range(3):
         try:
-            resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=300)
+            resp = requests.post(LLM_LITE_API_URL, headers=headers, json=payload, timeout=300)
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -110,7 +131,7 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[
     Returns:
         与 repos 等长的浓缩描述列表；LLM 失败时回退截断原文。
     """
-    if not LLM_API_URL or not LLM_API_KEY:
+    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY:
         return [r.get("description", "")[:max_chars] for r in repos]
 
     if not repos:
@@ -131,11 +152,11 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[
     )
 
     headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Authorization": f"Bearer {LLM_LITE_API_KEY}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": LLM_MODEL,
+        "model": LLM_LITE_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens": 2048,
@@ -145,7 +166,7 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[
     import re
     for attempt in range(2):
         try:
-            resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=120)
+            resp = requests.post(LLM_LITE_API_URL, headers=headers, json=payload, timeout=120)
             if resp.status_code == 200:
                 data = resp.json()
                 choices = data.get("choices", [])

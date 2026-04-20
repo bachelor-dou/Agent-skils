@@ -121,6 +121,47 @@ def search_github_repos(
 
 
 # ══════════════════════════════════════════════════════════════
+# 单仓库信息获取（REST /repos API）
+# ══════════════════════════════════════════════════════════════
+
+
+def fetch_repo_info(
+    token_mgr: TokenManager,
+    owner: str,
+    repo_name: str,
+    token_idx: int = 0,
+) -> dict | None:
+    """
+    通过 /repos/{owner}/{repo} 直接获取仓库信息（无 Search API 限制）。
+
+    Returns:
+        仓库信息字典（与 Search API items 结构兼容），失败返回 None。
+
+    Raises:
+        TokenInvalidError, RateLimitError
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo_name}"
+    headers = token_mgr.get_rest_headers(token_idx)
+
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            _check_response(resp, token_idx)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 404:
+                return None
+            time.sleep(3 * 2 ** attempt)
+        except (TokenInvalidError, RateLimitError):
+            raise
+        except requests.RequestException as e:
+            logger.error("获取仓库信息失败: %s/%s, attempt=%d, error=%s", owner, repo_name, attempt + 1, e)
+            time.sleep(3 * 2 ** attempt)
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
 # Star 范围自动分段
 # ══════════════════════════════════════════════════════════════
 

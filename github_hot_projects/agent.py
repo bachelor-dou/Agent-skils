@@ -193,15 +193,18 @@ c) 参数之间可能有冲突时
 
 ## 辅助功能
 
-### 单项目信息查询
-用户意图示例："查一下 vllm-project/vllm 的情况"、"这个项目最近增长怎么样"
-- check_repo_growth(repo="owner/repo") → 返回实时 star、近期增长、项目基本信息及 LLM 生成的详细描述
+### 单项目查询 — 增长数据
+用户意图示例："查一下 vllm-project/vllm 最近增长怎么样"、"这个仓库近7天涨了多少 star"
+- check_repo_growth(repo="owner/repo") → 返回当前 star、近期增长量、增长率
+- 仅适合查增长趋势数据，不适合回答"这个项目是做什么的"、"这个项目支持哪些功能"类问题
+
+### 单项目查询 — 功能了解 / 项目介绍
+用户意图示例："这个项目是做什么的"、"这个项目能不能用于某某场景"、"帮我介绍一下这个项目"、"这个项目支持哪些 CLI"
+- describe_project(repo="owner/repo") → 基于 README 生成 200-400 字中文详细描述，包含功能、特色、适用场景
+- ⚠️ 当用户问项目功能、兼容性、使用方式、适用场景时，必须用 describe_project 而不是 check_repo_growth
+
+### 数据库查询
 - get_db_info(repo="owner/repo") → 查询本地 DB 中该仓库的历史信息
-
-### 项目描述
-- describe_project(repo="owner/repo") → LLM 生成 200-400 字中文详细描述（README 浓缩摘要）
-
-### 数据库概览
 - get_db_info() → DB 状态、项目总数、更新日期
 
 ## 注意事项
@@ -284,6 +287,9 @@ class HotProjectAgent:
         if len(self.state.conversation) > MAX_CONVERSATION_MESSAGES:
             self._compress_conversation()
 
+        if len(user_message) > 2000:
+            return "消息过长（超过 2000 字符），请缩短后重试。"
+
         self.state.current_user_turn += 1
         self.state.conversation.append({"role": "user", "content": user_message})
 
@@ -295,7 +301,11 @@ class HotProjectAgent:
         for step in range(MAX_TOOL_CALLS_PER_TURN):
             response = self._call_llm(execution_confirmed=execution_confirmed)
             if response is None:
-                return "抱歉，LLM 调用失败，请稍后重试。"
+                error_msg = "抱歉，LLM 调用失败，请稍后重试。"
+                self.state.conversation.append({"role": "assistant", "content": error_msg})
+                if execution_confirmed:
+                    self.state.awaiting_confirmation = True
+                return error_msg
 
             message = response.get("choices", [{}])[0].get("message", {})
 
@@ -351,7 +361,11 @@ class HotProjectAgent:
                 except Exception as e:
                     logger.error(f"[Agent] Tool {tool_name} 执行异常: {e}")
                     result = {"error": f"工具执行异常: {e}"}
-                result_str = self._serialize_result(result)
+                try:
+                    result_str = self._serialize_result(result)
+                except Exception as serialize_err:
+                    logger.error(f"[Agent] Tool 结果序列化异常: {serialize_err}")
+                    result_str = json.dumps({"error": f"序列化失败: {serialize_err}"})
 
                 self.state.conversation.append({
                     "role": "tool",
@@ -364,11 +378,11 @@ class HotProjectAgent:
     def _call_llm(self, execution_confirmed: bool = False) -> dict | None:
         """调用 LLM（带 Tool 定义）。"""
         messages = list(self.state.conversation)
-        if execution_confirmed:
-            messages.append({
+        if execution_confirmed and messages and messages[0].get("role") == "system":
+            messages[0] = {
                 "role": "system",
-                "content": "用户刚刚已经确认了最新请求中的参数。请直接执行对应的 Tool 流程，不要再次做执行前确认，也不要输出泛化能力介绍。",
-            })
+                "content": messages[0]["content"] + "\n\n[执行确认] 用户刚刚已经确认了最新请求中的参数。请直接执行对应的 Tool 流程，不要再次做执行前确认，也不要输出泛化能力介绍。",
+            }
 
         return self._request_llm(
             messages=messages,
@@ -376,6 +390,8 @@ class HotProjectAgent:
             temperature=0.3,
             max_tokens=16384,
             log_prefix="[Agent]",
+            enable_thinking=True,
+            thinking_budget=8192,
         )
 
     def _request_llm(
@@ -386,6 +402,7 @@ class HotProjectAgent:
         max_tokens: int = 16384,
         log_prefix: str = "[Agent]",
         enable_thinking: bool | None = None,
+        thinking_budget: int | None = None,
     ) -> dict | None:
         """统一的 LLM 请求入口，支持带 Tool 或纯文本确认。"""
         headers = {
@@ -400,6 +417,8 @@ class HotProjectAgent:
         }
         if enable_thinking is not None:
             payload["enable_thinking"] = enable_thinking
+        if thinking_budget is not None:
+            payload["thinking_budget"] = thinking_budget
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -497,6 +516,8 @@ class HotProjectAgent:
             "okay",
             "yes",
         )
+        if len(normalized) > 10:
+            return False
         return any(normalized == kw or normalized.startswith(f"{kw}") for kw in keywords)
 
     @staticmethod
@@ -794,24 +815,29 @@ class HotProjectAgent:
 
         self.state.conversation_summary = "\n".join(summary_parts[-20:])  # 保留最近 20 条
 
-        # 重建对话
-        summary_msg = {
-            "role": "system",
-            "content": (
-                f"[对话历史摘要]\n"
-                f"以下是之前对话的关键内容：\n{self.state.conversation_summary}\n"
-                f"[当前状态] 搜索结果: {len(self.state.last_search_repos)} 个, "
-                f"候选仓库: {len(self.state.last_candidates)} 个, "
-                f"已排序: {len(self.state.last_ranked)} 个, "
-                f"已扫描: {len(self.state.seen_repos)} 个, "
-                f"榜单模式: {self.state.last_mode}, "
-                f"增长窗口: {self.state.last_time_window_days} 天, "
-                f"创建窗口: {self.state.last_candidate_new_project_days if self.state.last_candidate_new_project_days is not None else '未启用'}"
-                + (f"\n[上轮排序 Top 5] {', '.join(name for name, _ in self.state.last_ranked[:5])}" if self.state.last_ranked else "")
-            ),
-        }
+        # 重建对话：将摘要合并到初始 system prompt 内，避免产生多条独立 system 消息
+        summary_text = (
+            f"\n\n[对话历史摘要]\n"
+            f"以下是之前对话的关键内容：\n{self.state.conversation_summary}\n"
+            f"[当前状态] 搜索结果: {len(self.state.last_search_repos)} 个, "
+            f"候选仓库: {len(self.state.last_candidates)} 个, "
+            f"已排序: {len(self.state.last_ranked)} 个, "
+            f"已扫描: {len(self.state.seen_repos)} 个, "
+            f"榜单模式: {self.state.last_mode}, "
+            f"增长窗口: {self.state.last_time_window_days} 天, "
+            f"创建窗口: {self.state.last_candidate_new_project_days if self.state.last_candidate_new_project_days is not None else '未启用'}"
+            + (f"\n[上轮排序 Top 5] {', '.join(name for name, _ in self.state.last_ranked[:5])}" if self.state.last_ranked else "")
+        )
 
-        self.state.conversation = initial_system + [summary_msg] + recent_msgs
+        if initial_system:
+            initial_system[0] = {
+                "role": "system",
+                "content": SYSTEM_PROMPT + summary_text,
+            }
+        else:
+            initial_system = [{"role": "system", "content": summary_text}]
+
+        self.state.conversation = initial_system + recent_msgs
         logger.info(
             f"[Agent] 对话历史已压缩: {len(old_msgs)} 条旧消息 → 摘要, "
             f"保留 {len(recent_msgs)} 条近期消息"

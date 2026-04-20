@@ -24,16 +24,33 @@ GITHUB_TOKENS: list[str] = (
 )
 
 # ──────────────────────────────────────────────────────────────
-# LLM 配置（兼容 OpenAI /v1/chat/completions 格式）
+# LLM 双模型配置（兼容 OpenAI /v1/chat/completions 格式）
+#   主模型：高智能推理（Agent 核心）    辅助模型：低成本文本处理
+#   两者可配置不同平台、账号、模型；辅助模型未设置时降级到主模型。
+# ──────────────────────────────────────────────────────────────
+# 主模型配置（Agent 推理 / 用户交互 / ReAct 工具调用）
+#   用于理解用户意图、规划执行链、生成最终回复等高智能任务。
+#   环境变量：LLM_API_URL / LLM_API_KEY / LLM_MODEL
 # ──────────────────────────────────────────────────────────────
 LLM_API_URL: str = os.environ.get(
     "LLM_API_URL", "https://api.siliconflow.cn/v1/chat/completions"
 )
 LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL: str = os.environ.get(
-    "LLM_MODEL", "Qwen/Qwen3.5-397B-A17B"
+    "LLM_MODEL", "Pro/zai-org/GLM-5"
 )
 
+# ──────────────────────────────────────────────────────────────
+# 辅助模型配置（项目描述生成 / 文本压缩 / 报告摘要）
+#   用于结构化信息改写、文本浓缩等简单任务，可使用低成本小模型。
+#   支持配置不同平台或账号，与主模型完全独立。
+#   未设置时自动降级到主模型，保持向后兼容。
+#   环境变量：LLM_LITE_API_URL / LLM_LITE_API_KEY / LLM_LITE_MODEL
+# ──────────────────────────────────────────────────────────────
+LLM_LITE_API_URL: str = os.environ.get("LLM_LITE_API_URL", LLM_API_URL)
+LLM_LITE_API_KEY: str = os.environ.get("LLM_LITE_API_KEY", LLM_API_KEY)
+LLM_LITE_MODEL: str = os.environ.get("LLM_LITE_MODEL", "Qwen/Qwen3.5-35B-A3B")
+    
 # ──────────────────────────────────────────────────────────────
 # 阈值与数量
 # ──────────────────────────────────────────────────────────────

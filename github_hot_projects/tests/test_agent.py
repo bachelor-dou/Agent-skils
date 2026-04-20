@@ -418,8 +418,8 @@ class TestAgentStateHelpers:
         agent._compress_conversation()
 
         system_messages = [msg for msg in agent.state.conversation if msg.get("role") == "system"]
-        assert len(system_messages) >= 2
-        assert any("对话历史摘要" in (msg.get("content") or "") for msg in system_messages)
+        assert len(system_messages) == 1
+        assert "对话历史摘要" in (system_messages[0].get("content") or "")
         recent_contents = [msg.get("content") for msg in agent.state.conversation[-KEEP_RECENT_MESSAGES:]]
         assert any("助手回复" in (content or "") for content in recent_contents)
 

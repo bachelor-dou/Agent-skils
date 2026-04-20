@@ -416,7 +416,7 @@ def step3_generate_report(
         logger.info(f"报告生成: 需要生成描述 {len(need_llm)} 个项目，按顺序调用 LLM...")
         for idx, full_name, html_url, saved in need_llm:
             logger.info(f"[{idx}/{len(top_projects)}] LLM 生成描述: {full_name}")
-            desc = call_llm_describe(full_name, saved, html_url)
+            desc = call_llm_describe(full_name, saved, html_url, detail_level="standard")
             if desc:
                 desc_results[full_name] = desc
                 if full_name in db_projects:
