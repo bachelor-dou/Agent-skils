@@ -560,7 +560,7 @@ class HotProjectAgent:
             messages=payload_messages,
             tools=None,
             temperature=0.1,
-            max_tokens=256,
+            max_tokens=1024,
             log_prefix="[Agent-Confirm]",
             enable_thinking=False,
         )

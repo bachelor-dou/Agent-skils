@@ -191,6 +191,9 @@
     const reportCountEl = document.getElementById("report-count");
     const transportStatusEl = document.getElementById("transport-status");
     const statusDotEl = document.getElementById("status-dot");
+    const heroEl = document.querySelector(".hero");
+    const statusStripEl = document.querySelector(".status-strip");
+    const composerEl = document.querySelector(".composer");
     const usageHelpButton = document.getElementById("usage-help-button");
     const usageHelpOverlay = document.getElementById("usage-help-overlay");
     const usageHelpClose = document.getElementById("usage-help-close");
@@ -219,6 +222,7 @@
     setupQuickActions();
     setupSessionActions();
     setupUsageHelp();
+    setupAutoHideStatusStrip();
     favoritesPanel = initFavoritesPanel();
     connectWebSocket();
     loadReports();
@@ -445,6 +449,64 @@
           usageHelpButton.setAttribute("aria-expanded", "false");
         },
       });
+    }
+
+    function setupAutoHideStatusStrip() {
+      if (!heroEl || !statusStripEl || !messagesEl || !composerEl) {
+        return;
+      }
+
+      const REVEAL_DELAY_MS = 1400;
+      let revealTimer = null;
+
+      function syncHeights() {
+        heroEl.style.setProperty("--chrome-height", `${heroEl.offsetHeight}px`);
+        statusStripEl.style.setProperty("--chrome-height", `${statusStripEl.offsetHeight}px`);
+        composerEl.style.setProperty("--chrome-height", `${composerEl.offsetHeight}px`);
+      }
+
+      function clearRevealTimer() {
+        if (revealTimer) {
+          window.clearTimeout(revealTimer);
+          revealTimer = null;
+        }
+      }
+
+      function showChatChrome() {
+        syncHeights();
+        heroEl.classList.remove("is-reading-hidden");
+        statusStripEl.classList.remove("is-reading-hidden");
+        composerEl.classList.remove("is-reading-hidden");
+      }
+
+      function shouldKeepChromeVisible() {
+        return messagesEl.scrollTop <= 12 || document.activeElement === inputEl;
+      }
+
+      function handleReadingScroll() {
+        syncHeights();
+        clearRevealTimer();
+        if (shouldKeepChromeVisible()) {
+          showChatChrome();
+          return;
+        }
+        heroEl.classList.add("is-reading-hidden");
+        statusStripEl.classList.add("is-reading-hidden");
+        composerEl.classList.add("is-reading-hidden");
+        revealTimer = window.setTimeout(showChatChrome, REVEAL_DELAY_MS);
+      }
+
+      messagesEl.addEventListener("scroll", handleReadingScroll, { passive: true });
+      messagesEl.addEventListener("wheel", handleReadingScroll, { passive: true });
+      messagesEl.addEventListener("touchstart", handleReadingScroll, { passive: true });
+      window.addEventListener("resize", showChatChrome);
+      statusStripEl.addEventListener("mouseenter", showChatChrome);
+      statusStripEl.addEventListener("focusin", showChatChrome);
+      composerEl.addEventListener("mouseenter", showChatChrome);
+      composerEl.addEventListener("focusin", showChatChrome);
+      inputEl.addEventListener("focus", showChatChrome);
+
+      showChatChrome();
     }
 
     function autoResize() {

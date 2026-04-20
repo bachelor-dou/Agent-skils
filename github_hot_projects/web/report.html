@@ -14,11 +14,20 @@
       <span class="eyebrow">移动端报告 · __REPORT_NAME__</span>
       <h1>__REPORT_TITLE__</h1>
       <div class="summary">__REPORT_SUMMARY__</div>
-      <div class="toolbar">
-        <a href="/chat">返回聊天</a>
-        <a href="#toc" id="toc-trigger">目录导航</a>
-      </div>
     </header>
+
+    <div class="page-toolbar">
+      <div class="toolbar">
+        <a href="/chat" class="toolbar-link">
+          <span class="toolbar-link__icon" aria-hidden="true">↩</span>
+          <span>返回聊天</span>
+        </a>
+        <a href="#toc" id="toc-trigger" class="toolbar-link">
+          <span class="toolbar-link__icon" aria-hidden="true">≡</span>
+          <span>目录导航</span>
+        </a>
+      </div>
+    </div>
 
     <div class="toc-overlay" id="toc-overlay" aria-hidden="true">
       <div class="toc-panel">

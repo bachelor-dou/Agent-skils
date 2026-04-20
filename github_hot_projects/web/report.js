@@ -44,6 +44,57 @@
   syncFromHash();
 })();
 
+(function setupAutoHidePageToolbar() {
+  const toolbar = document.querySelector(".page-toolbar");
+  if (!toolbar) {
+    return;
+  }
+
+  const HIDE_DELAY_MS = 900;
+  let hideTimer = null;
+
+  function syncHeight() {
+    toolbar.style.setProperty("--chrome-height", toolbar.offsetHeight + "px");
+  }
+
+  function clearHideTimer() {
+    if (hideTimer) {
+      window.clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+  }
+
+  function shouldStayVisible() {
+    return window.scrollY <= 12 || window.location.hash === "#toc";
+  }
+
+  function hideWhenIdle() {
+    if (shouldStayVisible()) {
+      toolbar.classList.remove("is-idle-hidden");
+      return;
+    }
+    toolbar.classList.add("is-idle-hidden");
+  }
+
+  function revealToolbar() {
+    syncHeight();
+    toolbar.classList.remove("is-idle-hidden");
+    clearHideTimer();
+    if (!shouldStayVisible()) {
+      hideTimer = window.setTimeout(hideWhenIdle, HIDE_DELAY_MS);
+    }
+  }
+
+  window.addEventListener("scroll", revealToolbar, { passive: true });
+  window.addEventListener("wheel", revealToolbar, { passive: true });
+  window.addEventListener("touchstart", revealToolbar, { passive: true });
+  window.addEventListener("resize", revealToolbar);
+  toolbar.addEventListener("mouseenter", revealToolbar);
+  toolbar.addEventListener("focusin", revealToolbar);
+
+  revealToolbar();
+})();
+
 (function setupRepoActionButtons() {
   const container = document.querySelector(".content");
   const favoritesApi = window.GitHubHotFavorites || null;

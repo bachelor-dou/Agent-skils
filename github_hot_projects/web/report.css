@@ -68,24 +68,77 @@ h1 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  margin: 18px 0 0;
+  margin: 0;
+}
+
+.page-toolbar {
+  --chrome-height: 0px;
+  position: sticky;
+  top: max(12px, env(safe-area-inset-top));
+  z-index: 80;
+  margin-top: 16px;
+  padding: 8px;
+  border-radius: 24px;
+  background:
+    linear-gradient(180deg, rgba(255, 251, 245, 0.94), rgba(244, 249, 240, 0.9));
+  border: 1px solid rgba(24, 52, 78, 0.10);
+  box-shadow: 0 10px 28px rgba(24, 52, 78, 0.10);
+  backdrop-filter: blur(12px);
+  transition: transform 220ms ease, opacity 180ms ease, box-shadow 180ms ease;
+  will-change: transform, opacity;
+}
+
+.page-toolbar.is-idle-hidden {
+  transform: translateY(calc(-1 * (var(--chrome-height) + 8px)));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.page-toolbar:hover,
+.page-toolbar:focus-within {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .toolbar a {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 10px;
   min-height: 42px;
   width: 100%;
   padding: 0 16px;
-  border-radius: 999px;
+  border-radius: 18px;
   text-decoration: none;
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 0.02em;
+  color: var(--brand);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(24, 52, 78, 0.12);
+  box-shadow: 0 8px 18px rgba(24, 52, 78, 0.08);
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.toolbar a:hover {
+  transform: translateY(-1px);
+  background: rgba(248, 216, 176, 0.32);
+  box-shadow: 0 12px 22px rgba(24, 52, 78, 0.12);
+}
+
+.toolbar-link__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--brand), var(--brand-soft));
   color: #fff;
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 14px;
+  font-weight: 800;
+  flex: 0 0 auto;
 }
 
 .content {
@@ -106,7 +159,7 @@ h1 {
 .content h3 {
   color: var(--brand);
   line-height: 1.25;
-  scroll-margin-top: 24px;
+  scroll-margin-top: 108px;
 }
 
 .content h1 {
@@ -637,6 +690,26 @@ h1 {
     padding: 12px 10px 28px;
   }
 
+  .page-toolbar {
+    top: max(8px, env(safe-area-inset-top));
+    margin-top: 12px;
+    padding: 8px;
+    border-radius: 20px;
+  }
+
+  .toolbar a {
+    min-height: 40px;
+    padding: 0 14px;
+    border-radius: 16px;
+    font-size: 13px;
+  }
+
+  .toolbar-link__icon {
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+  }
+
   .hero {
     padding: 22px 18px;
     border-radius: 24px;
@@ -687,6 +760,29 @@ h1 {
 
   .hero {
     background: linear-gradient(135deg, #0d1a2a, #16304a);
+  }
+
+  .page-toolbar {
+    background: rgba(20, 26, 20, 0.84);
+    border-color: rgba(200, 220, 190, 0.08);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  }
+
+  .toolbar a {
+    color: #eef6f0;
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(200, 220, 190, 0.08);
+    box-shadow: none;
+  }
+
+  .toolbar a:hover {
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+  }
+
+  .toolbar-link__icon {
+    background: linear-gradient(135deg, rgba(143, 196, 232, 0.92), rgba(224, 160, 80, 0.86));
+    color: #111;
   }
 
   .content {
@@ -807,6 +903,7 @@ h1 {
     print-color-adjust: exact;
   }
 
+  .page-toolbar,
   .toolbar,
   .toc-overlay,
   .footer {
