@@ -71,8 +71,10 @@ body {
 }
 
 .chat-panel {
+  position: relative;
+  --composer-space: 0px;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: calc(100vh - 36px);
 }
 
@@ -84,13 +86,15 @@ body {
     linear-gradient(135deg, rgba(23, 50, 77, 0.96), rgba(43, 79, 113, 0.9)),
     linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
   color: #fff;
-  transition: transform 260ms ease, opacity 220ms ease, margin-bottom 260ms ease;
-  will-change: transform, opacity, margin-bottom;
+  filter: blur(0);
+  transition: transform 420ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms ease, margin-bottom 420ms cubic-bezier(0.4, 0, 0.2, 1), filter 300ms ease;
+  will-change: transform, opacity, margin-bottom, filter;
 }
 
 .hero.is-reading-hidden {
-  transform: translateY(calc(-1 * var(--chrome-height)));
+  transform: translateY(calc(-1 * (var(--chrome-height) + 10px)));
   opacity: 0;
+  filter: blur(4px);
   pointer-events: none;
   margin-bottom: calc(-1 * var(--chrome-height));
 }
@@ -149,13 +153,15 @@ h1 {
   backdrop-filter: blur(10px);
   font-size: 12px;
   color: var(--muted);
-  transition: transform 220ms ease, opacity 180ms ease, box-shadow 180ms ease, margin-bottom 220ms ease;
-  will-change: transform, opacity, margin-bottom;
+  filter: blur(0);
+  transition: transform 400ms cubic-bezier(0.4, 0, 0.2, 1), opacity 280ms ease, box-shadow 280ms ease, margin-bottom 400ms cubic-bezier(0.4, 0, 0.2, 1), filter 280ms ease;
+  will-change: transform, opacity, margin-bottom, filter;
 }
 
 .status-strip.is-reading-hidden {
-  transform: translateY(calc(-1 * var(--chrome-height)));
+  transform: translateY(calc(-1 * (var(--chrome-height) + 8px)));
   opacity: 0;
+  filter: blur(3px);
   pointer-events: none;
   margin-bottom: calc(-1 * var(--chrome-height));
   box-shadow: none;
@@ -576,7 +582,7 @@ h1 {
 .messages {
   min-width: 0;
   min-height: 0;
-  padding: 18px;
+  padding: 18px 18px calc(18px + var(--composer-space));
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -647,24 +653,28 @@ h1 {
 
 .composer {
   --chrome-height: 0px;
-  width: 100%;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 14;
+  width: auto;
   min-width: 0;
   padding: 16px 18px 18px;
   border-top: 1px solid var(--border);
   background: rgba(255, 250, 243, 0.92);
-  max-height: 220px;
   overflow: hidden;
-  transition: max-height 220ms ease, padding 220ms ease, opacity 180ms ease, border-color 220ms ease, transform 220ms ease;
-  will-change: max-height, transform, opacity;
+  filter: blur(0);
+  box-shadow: 0 -18px 36px rgba(23, 50, 77, 0.08);
+  transition: opacity 280ms ease, border-color 280ms ease, transform 420ms cubic-bezier(0.4, 0, 0.2, 1), filter 280ms ease;
+  will-change: transform, opacity, filter;
 }
 
 .composer.is-reading-hidden {
-  max-height: 0;
-  transform: translateY(calc(var(--chrome-height) + 8px));
+  transform: translateY(calc(100% + 14px));
   opacity: 0;
+  filter: blur(4px);
   pointer-events: none;
-  padding-top: 0;
-  padding-bottom: 0;
   border-top-color: transparent;
 }
 
@@ -1052,7 +1062,7 @@ textarea:focus {
   }
 
   .messages {
-    padding: 12px 10px;
+    padding: 12px 10px calc(12px + var(--composer-space));
     gap: 10px;
   }
 

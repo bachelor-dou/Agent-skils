@@ -191,6 +191,7 @@
     const reportCountEl = document.getElementById("report-count");
     const transportStatusEl = document.getElementById("transport-status");
     const statusDotEl = document.getElementById("status-dot");
+    const chatPanelEl = document.querySelector(".chat-panel");
     const heroEl = document.querySelector(".hero");
     const statusStripEl = document.querySelector(".status-strip");
     const composerEl = document.querySelector(".composer");
@@ -452,7 +453,7 @@
     }
 
     function setupAutoHideStatusStrip() {
-      if (!heroEl || !statusStripEl || !messagesEl || !composerEl) {
+      if (!chatPanelEl || !heroEl || !statusStripEl || !messagesEl || !composerEl) {
         return;
       }
 
@@ -462,7 +463,9 @@
       function syncHeights() {
         heroEl.style.setProperty("--chrome-height", `${heroEl.offsetHeight}px`);
         statusStripEl.style.setProperty("--chrome-height", `${statusStripEl.offsetHeight}px`);
-        composerEl.style.setProperty("--chrome-height", `${composerEl.offsetHeight}px`);
+        const composerHeight = `${composerEl.offsetHeight}px`;
+        composerEl.style.setProperty("--chrome-height", composerHeight);
+        chatPanelEl.style.setProperty("--composer-space", composerHeight);
       }
 
       function clearRevealTimer() {
