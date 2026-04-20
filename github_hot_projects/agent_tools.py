@@ -43,7 +43,7 @@ from .common.config import (
     STAR_RANGE_MIN,
     TIME_WINDOW_DAYS,
 )
-from .common.db import save_db, update_db_project, set_growth_cache, is_project_refresh_fresh
+from .common.db import save_db, update_db_project, set_growth_cache
 from .common.github_api import auto_split_star_range, fetch_repo_info, search_github_repos
 from .growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
@@ -352,13 +352,12 @@ def tool_check_repo_growth(
     """
     Tool 3: 查询单个仓库近期 star 增长，实时获取项目详情并生成 LLM 描述。
 
-    返回实时数据（不使用 DB 缓存，除了创建时间）：
-      - 当前 star、近期增长、语言、简介、创建时间
-      - LLM 生成的项目详细描述（README 浓缩摘要）
+    始终走实时二分法/采样外推计算增长，不使用 DB 差值法。
+    DB 仅用于读取已有描述缓存和补充静态元数据。
 
     Args:
         repo: "owner/repo" 格式
-        db:   DB 字典（可选，提供则优先用差值法计算增长）
+        db:   DB 字典（可选，仅用于读取描述缓存）
         time_window_days: 增长统计窗口（天）
     """
     time_window_days = coerce_positive_int(time_window_days, TIME_WINDOW_DAYS)
@@ -379,34 +378,19 @@ def tool_check_repo_growth(
 
     current_star = repo_item.get("stargazers_count", 0)
 
-    # 增长计算
-    db_project = db.get("projects", {}).get(repo, {}) if db else {}
-    can_use_db_diff = bool(
-        db
-        and db.get("valid")
-        and db_project
-        and is_project_refresh_fresh(db_project)
-        and time_window_days == TIME_WINDOW_DAYS
+    # 增长计算：始终走实时二分法/采样外推
+    growth = estimate_star_growth_binary(
+        token_mgr,
+        owner,
+        repo_name,
+        current_star,
+        token_idx=0,
+        time_window_days=time_window_days,
     )
-    if can_use_db_diff:
-        saved_star = db_project.get("star", 0)
-        growth = current_star - saved_star
-        method = "DB差值法"
+    if time_window_days != TIME_WINDOW_DAYS:
+        method = f"自定义{time_window_days}天窗口，二分法/采样外推"
     else:
-        growth = estimate_star_growth_binary(
-            token_mgr,
-            owner,
-            repo_name,
-            current_star,
-            token_idx=0,
-            time_window_days=time_window_days,
-        )
-        if db and db.get("valid") and db_project and time_window_days == TIME_WINDOW_DAYS:
-            method = "仓库基线过期，二分法/采样外推"
-        elif db and db_project and time_window_days != TIME_WINDOW_DAYS:
-            method = f"自定义{time_window_days}天窗口，二分法/采样外推"
-        else:
-            method = "二分法/采样外推"
+        method = "二分法/采样外推"
 
     if growth == GROWTH_ESTIMATION_UNRESOLVED:
         growth_value = None

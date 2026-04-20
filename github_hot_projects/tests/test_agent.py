@@ -399,7 +399,7 @@ class TestAgentStateHelpers:
 
         assert "确认请回复“开始”" in reply
         assert mock_request.call_args.kwargs["enable_thinking"] is False
-        assert mock_request.call_args.kwargs["max_tokens"] == 256
+        assert mock_request.call_args.kwargs["max_tokens"] == 1024
 
     def test_compress_conversation_preserves_recent_messages_and_adds_summary(self):
         from github_hot_projects.agent import HotProjectAgent, KEEP_RECENT_MESSAGES, MAX_CONVERSATION_MESSAGES

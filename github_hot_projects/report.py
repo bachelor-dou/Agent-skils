@@ -330,7 +330,6 @@ def _render_repo_card(
     info: dict,
     saved: dict,
     detailed_desc: str,
-    db_date: str,
     hot_new_window: int,
     time_window_days: int,
 ) -> str:
@@ -339,10 +338,9 @@ def _render_repo_card(
     growth = info["growth"]
     star = info["star"]
     language = (saved.get("language") or "").strip()
-    refreshed_at = saved.get("refreshed_at", "")
-    refresh_label = _format_datetime_label(refreshed_at) or _format_date(db_date)
-    refresh_badge_value = _format_date(refreshed_at) or _format_date(db_date)
-    refresh_badge_label = "最近刷新" if refreshed_at else "数据快照"
+    report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    refresh_badge_value = report_date
+    refresh_badge_label = "报告生成"
     intro_sections = _resolve_intro_sections(saved, detailed_desc, hot_new_window)
     badge_items = [
         _render_stat_badge("star", STAR_ICON_SVG, "总 Star", _format_number(star)),
@@ -431,7 +429,7 @@ def step3_generate_report(
         f"增长统计窗口: {time_window_days} 天",
         f"增长阈值: >={STAR_GROWTH_THRESHOLD} stars",
         f"最低 star: >={MIN_STAR_FILTER}",
-        f"数据快照: {db.get('date', today) or today}",
+        f"报告生成: {today}",
     ]
     if mode == "hot_new":
         summary_parts.insert(1, f"新项目创建窗口: <= {hot_new_window} 天")

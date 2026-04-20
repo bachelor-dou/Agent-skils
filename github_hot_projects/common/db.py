@@ -14,8 +14,7 @@ DB 结构：
         "short_desc": "GitHub 原始 description",
         "language": "Python",
                 "topics": ["ai", "llm"],
-                "readme_url": "https://github.com/owner/repo/blob/HEAD/README.md",
-                "refreshed_at": "2026-04-17T03:25:00Z"
+                "readme_url": "https://github.com/owner/repo/blob/HEAD/README.md"
       }
     }
   }
@@ -30,9 +29,9 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH, GROWTH_CACHE_TTL_HOURS
+from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH, TIME_WINDOW_DAYS
 
 logger = logging.getLogger("discover_hot")
 
@@ -49,17 +48,6 @@ def _lock_file_path() -> str:
 
 def _format_utc_timestamp(ts: datetime | None = None) -> str:
     return (ts or _utc_now()).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _parse_refresh_timestamp(value: str) -> datetime | None:
-    if not value:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
 
 
 def _merge_project_records(disk_project: dict, memory_project: dict) -> dict:
@@ -189,9 +177,10 @@ def update_db_project(
     db_projects: dict, full_name: str, current_star: int, repo_item: dict
 ) -> None:
     """
-    更新 DB 中指定仓库的 star 值及补充缺失字段。
+    更新 DB 中指定仓库的 star 值及补充缺失字段，并记录刷新时间。
 
-    对已有仓库只更新 star 并补充空字段；
+    仅在 force_refresh / 周更新等批量刷新场景下调用。
+    对已有仓库更新 star、refreshed_at 并补充空字段；
     对新仓库创建完整记录。
 
     Args:
@@ -206,12 +195,11 @@ def update_db_project(
     topics = repo_item.get("topics") or []
     forks = repo_item.get("forks_count", 0)
     created_at = repo_item.get("created_at") or ""
-    refreshed_at = _format_utc_timestamp()
 
     if full_name in db_projects:
         db_projects[full_name]["star"] = current_star
         db_projects[full_name]["forks"] = forks
-        db_projects[full_name]["refreshed_at"] = refreshed_at
+        db_projects[full_name]["refreshed_at"] = _format_utc_timestamp()
         if created_at and not db_projects[full_name].get("created_at"):
             db_projects[full_name]["created_at"] = created_at
         if "readme_url" not in db_projects[full_name]:
@@ -227,70 +215,94 @@ def update_db_project(
             "star": current_star,
             "forks": forks,
             "created_at": created_at,
+            "refreshed_at": _format_utc_timestamp(),
             "desc": "",
             "short_desc": description[:500],
             "language": language,
             "topics": topics,
             "readme_url": readme_url,
-            "refreshed_at": refreshed_at,
         }
 
 
-def is_project_refresh_fresh(
-    project: dict,
-    max_age_days: int = DATA_EXPIRE_DAYS,
-) -> bool:
-    """判断单仓库刷新时间是否仍在允许窗口内。"""
-    refreshed_ts = _parse_refresh_timestamp(project.get("refreshed_at", ""))
-    if refreshed_ts is None:
-        return False
-    return _utc_now() - refreshed_ts <= timedelta(days=max_age_days)
-
-
-# ══════════════════════════════════════════════════════════════
-# 增长缓存（跨会话复用，避免重复 API 调用）
-# ══════════════════════════════════════════════════════════════
-
-
-def get_cached_growth(
-    db_projects: dict, full_name: str,
-    ttl_hours: int = GROWTH_CACHE_TTL_HOURS,
-) -> int | None:
-    """
-    获取缓存的增长值。在 TTL 内返回缓存的 growth，否则返回 None。
-    """
-    project = db_projects.get(full_name, {})
-    gc = project.get("growth_cache")
-    if not gc:
-        return None
-    computed_at = gc.get("computed_at", "")
-    if not computed_at:
+def get_db_age_days(db: dict) -> int | None:
+    """返回 DB 快照距今的天数（四舍五入），无有效日期则返回 None。"""
+    db_date_str = db.get("date", "")
+    if not db_date_str:
         return None
     try:
-        ts = datetime.strptime(computed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+        db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return round((_utc_now() - db_date).total_seconds() / 86400)
+    except ValueError:
+        return None
+
+
+def is_db_diff_eligible(
+    db: dict,
+    time_window_days: int = TIME_WINDOW_DAYS,
+) -> bool:
+    """严格判断 DB 是否满足差值法前提（新项目榜 / 单查 使用）。
+
+    同时满足以下三项才返回 True：
+    1. db["valid"] — DB 未过期
+    2. time_window_days < DATA_EXPIRE_DAYS — 窗口在有效期内
+    3. DB 年龄 ≥ time_window_days − 1 — 差值接近请求窗口
+    """
+    if not db.get("valid", False):
+        return False
+    if time_window_days >= DATA_EXPIRE_DAYS:
+        return False
+    db_date_str = db.get("date", "")
+    if not db_date_str:
+        return False
+    try:
+        db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        db_age_days = (_utc_now() - db_date).total_seconds() / 86400
+        return db_age_days >= (time_window_days - 1)
+    except ValueError:
+        return False
+
+
+def is_project_diff_eligible(
+    project: dict,
+    time_window_days: int = TIME_WINDOW_DAYS,
+) -> bool:
+    """严格判断单个仓库是否满足差值法条件（新项目榜 / 单查 使用）。
+
+    同时满足：
+    1. refreshed_at 距今 ≥ time_window_days − 1（足够旧）
+    2. refreshed_at 距今 ≤ DATA_EXPIRE_DAYS（不超过有效期）
+    """
+    refreshed_at = project.get("refreshed_at", "")
+    if not refreshed_at:
+        return False
+    try:
+        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc
         )
-        hours_old = (_utc_now() - ts).total_seconds() / 3600
-        if hours_old < ttl_hours:
-            return gc.get("growth")
-    except (ValueError, TypeError):
-        pass
-    return None
+        age_days = (_utc_now() - refresh_dt).total_seconds() / 86400
+        return (time_window_days - 1) <= age_days <= DATA_EXPIRE_DAYS
+    except ValueError:
+        return False
 
 
-def set_growth_cache(
-    db_projects: dict, full_name: str,
-    growth: int, score: float | None = None,
-) -> None:
+def is_project_same_batch(
+    project: dict,
+    db: dict,
+) -> bool:
+    """综合榜专用：判断仓库 refreshed_at 是否与 db["date"] 属于同一批次刷新。
+
+    refreshed_at 与 db["date"] 差值 ≤ 1 天视为同批次。
     """
-    将增长值（及可选的评分）写入 DB 缓存。
-    """
-    if full_name not in db_projects:
-        return
-    cache = {
-        "growth": growth,
-        "computed_at": _format_utc_timestamp(),
-    }
-    if score is not None:
-        cache["score"] = score
-    db_projects[full_name]["growth_cache"] = cache
+    refreshed_at = project.get("refreshed_at", "")
+    db_date_str = db.get("date", "")
+    if not refreshed_at or not db_date_str:
+        return False
+    try:
+        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        diff_days = abs((refresh_dt - db_date).total_seconds()) / 86400
+        return diff_days <= 1
+    except ValueError:
+        return False

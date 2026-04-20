@@ -173,7 +173,7 @@ class TestDB:
             db = load_db()
             assert db["projects"] == {}
 
-    def test_update_db_project_sets_refreshed_at(self):
+    def test_update_db_project_creates_record(self):
         from github_hot_projects.common.db import update_db_project
 
         db_projects = {}
@@ -188,17 +188,79 @@ class TestDB:
         update_db_project(db_projects, "org/repo", 5000, repo_item)
 
         assert db_projects["org/repo"]["star"] == 5000
+        assert db_projects["org/repo"]["language"] == "Python"
+        assert db_projects["org/repo"]["created_at"] == "2026-04-01T00:00:00Z"
         assert db_projects["org/repo"]["refreshed_at"].endswith("Z")
 
-    def test_is_project_refresh_fresh(self):
-        from github_hot_projects.common.db import is_project_refresh_fresh
+    def test_is_db_diff_eligible(self):
+        from github_hot_projects.common.db import is_db_diff_eligible
+
+        # DB 无效 → False
+        assert is_db_diff_eligible({"valid": False, "date": "2026-04-13"}, 7) is False
+        # 无日期 → False
+        assert is_db_diff_eligible({"valid": True, "date": ""}, 7) is False
+        # time_window >= DATA_EXPIRE_DAYS → False
+        assert is_db_diff_eligible({"valid": True, "date": "2026-04-13"}, 8) is False
+        # DB 太新（age < window - 1）→ False
+        two_days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
+        assert is_db_diff_eligible({"valid": True, "date": two_days_ago}, 7) is False
+        # DB 足够旧 → True
+        seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        assert is_db_diff_eligible({"valid": True, "date": seven_days_ago}, 7) is True
+        # 自定义窗口 + DB 足够旧 → True
+        five_days_ago = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+        assert is_db_diff_eligible({"valid": True, "date": five_days_ago}, 5) is True
+
+    def test_is_project_diff_eligible(self):
+        from github_hot_projects.common.db import is_project_diff_eligible
 
         fresh = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        matched = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
         stale = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        assert is_project_refresh_fresh({"refreshed_at": fresh}) is True
-        assert is_project_refresh_fresh({"refreshed_at": stale}) is False
-        assert is_project_refresh_fresh({}) is False
+        # age 匹配窗口 → True
+        assert is_project_diff_eligible({"refreshed_at": matched}, 7) is True
+        # 太新（age < window - 1）→ False
+        assert is_project_diff_eligible({"refreshed_at": fresh}, 7) is False
+        # 过旧（> DATA_EXPIRE_DAYS）→ False
+        assert is_project_diff_eligible({"refreshed_at": stale}, 7) is False
+        # 无 refreshed_at → False
+        assert is_project_diff_eligible({}, 7) is False
+        # 自定义窗口：age 匹配 → True
+        five_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert is_project_diff_eligible({"refreshed_at": five_day}, 5) is True
+        # 自定义窗口：太新 → False
+        assert is_project_diff_eligible({"refreshed_at": fresh}, 5) is False
+
+    def test_is_project_same_batch(self):
+        from github_hot_projects.common.db import is_project_same_batch
+
+        db_date = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        db = {"date": db_date}
+
+        # 同批次（refreshed_at ≈ db_date）→ True
+        same = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert is_project_same_batch({"refreshed_at": same}, db) is True
+        # 不同批次（refreshed_at 差距 > 1 天）→ False
+        diff = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert is_project_same_batch({"refreshed_at": diff}, db) is False
+        # 无 refreshed_at → False
+        assert is_project_same_batch({}, db) is False
+        # 无 db date → False
+        assert is_project_same_batch({"refreshed_at": same}, {"date": ""}) is False
+
+    def test_get_db_age_days(self):
+        from github_hot_projects.common.db import get_db_age_days
+
+        # 无日期 → None
+        assert get_db_age_days({"date": ""}) is None
+        assert get_db_age_days({}) is None
+        # 今天 → 0 或 1（取决于时间，round 四舍五入）
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert get_db_age_days({"date": today}) in (0, 1)
+        # 7 天前 → 7 或 8（round 四舍五入）
+        seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        assert get_db_age_days({"date": seven_days_ago}) in (7, 8)
 
 
 # ──────────────────────────────────────────────────────────────

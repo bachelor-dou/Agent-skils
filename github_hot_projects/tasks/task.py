@@ -19,7 +19,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from ..common.config import (
     CHECKPOINT_FILE_PATH,
@@ -28,7 +27,13 @@ from ..common.config import (
     STAR_GROWTH_THRESHOLD,
     TIME_WINDOW_DAYS,
 )
-from ..common.db import save_db, update_db_project, get_cached_growth, set_growth_cache, is_project_refresh_fresh
+from ..common.db import (
+    update_db_project,
+    is_db_diff_eligible,
+    is_project_diff_eligible,
+    is_project_same_batch,
+    get_db_age_days,
+)
 from ..common.github_api import search_github_repos
 from ..growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
@@ -338,9 +343,8 @@ class CalcGrowthTask(Task):
             self._ctx["completed_since_save"][0] += 1
 
         if growth >= 0:
-            update_db_project(db_projects, self.full_name, current_star, self.repo_item)
-            if self._ctx.get("cache_growth", True):
-                set_growth_cache(db_projects, self.full_name, growth)
+            if self._ctx.get("update_db", False):
+                update_db_project(db_projects, self.full_name, current_star, self.repo_item)
             if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
 
@@ -355,9 +359,7 @@ class CalcGrowthTask(Task):
         logger.error(f"  增长计算异常: {self.full_name}, {error}")
         fallback_star = self.repo_item.get("stargazers_count", 0)
         if fallback_star:
-            db_projects = self._ctx["db_projects"]
             checkpoint = self._ctx["checkpoint"]
-            update_db_project(db_projects, self.full_name, fallback_star, self.repo_item)
             if self._ctx.get("use_checkpoint", True):
                 checkpoint[self.full_name] = {"growth": -1, "star": fallback_star}
                 self._ctx["checkpoint_dirty"][0] = True
@@ -381,12 +383,11 @@ def _submit_growth_tasks(
     growth_ctx: dict,
 ) -> dict:
     """
-    批量增长计算入队：默认先走 checkpoint/cache/DB 差值，再将剩余提交为 CalcGrowthTask。
+    批量增长计算入队：默认先走 checkpoint/DB 差值，再将剩余提交为 CalcGrowthTask。
 
     growth_ctx 由调用方创建并传入（包含 checkpoint, pending_created_at, db_projects 等共享状态）。
     返回 checkpoint dict。
     """
-    db_valid = db.get("valid", False)
     db_projects = db.get("projects", {})
     growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
     force_refresh = bool(growth_ctx.get("force_refresh", False))
@@ -414,8 +415,6 @@ def _submit_growth_tasks(
                     continue
                 current_star = cp["star"]
                 created_at = pending[fn].get("created_at", "")
-                repo_item = pending[fn]["repo_item"]
-                update_db_project(db_projects, fn, current_star, repo_item)
                 if growth >= growth_threshold:
                     _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
                 del pending[fn]
@@ -423,50 +422,48 @@ def _submit_growth_tasks(
 
         if resumed_count:
             logger.info(f"断点续传: 恢复 {resumed_count} 个已计算项目。")
-            save_db(db)
 
-    # DB 差值法：主线程直接处理
+    # DB 差值法：主线程直接处理（模式感知）
     checkpoint_dirty = False
     db_count = 0
-    cache_count = 0
-    stale_db_count = 0
+
+    time_window = growth_ctx.get("time_window_days", TIME_WINDOW_DAYS)
+    is_comprehensive = growth_ctx.get("new_project_days") is None
+
+    if is_comprehensive:
+        # 综合榜：DB 有效即可走差值法，仓库级要求同批次刷新
+        can_use_db_diff = db.get("valid", False)
+    else:
+        # 新项目榜：自定义窗口一律实时；默认窗口走严格检查（db_age ≈ window）
+        if time_window != TIME_WINDOW_DAYS:
+            can_use_db_diff = False
+        else:
+            can_use_db_diff = is_db_diff_eligible(db, time_window)
 
     if not force_refresh:
         for full_name in list(pending.keys()):
             info = pending[full_name]
             current_star = info["star"]
-            repo_item = info["repo_item"]
             created_at = info.get("created_at", "")
 
-            # 优先：增长缓存（TTL 内有效，跨会话复用）
-            cached_growth = get_cached_growth(db_projects, full_name)
-            if cached_growth is not None:
-                update_db_project(db_projects, full_name, current_star, repo_item)
-                checkpoint[full_name] = {"growth": cached_growth, "star": current_star}
-                checkpoint_dirty = True
-                cache_count += 1
-                if cached_growth >= growth_threshold:
-                    _upsert_candidate(candidate_map, full_name, cached_growth, current_star, created_at, "cache")
-                del pending[full_name]
-                continue
+            if can_use_db_diff and full_name in db_projects:
+                # 仓库级检查：综合榜用同批次检查，新项目榜用严格窗口检查
+                if is_comprehensive:
+                    project_ok = is_project_same_batch(db_projects[full_name], db)
+                else:
+                    project_ok = is_project_diff_eligible(db_projects[full_name], time_window)
 
-            # 次选：DB 差值法
-            if full_name in db_projects and db_valid:
-                if not is_project_refresh_fresh(db_projects[full_name]):
-                    stale_db_count += 1
-                    continue
-                saved_star = db_projects[full_name].get("star", 0)
-                growth = current_star - saved_star
-                update_db_project(db_projects, full_name, current_star, repo_item)
-                checkpoint[full_name] = {"growth": growth, "star": current_star}
-                checkpoint_dirty = True
-                db_count += 1
-                set_growth_cache(db_projects, full_name, growth)
-                if growth >= growth_threshold:
-                    _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
-                del pending[full_name]
+                if project_ok:
+                    saved_star = db_projects[full_name].get("star", 0)
+                    growth = current_star - saved_star
+                    checkpoint[full_name] = {"growth": growth, "star": current_star}
+                    checkpoint_dirty = True
+                    db_count += 1
+                    if growth >= growth_threshold:
+                        _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
+                    del pending[full_name]
     else:
-        logger.info("强制刷新/自定义窗口模式：跳过 checkpoint、growth_cache 和 DB 差值，全部走实时增长估算。")
+        logger.info("强制刷新模式：跳过 checkpoint 和 DB 差值，全部走实时增长估算。")
 
     if use_checkpoint and checkpoint_dirty:
         _save_checkpoint(checkpoint)
@@ -483,10 +480,12 @@ def _submit_growth_tasks(
             _ctx=growth_ctx,
         ))
 
+    db_age = get_db_age_days(db)
+    db_age_info = f"(距上次更新≈{db_age}天)" if db_age is not None else ""
     logger.info(
         f"批量增长计算: {len(pending)} 个任务入队 "
-        f"(缓存命中 {cache_count}, DB差值 {db_count}, 仓库级过期回退 {stale_db_count}, 续传 {resumed_count}, "
-        f"跳过已入选 {len(raw_repos) - len(pending) - db_count - cache_count - resumed_count})"
+        f"(DB差值{db_age_info} {db_count}, 续传 {resumed_count}, "
+        f"跳过已入选 {len(raw_repos) - len(pending) - db_count - resumed_count})"
     )
 
     return checkpoint

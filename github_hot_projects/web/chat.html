@@ -459,6 +459,7 @@
 
       const REVEAL_DELAY_MS = 1400;
       let revealTimer = null;
+      let _scrollGuard = false;
 
       function syncHeights() {
         heroEl.style.setProperty("--chrome-height", `${heroEl.offsetHeight}px`);
@@ -482,20 +483,28 @@
         composerEl.classList.remove("is-reading-hidden");
       }
 
+      function isNearBottom() {
+        const gap = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+        return gap <= 12;
+      }
+
       function shouldKeepChromeVisible() {
-        return messagesEl.scrollTop <= 12 || document.activeElement === inputEl;
+        return messagesEl.scrollTop <= 12 || isNearBottom() || document.activeElement === inputEl;
       }
 
       function handleReadingScroll() {
+        if (_scrollGuard) return;
         syncHeights();
         clearRevealTimer();
         if (shouldKeepChromeVisible()) {
           showChatChrome();
           return;
         }
+        _scrollGuard = true;
         heroEl.classList.add("is-reading-hidden");
         statusStripEl.classList.add("is-reading-hidden");
         composerEl.classList.add("is-reading-hidden");
+        requestAnimationFrame(() => { _scrollGuard = false; });
         revealTimer = window.setTimeout(showChatChrome, REVEAL_DELAY_MS);
       }
 

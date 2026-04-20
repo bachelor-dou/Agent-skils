@@ -11,89 +11,81 @@ import pytest
 
 
 class TestToolCheckRepoGrowth:
-    def test_db_diff_method(self, mock_token_mgr):
-        """DB 有效且仓库在库中 → 用差值法计算增长。"""
-        from github_hot_projects.agent_tools import tool_check_repo_growth
-
-        db = {
-            "valid": True,
-            "projects": {
-                "org/repo": {
-                    "star": 4800,
-                    "desc": "已有描述",
-                    "refreshed_at": (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                },
-            },
-        }
-
-        search_result = [{
-            "full_name": "org/repo",
-            "stargazers_count": 5000,
+    def _make_repo_item(self, full_name="org/repo", star=5000):
+        return {
+            "full_name": full_name,
+            "stargazers_count": star,
             "description": "test",
             "language": "Python",
             "topics": ["ai"],
-            "html_url": "https://github.com/org/repo",
+            "html_url": f"https://github.com/{full_name}",
             "created_at": "2025-01-01T00:00:00Z",
-        }]
+        }
 
-        with patch("github_hot_projects.agent_tools.search_github_repos", return_value=search_result):
+    def test_db_diff_when_eligible(self, mock_token_mgr):
+        """DB 有效 + 仓库 refreshed_at 匹配窗口 → 走 DB 差值法。"""
+        from github_hot_projects.agent_tools import tool_check_repo_growth
+
+        refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db = {
+            "valid": True,
+            "date": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d"),
+            "projects": {
+                "org/repo": {"star": 4800, "desc": "已有描述", "refreshed_at": refreshed_at},
+            },
+        }
+
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
             result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
-            assert result["growth"] == 200  # 5000 - 4800
-            assert result["method"] == "DB差值法"
-            assert result["description"] == "已有描述"
 
-    def test_stale_repo_refresh_falls_back_to_estimate(self, mock_token_mgr):
-        """仓库级刷新时间过旧时，不应走 DB 差值法。"""
+        assert result["growth"] == 200  # 5000 - 4800
+        assert result["method"] == "DB差值法"
+        assert result["description"] == "已有描述"
+
+    def test_stale_project_falls_back_to_estimate(self, mock_token_mgr):
+        """仓库 refreshed_at 过旧 → 不走 DB 差值法，回退到二分法。"""
         from github_hot_projects.agent_tools import tool_check_repo_growth
 
+        stale_refresh = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         db = {
             "valid": True,
+            "date": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d"),
             "projects": {
-                "org/repo": {
-                    "star": 3200,
-                    "desc": "已有描述",
-                    "refreshed_at": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                },
+                "org/repo": {"star": 4800, "desc": "已有描述", "refreshed_at": stale_refresh},
             },
         }
 
-        search_result = [{
-            "full_name": "org/repo",
-            "stargazers_count": 5000,
-            "description": "test",
-            "language": "Python",
-            "topics": ["ai"],
-            "html_url": "https://github.com/org/repo",
-            "created_at": "2025-01-01T00:00:00Z",
-        }]
-
-        with patch("github_hot_projects.agent_tools.search_github_repos", return_value=search_result):
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
             with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=650):
                 result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
 
         assert result["growth"] == 650
-        assert "二分法/采样外推" in result["method"]
+        assert "二分法" in result["method"]
 
-    def test_estimate_method(self, mock_token_mgr):
-        """DB 无效 → 调用 estimate_star_growth_binary。"""
+    def test_estimate_method_no_db(self, mock_token_mgr):
+        """DB 为 None → 走二分法估算 + LLM 生成描述。"""
         from github_hot_projects.agent_tools import tool_check_repo_growth
 
-        search_result = [{
-            "full_name": "org/repo",
-            "stargazers_count": 5000,
-            "description": "test",
-            "language": "Python",
-            "topics": [],
-            "html_url": "https://github.com/org/repo",
-            "created_at": "2025-01-01T00:00:00Z",
-        }]
-
-        with patch("github_hot_projects.agent_tools.search_github_repos", return_value=search_result):
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
             with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=800):
                 with patch("github_hot_projects.agent_tools.call_llm_describe", return_value="描述"):
                     result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=None)
-                    assert result["growth"] == 800
-                    assert "二分法" in result["method"]
+
+        assert result["growth"] == 800
+        assert "二分法" in result["method"]
+        assert result["description"] == "描述"
+
+    def test_custom_time_window(self, mock_token_mgr):
+        """自定义时间窗口应体现在 method 中。"""
+        from github_hot_projects.agent_tools import tool_check_repo_growth
+
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
+            with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=650):
+                result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=None, time_window_days=10)
+
+        assert result["growth"] == 650
+        assert "10天窗口" in result["method"]
+        assert result["time_window_days"] == 10
 
     def test_invalid_repo_format(self, mock_token_mgr):
         """非 owner/repo 格式应返回 error。"""
@@ -104,7 +96,7 @@ class TestToolCheckRepoGrowth:
     def test_repo_not_found(self, mock_token_mgr):
         """仓库不存在应返回 error。"""
         from github_hot_projects.agent_tools import tool_check_repo_growth
-        with patch("github_hot_projects.agent_tools.search_github_repos", return_value=[]):
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=None):
             result = tool_check_repo_growth(mock_token_mgr, "org/nonexistent")
             assert "error" in result
 
