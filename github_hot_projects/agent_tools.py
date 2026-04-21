@@ -43,13 +43,13 @@ from .common.config import (
     STAR_RANGE_MIN,
     TIME_WINDOW_DAYS,
 )
-from .common.db import save_db, update_db_project, set_growth_cache
+from .common.db import save_db, update_db_project
 from .common.github_api import auto_split_star_range, fetch_repo_info, search_github_repos
 from .growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
     estimate_star_growth_binary,
 )
-from .common.llm import call_llm_describe
+from .common.llm import batch_condense_descriptions, call_llm_describe
 from .common.token_manager import TokenManager
 from .report import step3_generate_report
 from .ranking import step2_rank_and_select
@@ -98,6 +98,136 @@ def coerce_star_range(min_star: object, max_star: object) -> tuple[int, int]:
     if high < low:
         low, high = high, low
     return low, high
+
+
+def _ensure_project_record(
+    db_projects: dict[str, dict],
+    full_name: str,
+    current_star: int,
+    repo_item: dict,
+    *,
+    allow_snapshot_refresh: bool,
+) -> dict:
+    """确保 DB 中存在仓库记录；仅在允许时刷新快照字段。"""
+    if allow_snapshot_refresh:
+        update_db_project(db_projects, full_name, current_star, repo_item)
+        project = db_projects.setdefault(full_name, {})
+        project.setdefault("desc_level", "")
+        return project
+
+    readme_url = f"https://github.com/{full_name}/blob/HEAD/README.md"
+    description = repo_item.get("description") or ""
+    language = repo_item.get("language") or ""
+    topics = repo_item.get("topics") or []
+    forks = repo_item.get("forks_count", 0)
+    created_at = repo_item.get("created_at") or ""
+
+    if full_name not in db_projects:
+        db_projects[full_name] = {
+            "star": current_star,
+            "forks": forks,
+            "created_at": created_at,
+            "desc": "",
+            "desc_level": "",
+            "short_desc": description[:500],
+            "language": language,
+            "topics": topics,
+            "readme_url": readme_url,
+        }
+        return db_projects[full_name]
+
+    project = db_projects[full_name]
+    if "readme_url" not in project:
+        project["readme_url"] = readme_url
+    if created_at and not project.get("created_at"):
+        project["created_at"] = created_at
+    if description and not project.get("short_desc"):
+        project["short_desc"] = description[:500]
+    if language and not project.get("language"):
+        project["language"] = language
+    if topics and not project.get("topics"):
+        project["topics"] = topics
+    if "desc_level" not in project:
+        project["desc_level"] = ""
+    return project
+
+
+def _write_candidate_brief_desc(
+    candidate_map: dict[str, dict],
+    raw_repos: dict[str, dict],
+    db_projects: dict[str, dict],
+    *,
+    allow_snapshot_refresh: bool,
+) -> int:
+    """为候选仓库补充 LLM 简述（brief）并写入 DB 的 desc 字段。"""
+    if not candidate_map:
+        return 0
+
+    pending_payload: list[dict] = []
+    pending_names: list[str] = []
+
+    for full_name, candidate in candidate_map.items():
+        info = raw_repos.get(full_name, {})
+        repo_item = info.get("repo_item", {})
+        current_star = candidate.get("star", info.get("star", 0))
+        project = _ensure_project_record(
+            db_projects,
+            full_name,
+            current_star,
+            repo_item,
+            allow_snapshot_refresh=allow_snapshot_refresh,
+        )
+
+        existing_desc = (project.get("desc") or "").strip()
+        if existing_desc:
+            continue
+
+        short_desc = (project.get("short_desc") or repo_item.get("description") or "").strip()
+        language = project.get("language") or repo_item.get("language") or ""
+        topics = project.get("topics") or repo_item.get("topics") or []
+
+        summary_parts: list[str] = []
+        if short_desc:
+            summary_parts.append(short_desc)
+        if language:
+            summary_parts.append(f"语言: {language}")
+        if topics:
+            summary_parts.append(f"标签: {', '.join(topics[:4])}")
+        if not summary_parts:
+            summary_parts.append("暂无公开描述信息。")
+
+        pending_names.append(full_name)
+        pending_payload.append(
+            {
+                "full_name": full_name,
+                "description": "；".join(summary_parts),
+            }
+        )
+
+    if not pending_payload:
+        return 0
+
+    written = 0
+    chunk_size = 40
+    for start in range(0, len(pending_payload), chunk_size):
+        chunk_payload = pending_payload[start:start + chunk_size]
+        chunk_names = pending_names[start:start + chunk_size]
+        condensed = batch_condense_descriptions(chunk_payload, max_chars=120)
+        for idx, full_name in enumerate(chunk_names):
+            desc = (condensed[idx] if idx < len(condensed) else "").strip()
+            if not desc:
+                continue
+            project = db_projects.get(full_name)
+            if not project:
+                continue
+            project["desc"] = desc
+            project["desc_level"] = "brief"
+            written += 1
+
+    if written:
+        logger.info(f"候选简述已写入 DB: {written} 个项目。")
+
+    return written
 
 
 # ══════════════════════════════════════════════════════════════
@@ -352,7 +482,7 @@ def tool_check_repo_growth(
     """
     Tool 3: 查询单个仓库近期 star 增长，实时获取项目详情并生成 LLM 描述。
 
-    始终走实时二分法/采样外推计算增长，不使用 DB 差值法。
+    增长计算始终走实时二分法/采样外推，不走 DB 差值法。
     DB 仅用于读取已有描述缓存和补充静态元数据。
 
     Args:
@@ -378,7 +508,6 @@ def tool_check_repo_growth(
 
     current_star = repo_item.get("stargazers_count", 0)
 
-    # 增长计算：始终走实时二分法/采样外推
     growth = estimate_star_growth_binary(
         token_mgr,
         owner,
@@ -445,13 +574,16 @@ def tool_batch_check_growth(
     new_project_days: int | None = None,
     time_window_days: int = TIME_WINDOW_DAYS,
     force_refresh: bool = False,
+    refresh_db: bool = False,
+    window_specified: bool = True,
 ) -> dict:
     """
     Tool 4: 批量计算仓库增长并筛选候选。
 
     使用 TokenWorkerPool + CalcGrowthTask 并行计算。
     当 new_project_days 指定时，先按创建时间筛选新项目，只对新项目计算增长。
-    当 force_refresh=True 时，跳过 checkpoint/growth_cache/DB 差值，全部走实时估算并刷新 DB。
+    当 force_refresh=True 或 refresh_db=True 时，跳过 checkpoint/DB 差值并走实时估算；
+    force_refresh 与 refresh_db 均允许刷新 DB 快照。
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
@@ -460,13 +592,18 @@ def tool_batch_check_growth(
         new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
         time_window_days: 增长统计窗口（天）
         force_refresh:    是否强制实时刷新（不复用 DB 与缓存）
+        refresh_db:       是否允许在本轮刷新 DB 快照（供定期任务调用）
+        window_specified: 调用方是否显式指定了 time_window_days
     """
     from datetime import timedelta
 
     growth_threshold = coerce_non_negative_int(growth_threshold, STAR_GROWTH_THRESHOLD)
     new_project_days = coerce_optional_positive_int(new_project_days)
     time_window_days = coerce_positive_int(time_window_days, TIME_WINDOW_DAYS)
-    effective_force_refresh = force_refresh or time_window_days != TIME_WINDOW_DAYS
+    refresh_db = bool(refresh_db)
+    window_specified = bool(window_specified)
+    effective_force_refresh = force_refresh or refresh_db or time_window_days != TIME_WINDOW_DAYS
+    allow_snapshot_refresh = force_refresh or refresh_db
 
     # 构建 raw_repos 格式
     raw_repos: dict[str, dict] = {}
@@ -482,19 +619,16 @@ def tool_batch_check_growth(
         }
 
     # ── 补全缺失的 created_at（DB → API），所有模式通用 ──
-    # 确保 Trending 等无 created_at 的仓库也能存入 DB，后续查询可直接命中
     db_projects = db.get("projects", {})
     api_fetched_count = 0
     for fn, info in raw_repos.items():
         if info.get("created_at"):
             continue
-        # 1. DB 查询
         db_ca = db_projects.get(fn, {}).get("created_at", "")
         if db_ca:
             info["created_at"] = db_ca
             info["repo_item"]["created_at"] = db_ca
             continue
-        # 2. API 调用
         try:
             items = search_github_repos(
                 token_mgr,
@@ -513,17 +647,23 @@ def tool_batch_check_growth(
                 if created_at:
                     info["created_at"] = created_at
                     info["repo_item"]["created_at"] = created_at
-                    update_db_project(
-                        db_projects, fn,
-                        info.get("star", repo_item.get("stargazers_count", 0)),
-                        repo_item,
-                    )
                     api_fetched_count += 1
             time.sleep(SEARCH_REQUEST_INTERVAL)
         except Exception as e:
             logger.warning(f"API 补全 created_at 失败: {fn}, {e}")
     if api_fetched_count:
         logger.info(f"created_at 补全: API 获取 {api_fetched_count} 个")
+
+    seeded_count = 0
+    if allow_snapshot_refresh:
+        for fn, info in raw_repos.items():
+            repo_item = info.get("repo_item", {})
+            if info.get("created_at") and not repo_item.get("created_at"):
+                repo_item["created_at"] = info["created_at"]
+            update_db_project(db_projects, fn, info.get("star", 0), repo_item)
+            seeded_count += 1
+        if seeded_count:
+            logger.info(f"刷新模式: 初筛阶段已同步 DB 快照 {seeded_count} 个项目。")
 
     # ── 新项目前置筛选：仅保留创建时间在窗口内的仓库 ──
     skipped_count = 0
@@ -564,8 +704,10 @@ def tool_batch_check_growth(
             "candidate_map": candidate_map,
             "growth_threshold": growth_threshold,
             "force_refresh": effective_force_refresh,
+            "update_db": allow_snapshot_refresh,
+            "window_specified": window_specified,
             "time_window_days": time_window_days,
-            "use_checkpoint": not effective_force_refresh,
+            "use_checkpoint": (not effective_force_refresh) and window_specified,
             "cache_growth": time_window_days == TIME_WINDOW_DAYS,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
@@ -584,6 +726,16 @@ def tool_batch_check_growth(
     finally:
         pool.shutdown()
 
+    brief_desc_written = _write_candidate_brief_desc(
+        candidate_map,
+        raw_repos,
+        db_projects,
+        allow_snapshot_refresh=allow_snapshot_refresh,
+    )
+
+    db_updated = bool(allow_snapshot_refresh or brief_desc_written > 0)
+    effective_time_window = growth_ctx.get("effective_time_window_days", time_window_days)
+
     return {
         "candidates": candidate_map,
         "total_checked": len(raw_repos),
@@ -593,7 +745,11 @@ def tool_batch_check_growth(
         "skipped_by_creation_time": skipped_count,
         "threshold": growth_threshold,
         "force_refresh": effective_force_refresh,
-        "time_window_days": time_window_days,
+        "db_updated": db_updated,
+        "seeded_snapshot_count": seeded_count,
+        "brief_desc_written": brief_desc_written,
+        "time_window_days": effective_time_window,
+        "requested_time_window_days": time_window_days,
     }
 
 
@@ -639,14 +795,6 @@ def tool_rank_candidates(
     if mode == "hot_new" and db is not None:
         save_db(db)
 
-    # 将评分持久化到 DB（跨会话可查）
-    if db is not None and time_window_days == TIME_WINDOW_DAYS:
-        db_projects = db.get("projects", {})
-        for name, info in top:
-            score = info.get("_score")
-            if score is not None:
-                set_growth_cache(db_projects, name, info["growth"], score=score)
-
     ranked = []
     for i, (name, info) in enumerate(top, 1):
         ranked.append({
@@ -683,6 +831,7 @@ def tool_describe_project(repo: str, db: dict) -> dict:
     desc = call_llm_describe(repo, saved, html_url, detail_level="detailed")
     if desc and repo in db_projects:
         db_projects[repo]["desc"] = desc
+        db_projects[repo]["desc_level"] = "detailed"
 
     return {
         "repo": repo,

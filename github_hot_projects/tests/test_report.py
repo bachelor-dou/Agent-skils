@@ -148,7 +148,15 @@ class TestReport:
         db = {
             "projects": {
                 "cached/repo": {
-                    "desc": "项目定位与用途：这是一个缓存项目。\n解决的问题：它减少重复劳动。\n使用场景：适合测试缓存命中。",
+                    "desc": (
+                        "项目定位与用途：这是一个缓存项目。\n"
+                        "解决的问题：它减少重复劳动。\n"
+                        "使用场景：适合测试缓存命中。\n"
+                        "技术架构与特性：采用模块化结构并提供清晰接口。\n"
+                        "核心依赖与生态：依赖 Python 生态与常见包管理工具。\n"
+                        "已知局限或注意事项：需要结合具体业务进一步评估。"
+                    ),
+                    "desc_level": "detailed",
                     "star": 5000,
                 },
             }
@@ -166,6 +174,40 @@ class TestReport:
         assert "这是一个缓存项目" in content
         assert "它减少重复劳动" in content
         assert "适合测试缓存命中" in content
+
+    def test_generate_report_upgrades_brief_desc(self, tmp_path):
+        """Top 项目若仅有 brief 描述，需升级为 detailed 并覆盖写回 DB。"""
+        db = {
+            "projects": {
+                "brief/repo": {
+                    "desc": "一个简短描述",
+                    "desc_level": "brief",
+                    "short_desc": "A brief repo",
+                    "language": "Python",
+                    "topics": ["ai"],
+                    "star": 3000,
+                },
+            }
+        }
+        top_projects = [("brief/repo", {"growth": 500, "star": 3000})]
+        detailed_desc = (
+            "项目定位与用途：用于验证升级逻辑。\n"
+            "解决的问题：避免榜单沿用简述导致信息不足。\n"
+            "使用场景：适合快速审阅候选项目。\n"
+            "技术架构与特性：采用分层设计并保留扩展点。\n"
+            "核心依赖与生态：兼容常见 Python 工具链。\n"
+            "已知局限或注意事项：仍需结合源码进一步确认。"
+        )
+
+        with patch("github_hot_projects.report.REPORT_DIR", str(tmp_path)):
+            with patch("github_hot_projects.report.call_llm_describe", return_value=detailed_desc) as mock_llm:
+                from github_hot_projects.report import step3_generate_report
+                path = step3_generate_report(top_projects, db, mode="comprehensive")
+
+        assert os.path.exists(path)
+        mock_llm.assert_called_once()
+        assert db["projects"]["brief/repo"]["desc"] == detailed_desc
+        assert db["projects"]["brief/repo"]["desc_level"] == "detailed"
 
     def test_generate_report_empty_projects(self, tmp_path):
         """空项目列表 → 仍生成文件（仅有标题）。"""

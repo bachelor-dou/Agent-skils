@@ -57,6 +57,7 @@ class DiscoveryPipeline:
         new_project_days: int | None = None,
         time_window_days: int = TIME_WINDOW_DAYS,
         growth_threshold: int = STAR_GROWTH_THRESHOLD,
+        refresh_db: bool = False,
     ) -> dict:
         """执行完整的 search → scan → trending → growth → rank → report 流程。
 
@@ -66,6 +67,7 @@ class DiscoveryPipeline:
             new_project_days:  新项目创建窗口（天），仅 hot_new 模式有效
             time_window_days:  增长统计窗口（天）
             growth_threshold:  增长阈值
+            refresh_db:        是否刷新 DB 快照（定期任务可开启）
 
         Returns:
             {"report_path": str, "ranked_count": int, "candidates_count": int, ...}
@@ -92,6 +94,7 @@ class DiscoveryPipeline:
             growth_threshold=growth_threshold,
             new_project_days=new_project_days,
             time_window_days=time_window_days,
+            refresh_db=refresh_db,
         )
         candidates = growth_result.get("candidates", {})
         logger.info(

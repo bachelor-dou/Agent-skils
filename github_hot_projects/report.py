@@ -290,6 +290,21 @@ def _normalize_markdown_blocks(text: str) -> list[str]:
     return blocks
 
 
+def _is_detailed_desc(text: str) -> bool:
+    """判断描述是否为完整详细版（六字段）。"""
+    if not text:
+        return False
+    required_titles = (
+        "项目定位与用途",
+        "解决的问题",
+        "使用场景",
+        "技术架构与特性",
+        "核心依赖与生态",
+        "已知局限或注意事项",
+    )
+    return all(f"{title}：" in text or f"{title}:" in text for title in required_titles)
+
+
 def _render_stat_badge(kind: str, icon_svg: str, label: str, value: str) -> str:
     return (
         f'<div class="repo-stat repo-stat--{kind}">'
@@ -405,20 +420,24 @@ def step3_generate_report(
         saved = db_projects.get(full_name, {})
         existing_desc = saved.get("desc", "")
         html_url = f"https://github.com/{full_name}"
-        if existing_desc:
+        desc_level = (saved.get("desc_level") or "").strip().lower()
+        if existing_desc and (desc_level == "detailed" or _is_detailed_desc(existing_desc)):
+            if desc_level != "detailed":
+                saved["desc_level"] = "detailed"
             desc_results[full_name] = existing_desc
         else:
             need_llm.append((idx + 1, full_name, html_url, saved))
 
     if need_llm:
-        logger.info(f"报告生成: 需要生成描述 {len(need_llm)} 个项目，按顺序调用 LLM...")
+        logger.info(f"报告生成: 需要生成完整描述 {len(need_llm)} 个项目，按顺序调用 LLM...")
         for idx, full_name, html_url, saved in need_llm:
-            logger.info(f"[{idx}/{len(top_projects)}] LLM 生成描述: {full_name}")
-            desc = call_llm_describe(full_name, saved, html_url, detail_level="standard")
+            logger.info(f"[{idx}/{len(top_projects)}] LLM 生成完整描述: {full_name}")
+            desc = call_llm_describe(full_name, saved, html_url, detail_level="detailed")
             if desc:
                 desc_results[full_name] = desc
                 if full_name in db_projects:
                     db_projects[full_name]["desc"] = desc
+                    db_projects[full_name]["desc_level"] = "detailed"
             else:
                 desc_results.setdefault(full_name, "")
 

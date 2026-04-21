@@ -19,6 +19,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from ..common.config import (
     CHECKPOINT_FILE_PATH,
@@ -29,8 +30,6 @@ from ..common.config import (
 )
 from ..common.db import (
     update_db_project,
-    is_db_diff_eligible,
-    is_project_diff_eligible,
     is_project_same_batch,
     get_db_age_days,
 )
@@ -115,6 +114,20 @@ def _remove_checkpoint() -> None:
             os.remove(CHECKPOINT_FILE_PATH)
     except IOError:
         pass
+
+
+def _project_refresh_age_days(project: dict) -> int | None:
+    """返回仓库 refreshed_at 距今的天数（四舍五入），无有效值返回 None。"""
+    refreshed_at = project.get("refreshed_at", "")
+    if not refreshed_at:
+        return None
+    try:
+        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        return round((datetime.now(timezone.utc) - refresh_dt).total_seconds() / 86400)
+    except ValueError:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -428,17 +441,31 @@ def _submit_growth_tasks(
     db_count = 0
 
     time_window = growth_ctx.get("time_window_days", TIME_WINDOW_DAYS)
+    window_specified = bool(growth_ctx.get("window_specified", True))
     is_comprehensive = growth_ctx.get("new_project_days") is None
 
+    if is_comprehensive and not window_specified:
+        db_age = get_db_age_days(db)
+        if db_age is not None and db_age > 0:
+            time_window = db_age
+            growth_ctx["time_window_days"] = time_window
+            logger.info(f"综合榜未指定窗口：本轮自动采用 DB 年龄窗口 {time_window} 天。")
+
+    growth_ctx["effective_time_window_days"] = time_window
+
     if is_comprehensive:
-        # 综合榜：DB 有效即可走差值法，仓库级要求同批次刷新
-        can_use_db_diff = db.get("valid", False)
-    else:
-        # 新项目榜：自定义窗口一律实时；默认窗口走严格检查（db_age ≈ window）
-        if time_window != TIME_WINDOW_DAYS:
-            can_use_db_diff = False
+        if window_specified:
+            db_age = get_db_age_days(db)
+            can_use_db_diff = bool(
+                db.get("valid", False)
+                and db_age is not None
+                and db_age == time_window
+            )
         else:
-            can_use_db_diff = is_db_diff_eligible(db, time_window)
+            can_use_db_diff = bool(db.get("valid", False))
+    else:
+        # 新项目榜仅依赖仓库级 refreshed_at 与窗口精确匹配（不依赖全局 date）。
+        can_use_db_diff = True
 
     if not force_refresh:
         for full_name in list(pending.keys()):
@@ -447,11 +474,14 @@ def _submit_growth_tasks(
             created_at = info.get("created_at", "")
 
             if can_use_db_diff and full_name in db_projects:
-                # 仓库级检查：综合榜用同批次检查，新项目榜用严格窗口检查
+                project_age = _project_refresh_age_days(db_projects[full_name])
                 if is_comprehensive:
-                    project_ok = is_project_same_batch(db_projects[full_name], db)
+                    project_ok = (
+                        project_age == time_window
+                        and is_project_same_batch(db_projects[full_name], db)
+                    )
                 else:
-                    project_ok = is_project_diff_eligible(db_projects[full_name], time_window)
+                    project_ok = project_age == time_window
 
                 if project_ok:
                     saved_star = db_projects[full_name].get("star", 0)

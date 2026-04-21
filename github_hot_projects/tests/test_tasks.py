@@ -211,6 +211,173 @@ class TestCalcGrowthTask:
         assert len(pool.submitted) == 1
         assert isinstance(pool.submitted[0], CalcGrowthTask)
 
+    def test_submit_growth_tasks_comprehensive_dynamic_window_uses_db_age(self, mock_token_mgr):
+        from github_hot_projects.tasks.task import _submit_growth_tasks
+
+        class DummyPool:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, task):
+                self.submitted.append(task)
+
+        db_date = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_repos = {
+            "org/repo": {
+                "star": 5000,
+                "created_at": "2026-04-01T00:00:00Z",
+                "repo_item": {
+                    "full_name": "org/repo",
+                    "stargazers_count": 5000,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            }
+        }
+        db = {
+            "valid": True,
+            "date": db_date,
+            "projects": {
+                "org/repo": {
+                    "star": 4200,
+                    "refreshed_at": refreshed_at,
+                }
+            },
+        }
+        growth_ctx = {
+            "checkpoint": None,
+            "pending_created_at": {},
+            "db_projects": db["projects"],
+            "candidate_map": {},
+            "growth_threshold": 500,
+            "force_refresh": False,
+            "window_specified": False,
+            "time_window_days": 7,
+            "new_project_days": None,
+            "unresolved_count": [0],
+            "checkpoint_dirty": [False],
+            "completed_since_save": [0],
+        }
+        pool = DummyPool()
+
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+            checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
+
+        assert len(pool.submitted) == 0
+        assert checkpoint["org/repo"]["growth"] == 800
+        assert growth_ctx["effective_time_window_days"] == growth_ctx["time_window_days"]
+
+    def test_submit_growth_tasks_comprehensive_specified_window_mismatch_falls_back(self, mock_token_mgr):
+        from github_hot_projects.tasks.task import _submit_growth_tasks, CalcGrowthTask
+
+        class DummyPool:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, task):
+                self.submitted.append(task)
+
+        db_date = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+        refreshed_at = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_repos = {
+            "org/repo": {
+                "star": 5000,
+                "created_at": "2026-04-01T00:00:00Z",
+                "repo_item": {
+                    "full_name": "org/repo",
+                    "stargazers_count": 5000,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            }
+        }
+        db = {
+            "valid": True,
+            "date": db_date,
+            "projects": {
+                "org/repo": {
+                    "star": 4200,
+                    "refreshed_at": refreshed_at,
+                }
+            },
+        }
+        growth_ctx = {
+            "checkpoint": None,
+            "pending_created_at": {},
+            "db_projects": db["projects"],
+            "candidate_map": {},
+            "growth_threshold": 500,
+            "force_refresh": False,
+            "window_specified": True,
+            "time_window_days": 7,
+            "new_project_days": None,
+            "unresolved_count": [0],
+            "checkpoint_dirty": [False],
+            "completed_since_save": [0],
+        }
+        pool = DummyPool()
+
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+            checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
+
+        assert checkpoint == {}
+        assert len(pool.submitted) == 1
+        assert isinstance(pool.submitted[0], CalcGrowthTask)
+
+    def test_submit_growth_tasks_hot_new_uses_project_refreshed_at_only(self, mock_token_mgr):
+        from github_hot_projects.tasks.task import _submit_growth_tasks
+
+        class DummyPool:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, task):
+                self.submitted.append(task)
+
+        db_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+        refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_repos = {
+            "org/repo": {
+                "star": 5000,
+                "created_at": "2026-04-01T00:00:00Z",
+                "repo_item": {
+                    "full_name": "org/repo",
+                    "stargazers_count": 5000,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            }
+        }
+        db = {
+            "valid": True,
+            "date": db_date,
+            "projects": {
+                "org/repo": {
+                    "star": 4300,
+                    "refreshed_at": refreshed_at,
+                }
+            },
+        }
+        growth_ctx = {
+            "checkpoint": None,
+            "pending_created_at": {},
+            "db_projects": db["projects"],
+            "candidate_map": {},
+            "growth_threshold": 500,
+            "force_refresh": False,
+            "window_specified": True,
+            "time_window_days": 7,
+            "new_project_days": 45,
+            "unresolved_count": [0],
+            "checkpoint_dirty": [False],
+            "completed_since_save": [0],
+        }
+        pool = DummyPool()
+
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+            checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
+
+        assert len(pool.submitted) == 0
+        assert checkpoint["org/repo"]["growth"] == 700
+
 
 # ──────────────────────────────────────────────────────────────
 # 4. WorkerPool

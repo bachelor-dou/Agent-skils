@@ -22,8 +22,8 @@ class TestToolCheckRepoGrowth:
             "created_at": "2025-01-01T00:00:00Z",
         }
 
-    def test_db_diff_when_eligible(self, mock_token_mgr):
-        """DB 有效 + 仓库 refreshed_at 匹配窗口 → 走 DB 差值法。"""
+    def test_single_repo_always_realtime_estimate(self, mock_token_mgr):
+        """单仓库查询始终走实时估算，不走 DB 差值法。"""
         from github_hot_projects.agent_tools import tool_check_repo_growth
 
         refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -36,10 +36,11 @@ class TestToolCheckRepoGrowth:
         }
 
         with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
-            result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
+            with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=200):
+                result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
 
-        assert result["growth"] == 200  # 5000 - 4800
-        assert result["method"] == "DB差值法"
+        assert result["growth"] == 200
+        assert "二分法" in result["method"]
         assert result["description"] == "已有描述"
 
     def test_stale_project_falls_back_to_estimate(self, mock_token_mgr):
@@ -99,6 +100,74 @@ class TestToolCheckRepoGrowth:
         with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=None):
             result = tool_check_repo_growth(mock_token_mgr, "org/nonexistent")
             assert "error" in result
+
+
+class TestToolBatchCheckGrowth:
+    def _repo_input(self) -> list[dict]:
+        return [
+            {
+                "full_name": "org/repo",
+                "star": 5000,
+                "_raw": {
+                    "full_name": "org/repo",
+                    "stargazers_count": 5000,
+                    "description": "A candidate repository",
+                    "language": "Python",
+                    "topics": ["ai", "agent"],
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            }
+        ]
+
+    def test_custom_window_generates_brief_desc_without_snapshot_refresh(self, mock_token_mgr):
+        from github_hot_projects.agent_tools import tool_batch_check_growth
+
+        repos = self._repo_input()
+        db = {"valid": True, "date": "2026-04-01", "projects": {}}
+
+        def fake_submit(_pool, _token_mgr, _raw_repos, _db, candidate_map, _growth_ctx):
+            candidate_map["org/repo"] = {
+                "growth": 900,
+                "star": 5000,
+                "created_at": "2026-04-01T00:00:00Z",
+            }
+            return {}
+
+        with patch("github_hot_projects.agent_tools._submit_growth_tasks", side_effect=fake_submit):
+            with patch("github_hot_projects.agent_tools.batch_condense_descriptions", return_value=["LLM简述"]):
+                with patch("github_hot_projects.agent_tools.update_db_project") as mock_update_db:
+                    result = tool_batch_check_growth(
+                        mock_token_mgr,
+                        repos,
+                        db,
+                        time_window_days=10,
+                    )
+
+        mock_update_db.assert_not_called()
+        assert result["force_refresh"] is True
+        assert result["brief_desc_written"] == 1
+        assert result["db_updated"] is True
+        assert db["projects"]["org/repo"]["desc"] == "LLM简述"
+        assert db["projects"]["org/repo"]["desc_level"] == "brief"
+
+    def test_force_refresh_seeds_snapshot_before_growth(self, mock_token_mgr):
+        from github_hot_projects.agent_tools import tool_batch_check_growth
+
+        repos = self._repo_input()
+        db = {"valid": True, "date": "2026-04-01", "projects": {}}
+
+        with patch("github_hot_projects.agent_tools._submit_growth_tasks", return_value={}):
+            with patch("github_hot_projects.agent_tools.update_db_project") as mock_update_db:
+                result = tool_batch_check_growth(
+                    mock_token_mgr,
+                    repos,
+                    db,
+                    force_refresh=True,
+                )
+
+        assert mock_update_db.call_count == 1
+        assert result["seeded_snapshot_count"] == 1
+        assert result["db_updated"] is True
 
 
 class TestToolRankCandidates:

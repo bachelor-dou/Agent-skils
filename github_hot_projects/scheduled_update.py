@@ -94,7 +94,7 @@ def run_update(top_n: int, mode: str) -> None:
     )
 
     pipeline = DiscoveryPipeline(token_mgr, db)
-    result = pipeline.run(mode=mode, top_n=top_n)
+    result = pipeline.run(mode=mode, top_n=top_n, refresh_db=True)
 
     report_path = result.get("report_path", "")
     if report_path:

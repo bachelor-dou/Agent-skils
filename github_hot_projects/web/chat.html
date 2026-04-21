@@ -457,9 +457,10 @@
         return;
       }
 
-      const REVEAL_DELAY_MS = 1400;
+      const REVEAL_DELAY_MS = 320;
       let revealTimer = null;
-      let _scrollGuard = false;
+      let chromeHidden = false;
+      let isTouchHolding = false;
 
       function syncHeights() {
         heroEl.style.setProperty("--chrome-height", `${heroEl.offsetHeight}px`);
@@ -477,46 +478,78 @@
       }
 
       function showChatChrome() {
+        clearRevealTimer();
         syncHeights();
+        if (!chromeHidden) {
+          return;
+        }
         heroEl.classList.remove("is-reading-hidden");
         statusStripEl.classList.remove("is-reading-hidden");
         composerEl.classList.remove("is-reading-hidden");
+        chromeHidden = false;
       }
 
-      function isNearBottom() {
-        const gap = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-        return gap <= 12;
-      }
-
-      function shouldKeepChromeVisible() {
-        return messagesEl.scrollTop <= 12 || isNearBottom() || document.activeElement === inputEl;
-      }
-
-      function handleReadingScroll() {
-        if (_scrollGuard) return;
+      function hideChatChrome() {
         syncHeights();
-        clearRevealTimer();
-        if (shouldKeepChromeVisible()) {
-          showChatChrome();
+        if (chromeHidden || document.activeElement === inputEl) {
           return;
         }
-        _scrollGuard = true;
         heroEl.classList.add("is-reading-hidden");
         statusStripEl.classList.add("is-reading-hidden");
         composerEl.classList.add("is-reading-hidden");
-        requestAnimationFrame(() => { _scrollGuard = false; });
-        revealTimer = window.setTimeout(showChatChrome, REVEAL_DELAY_MS);
+        chromeHidden = true;
+      }
+
+      function scheduleReveal() {
+        clearRevealTimer();
+        revealTimer = window.setTimeout(() => {
+          showChatChrome();
+        }, REVEAL_DELAY_MS);
+      }
+
+      function handleReadingScroll() {
+        if (document.activeElement === inputEl) {
+          showChatChrome();
+          return;
+        }
+        hideChatChrome();
+        if (!isTouchHolding) {
+          scheduleReveal();
+        }
+      }
+
+      function handleTouchStart() {
+        isTouchHolding = true;
+        if (document.activeElement === inputEl) {
+          showChatChrome();
+          return;
+        }
+        clearRevealTimer();
+        hideChatChrome();
+      }
+
+      function handleTouchEnd() {
+        isTouchHolding = false;
+        if (document.activeElement === inputEl) {
+          showChatChrome();
+          return;
+        }
+        scheduleReveal();
       }
 
       messagesEl.addEventListener("scroll", handleReadingScroll, { passive: true });
       messagesEl.addEventListener("wheel", handleReadingScroll, { passive: true });
-      messagesEl.addEventListener("touchstart", handleReadingScroll, { passive: true });
+      messagesEl.addEventListener("touchstart", handleTouchStart, { passive: true });
+      messagesEl.addEventListener("touchmove", handleReadingScroll, { passive: true });
+      messagesEl.addEventListener("touchend", handleTouchEnd, { passive: true });
+      messagesEl.addEventListener("touchcancel", handleTouchEnd, { passive: true });
       window.addEventListener("resize", showChatChrome);
       statusStripEl.addEventListener("mouseenter", showChatChrome);
       statusStripEl.addEventListener("focusin", showChatChrome);
       composerEl.addEventListener("mouseenter", showChatChrome);
       composerEl.addEventListener("focusin", showChatChrome);
       inputEl.addEventListener("focus", showChatChrome);
+      inputEl.addEventListener("blur", scheduleReveal);
 
       showChatChrome();
     }

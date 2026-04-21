@@ -632,6 +632,7 @@ class HotProjectAgent:
                 return {"error": "没有搜索结果，请先调用 search_hot_projects"}
             time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
             new_project_days = validated.get("new_project_days")
+            window_specified = "time_window_days" in args
             result = tool_batch_check_growth(
                 state.token_mgr,
                 repos=state.last_search_repos,
@@ -640,11 +641,12 @@ class HotProjectAgent:
                 new_project_days=new_project_days,
                 time_window_days=time_window_days,
                 force_refresh=validated.get("force_refresh", False),
+                window_specified=window_specified,
             )
             state.last_candidates = result.get("candidates", {})
             state.last_candidate_new_project_days = new_project_days
             state.last_time_window_days = result.get("time_window_days", time_window_days)
-            if result.get("force_refresh", False):
+            if result.get("db_updated", False):
                 save_db(state.db)
             return result
 
