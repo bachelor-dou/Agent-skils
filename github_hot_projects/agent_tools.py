@@ -708,7 +708,6 @@ def tool_batch_check_growth(
             "window_specified": window_specified,
             "time_window_days": time_window_days,
             "use_checkpoint": (not effective_force_refresh) and window_specified,
-            "cache_growth": time_window_days == TIME_WINDOW_DAYS,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],

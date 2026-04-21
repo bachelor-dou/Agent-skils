@@ -332,6 +332,8 @@ class CalcGrowthTask(Task):
         candidate_map = self._ctx["candidate_map"]
         pending_created_at = self._ctx["pending_created_at"]
         growth_threshold = self._ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
+        use_checkpoint = self._ctx.get("use_checkpoint", True)
+        update_db = self._ctx.get("update_db", False)
 
         _, growth, current_star = result
         created_at = pending_created_at.get(self.full_name, "")
@@ -345,23 +347,23 @@ class CalcGrowthTask(Task):
             if unresolved_count is not None:
                 unresolved_count[0] += 1
             # 写入 checkpoint 标记 unresolved 状态，下次运行跳过而非重复估算
-            if self._ctx.get("use_checkpoint", True):
+            if use_checkpoint:
                 checkpoint[self.full_name] = {"growth": "unresolved", "star": current_star}
                 self._ctx["checkpoint_dirty"][0] = True
             return
 
-        if self._ctx.get("use_checkpoint", True):
+        if use_checkpoint:
             checkpoint[self.full_name] = {"growth": growth, "star": current_star}
             self._ctx["checkpoint_dirty"][0] = True
             self._ctx["completed_since_save"][0] += 1
 
         if growth >= 0:
-            if self._ctx.get("update_db", False):
+            if update_db:
                 update_db_project(db_projects, self.full_name, current_star, self.repo_item)
             if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
 
-        if self._ctx.get("use_checkpoint", True) and self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
+        if use_checkpoint and self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
             _save_checkpoint(checkpoint)
             self._ctx["checkpoint_dirty"][0] = False
             self._ctx["completed_since_save"][0] = 0
@@ -371,9 +373,10 @@ class CalcGrowthTask(Task):
             return
         logger.error(f"  增长计算异常: {self.full_name}, {error}")
         fallback_star = self.repo_item.get("stargazers_count", 0)
+        use_checkpoint = self._ctx.get("use_checkpoint", True)
         if fallback_star:
             checkpoint = self._ctx["checkpoint"]
-            if self._ctx.get("use_checkpoint", True):
+            if use_checkpoint:
                 checkpoint[self.full_name] = {"growth": -1, "star": fallback_star}
                 self._ctx["checkpoint_dirty"][0] = True
                 self._ctx["completed_since_save"][0] += 1
@@ -443,9 +446,9 @@ def _submit_growth_tasks(
     time_window = growth_ctx.get("time_window_days", TIME_WINDOW_DAYS)
     window_specified = bool(growth_ctx.get("window_specified", True))
     is_comprehensive = growth_ctx.get("new_project_days") is None
+    db_age = get_db_age_days(db)
 
     if is_comprehensive and not window_specified:
-        db_age = get_db_age_days(db)
         if db_age is not None and db_age > 0:
             time_window = db_age
             growth_ctx["time_window_days"] = time_window
@@ -455,7 +458,6 @@ def _submit_growth_tasks(
 
     if is_comprehensive:
         if window_specified:
-            db_age = get_db_age_days(db)
             can_use_db_diff = bool(
                 db.get("valid", False)
                 and db_age is not None
@@ -510,7 +512,6 @@ def _submit_growth_tasks(
             _ctx=growth_ctx,
         ))
 
-    db_age = get_db_age_days(db)
     db_age_info = f"(距上次更新≈{db_age}天)" if db_age is not None else ""
     logger.info(
         f"批量增长计算: {len(pending)} 个任务入队 "

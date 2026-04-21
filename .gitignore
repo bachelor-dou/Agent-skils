@@ -12,6 +12,7 @@ logs/
 # Data
 *.lock
 !github_hot_projects/requirements.txt
+github_hot_projects/.pipeline_checkpoint.json
 
 # Environment
 .env

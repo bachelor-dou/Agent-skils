@@ -204,7 +204,9 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task._save_checkpoint"
+        ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
         assert checkpoint == {}
@@ -260,7 +262,9 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task._save_checkpoint"
+        ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
         assert len(pool.submitted) == 0
@@ -316,7 +320,9 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task._save_checkpoint"
+        ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
         assert checkpoint == {}
@@ -372,7 +378,9 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}):
+        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task._save_checkpoint"
+        ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
         assert len(pool.submitted) == 0
