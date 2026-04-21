@@ -236,6 +236,11 @@ def get_db_age_days(db: dict) -> int | None:
         return None
 
 
+def set_growth_cache(*_args, **_kwargs) -> None:
+    """兼容旧版本接口：该函数已废弃，当前实现为 no-op。"""
+    logger.debug("set_growth_cache 已废弃，调用已忽略。")
+
+
 def is_db_diff_eligible(
     db: dict,
     time_window_days: int = TIME_WINDOW_DAYS,
