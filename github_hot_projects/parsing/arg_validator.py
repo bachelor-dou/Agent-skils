@@ -68,17 +68,26 @@ def _coerce(value, spec: dict, current_args: dict):
     return value
 
 
-def log_validated_params(tool_name: str, raw_args: dict, validated_args: dict) -> None:
+def log_validated_params(
+    tool_name: str,
+    llm_args: dict,
+    prepared_args: dict,
+    validated_args: dict,
+) -> None:
     """以单条日志输出 Tool 参数校验结果。"""
     parts: list[str] = []
-    schema = TOOL_PARAM_SCHEMA.get(tool_name, {})
 
     for key, value in validated_args.items():
-        if key in raw_args:
-            if raw_args[key] == value:
+        if key in llm_args:
+            if llm_args[key] == value:
                 source = "llm"
             else:
                 source = "coerced"
+        elif key in prepared_args:
+            if prepared_args[key] == value:
+                source = "system"
+            else:
+                source = "system_coerced"
         else:
             source = "default"
 

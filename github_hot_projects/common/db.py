@@ -300,13 +300,13 @@ def update_db_project(
 
 
 def get_db_age_days(db: dict) -> int | None:
-    """返回 DB 快照距今的天数（四舍五入），无有效日期则返回 None。"""
+    """返回 DB 快照距今的天数（按 UTC 日期差），无有效日期则返回 None。"""
     db_date_str = db.get("date", "")
     if not db_date_str:
         return None
     try:
         db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return round((_utc_now() - db_date).total_seconds() / 86400)
+        return (_utc_now().date() - db_date.date()).days
     except ValueError:
         return None
 

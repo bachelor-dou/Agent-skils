@@ -316,12 +316,12 @@ class TestDB:
         # 无日期 → None
         assert get_db_age_days({"date": ""}) is None
         assert get_db_age_days({}) is None
-        # 今天 → 0 或 1（取决于时间，round 四舍五入）
+        # 今天 → 0（按 UTC 日期差）
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        assert get_db_age_days({"date": today}) in (0, 1)
-        # 7 天前 → 7 或 8（round 四舍五入）
+        assert get_db_age_days({"date": today}) == 0
+        # 7 天前 → 7（按 UTC 日期差）
         seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-        assert get_db_age_days({"date": seven_days_ago}) in (7, 8)
+        assert get_db_age_days({"date": seven_days_ago}) == 7
 
 
 # ──────────────────────────────────────────────────────────────

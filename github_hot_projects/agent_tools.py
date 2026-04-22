@@ -26,6 +26,7 @@ Tool 列表：
 
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from .common.config import (
@@ -86,6 +87,16 @@ def _coerce_internal_optional_positive_int(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return None
+
+
+def _resolve_future_or_default(label: str, future: Future, default):
+    """读取并发任务结果，异常时回退默认值。"""
+    try:
+        result = future.result()
+        return default if result is None else result
+    except Exception as e:
+        logger.warning("describe_project 上下文抓取失败: %s, error=%s", label, e)
+        return default
 
 
 def trending_repo_to_search_repo(repo: dict) -> dict:
@@ -919,9 +930,42 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
 
     html_url = repo_item.get("html_url", f"https://github.com/{repo}")
 
-    readme = fetch_repo_readme_excerpt(token_mgr, owner, repo_name, token_idx=0)
-    releases = fetch_repo_recent_releases(token_mgr, owner, repo_name, token_idx=0, per_page=5)
-    commits = fetch_repo_recent_commits(token_mgr, owner, repo_name, token_idx=0, per_page=10)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        readme_future = executor.submit(
+            fetch_repo_readme_excerpt,
+            token_mgr,
+            owner,
+            repo_name,
+            0,
+        )
+        releases_future = executor.submit(
+            fetch_repo_recent_releases,
+            token_mgr,
+            owner,
+            repo_name,
+            0,
+            5,
+        )
+        commits_future = executor.submit(
+            fetch_repo_recent_commits,
+            token_mgr,
+            owner,
+            repo_name,
+            0,
+            10,
+        )
+
+        readme = _resolve_future_or_default("readme", readme_future, {})
+        releases = _resolve_future_or_default("releases", releases_future, [])
+        commits = _resolve_future_or_default("commits", commits_future, [])
+
+    logger.info(
+        "[Tool describe_project] %s 上下文汇总: readme=%s, releases=%d, commits=%d",
+        repo,
+        bool(readme),
+        len(releases),
+        len(commits),
+    )
 
     repo_info = {
         "short_desc": repo_item.get("description", ""),

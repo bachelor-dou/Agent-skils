@@ -117,7 +117,7 @@ def _remove_checkpoint() -> None:
 
 
 def _project_refresh_age_days(project: dict) -> int | None:
-    """返回仓库 refreshed_at 距今的天数（四舍五入），无有效值返回 None。"""
+    """返回仓库 refreshed_at 距今的天数（按 UTC 日期差），无有效值返回 None。"""
     refreshed_at = project.get("refreshed_at", "")
     if not refreshed_at:
         return None
@@ -125,7 +125,7 @@ def _project_refresh_age_days(project: dict) -> int | None:
         refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc
         )
-        return round((datetime.now(timezone.utc) - refresh_dt).total_seconds() / 86400)
+        return (datetime.now(timezone.utc).date() - refresh_dt.date()).days
     except ValueError:
         return None
 

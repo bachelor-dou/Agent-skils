@@ -164,6 +164,24 @@ class TestArgValidation:
 
         assert mock_batch.call_args.kwargs["force_refresh"] is True
 
+    def test_log_validated_params_marks_system_injected_params(self):
+        from github_hot_projects.parsing.arg_validator import log_validated_params
+
+        with patch("github_hot_projects.parsing.arg_validator.logger.info") as mock_info:
+            log_validated_params(
+                "fetch_trending",
+                {"since": "weekly"},
+                {"since": "weekly", "include_all_periods": True},
+                {"since": "weekly", "include_all_periods": True},
+            )
+
+        merged_logs = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_info.call_args_list
+        )
+        assert "since=weekly(llm)" in merged_logs
+        assert "include_all_periods=True(system)" in merged_logs
+
 
 class TestAgentStateMachine:
     def test_chat_returns_direct_llm_reply(self):

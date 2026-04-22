@@ -953,7 +953,7 @@ class HotProjectAgent:
         state = self.state
         prepared_args = self._merge_request_defaults_into_tool_args(name, args)
         validated = validate_tool_args(name, prepared_args)
-        log_validated_params(name, prepared_args, validated)
+        log_validated_params(name, args, prepared_args, validated)
         self._maybe_reset_discovery_state(name, validated)
 
         if name == "search_hot_projects":
