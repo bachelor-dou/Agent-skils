@@ -18,8 +18,7 @@ github-hot-projects — GitHub 热门项目发现工具
     param_extractor.py    — 参数提取（时间窗口、创建窗口、Top N）
     tool_arg_normalizer.py — Tool 参数规范化 + 来源追踪
 
-  execution/              — 执行层
-    pipeline.py           — DiscoveryPipeline 统一发现管道
+  scheduled_update.py     — 定时更新入口 + 内置 DiscoveryPipeline 编排
 
   tasks/                  — 任务系统子包
     task_base.py          — Task 抽象基类

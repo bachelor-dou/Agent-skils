@@ -165,6 +165,67 @@ class TestDB:
             assert merged["projects"]["b/repo"]["star"] == 2
             assert stale_snapshot["projects"]["b/repo"]["star"] == 2
 
+    def test_save_db_desc_only_preserves_snapshot_metadata(self, tmp_path):
+        db_file = tmp_path / "desc_only_db.json"
+
+        with patch("github_hot_projects.common.db.DB_FILE_PATH", str(db_file)):
+            from github_hot_projects.common.db import save_db, save_db_desc_only
+
+            baseline = {
+                "date": "2026-04-01",
+                "valid": True,
+                "projects": {
+                    "a/repo": {"star": 10, "desc": "old", "desc_level": "brief"},
+                },
+            }
+            db_file.write_text(json.dumps(baseline), encoding="utf-8")
+
+            mem_db = {
+                "date": "2099-01-01",  # desc-only 保存不应覆盖
+                "valid": False,
+                "projects": {
+                    "a/repo": {"star": 9999, "desc": "new", "desc_level": "detailed"},
+                },
+            }
+
+            changed = save_db_desc_only(mem_db)
+            saved = json.loads(db_file.read_text(encoding="utf-8"))
+
+            assert changed == 1
+            assert saved["date"] == "2026-04-01"
+            assert saved["valid"] is True
+            assert saved["projects"]["a/repo"]["star"] == 10
+            assert saved["projects"]["a/repo"]["desc"] == "new"
+            assert saved["projects"]["a/repo"]["desc_level"] == "detailed"
+
+    def test_save_db_desc_only_creates_minimal_record_for_new_repo(self, tmp_path):
+        db_file = tmp_path / "desc_only_new_repo.json"
+
+        with patch("github_hot_projects.common.db.DB_FILE_PATH", str(db_file)):
+            from github_hot_projects.common.db import save_db_desc_only
+
+            db_file.write_text(json.dumps({"date": "2026-04-10", "valid": True, "projects": {}}), encoding="utf-8")
+
+            mem_db = {
+                "projects": {
+                    "new/repo": {
+                        "star": 123,
+                        "forks": 7,
+                        "desc": "brief intro",
+                        "desc_level": "brief",
+                    }
+                }
+            }
+
+            changed = save_db_desc_only(mem_db)
+            saved = json.loads(db_file.read_text(encoding="utf-8"))
+
+            assert changed == 1
+            assert saved["projects"]["new/repo"] == {
+                "desc": "brief intro",
+                "desc_level": "brief",
+            }
+
     def test_load_db_corrupt_json(self, tmp_path):
         db_file = tmp_path / "corrupt.json"
         db_file.write_text("{invalid json")

@@ -4,6 +4,7 @@
 覆盖：Agent 状态机、Tool 路由、参数校验、对话压缩、状态缓存与异常兜底。
 """
 
+import json
 from unittest.mock import patch
 
 
@@ -149,6 +150,7 @@ class TestArgValidation:
 
         assert mock_rank.call_args.kwargs["top_n"] == HOT_NEW_PROJECT_COUNT
         assert mock_rank.call_args.kwargs["new_project_days"] == NEW_PROJECT_DAYS
+        assert mock_rank.call_args.kwargs["persist_db"] is False
 
     def test_batch_check_growth_passes_force_refresh(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -213,6 +215,86 @@ class TestAgentStateMachine:
         assert reply == "这是最终结果"
         assert agent.state.awaiting_confirmation is False
         assert mock_llm.call_args.kwargs["execution_confirmed"] is True
+
+    def test_chat_executes_after_confirmation_ack_with_shi(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_build_confirmation_message", return_value="收到！我理解为：Trending 本周榜。确认请回复“开始”，或直接告诉我需要修改的地方。"):
+            first_reply = agent.chat("看看本周 GitHub Trending")
+
+        assert "确认请回复“开始”" in first_reply
+
+        with patch.object(
+            agent,
+            "_call_llm",
+            return_value={"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
+        ) as mock_llm:
+            reply = agent.chat("是")
+
+        assert reply == "这是最终结果"
+        assert agent.state.awaiting_confirmation is False
+        assert mock_llm.call_args.kwargs["execution_confirmed"] is True
+
+    def test_confirmation_gate_accepts_llm_semantic_ack(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+
+        agent = HotProjectAgent()
+        agent.state.awaiting_confirmation = True
+        agent.state.pending_request = PendingRequest(
+            intent_family="hot_new_ranking",
+            intent_label_zh="新项目热榜",
+            confirmation_text_zh="收到！我理解为：新项目热榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            source_turn_id=1,
+        )
+
+        with patch.object(agent, "_is_confirmation_ack_via_llm", return_value=True) as mock_semantic:
+            intercept, confirmed = agent._maybe_handle_confirmation_gate("就按这个来")
+
+        assert intercept is None
+        assert confirmed is True
+        assert agent.state.awaiting_confirmation is False
+        mock_semantic.assert_called_once()
+
+    def test_confirmation_gate_skips_llm_fallback_for_modification_reply(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+
+        agent = HotProjectAgent()
+        agent.state.awaiting_confirmation = True
+        agent.state.pending_request = PendingRequest(
+            intent_family="trending_only",
+            intent_label_zh="Trending 热门",
+            confirmation_text_zh="收到！我理解为：Trending 本周榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            source_turn_id=1,
+        )
+
+        with patch.object(agent, "_is_confirmation_ack_via_llm") as mock_semantic:
+            with patch.object(agent, "_build_confirmation_message", return_value="重新确认") as mock_confirm:
+                intercept, confirmed = agent._maybe_handle_confirmation_gate("是的，并且再加上今天的")
+
+        assert intercept == "重新确认"
+        assert confirmed is False
+        assert agent.state.awaiting_confirmation is True
+        mock_semantic.assert_not_called()
+        mock_confirm.assert_called_once()
+
+    def test_chat_reconfirms_when_user_reply_is_long_modification(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_build_confirmation_message", side_effect=[
+            "收到！我理解为：Trending 本周榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            "收到！我理解为：Trending 本周榜，并补充今日榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+        ]) as mock_confirm:
+            first_reply = agent.chat("看看本周 GitHub Trending")
+            second_reply = agent.chat("是的，并且再加上今天的")
+
+        assert "本周榜" in first_reply
+        assert "补充今日榜" in second_reply
+        assert mock_confirm.call_count == 2
+        assert agent.state.awaiting_confirmation is True
 
     def test_chat_reconfirms_when_user_modifies_unconfirmed_request(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -401,6 +483,68 @@ class TestAgentStateHelpers:
         assert mock_request.call_args.kwargs["enable_thinking"] is False
         assert mock_request.call_args.kwargs["max_tokens"] == 1024
 
+    def test_build_confirmation_message_parses_structured_pending_request(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.current_user_turn = 3
+        agent.state.conversation.append({"role": "user", "content": "给我近10天综合热榜前20名，并生成报告"})
+
+        with patch.object(
+            agent,
+            "_request_llm",
+            return_value={
+                "choices": [{
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "intent_family": "comprehensive_ranking",
+                                "intent_label_zh": "综合热榜",
+                                "specified_params": {"time_window_days": 10, "top_n": 20},
+                                "ambiguous_fields": [],
+                                "report_requested": True,
+                                "confirmation_text_zh": "收到！我理解为：综合热榜，统计近10天的增长，返回前20名，并在结果后生成报告。确认请回复“开始”，或直接告诉我需要修改的地方。",
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }]
+            },
+        ):
+            reply = agent._build_confirmation_message()
+
+        assert "返回前20名" in reply
+        assert agent.state.pending_request is not None
+        assert agent.state.pending_request.intent_family == "comprehensive_ranking"
+        assert agent.state.pending_request.user_specified_params == {"time_window_days": 10, "top_n": 20}
+        assert agent.state.pending_request.report_requested is True
+
+    def test_call_llm_appends_confirmed_request_context(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="hot_new_ranking",
+            intent_label_zh="新项目热榜",
+            resolved_params={"mode": "hot_new", "new_project_days": 30, "time_window_days": 10},
+            user_specified_params={"new_project_days": 30},
+            defaulted_params={"time_window_days": 10},
+            report_requested=True,
+        )
+
+        with patch.object(
+            agent,
+            "_request_llm",
+            return_value={"choices": [{"message": {"content": "ok", "tool_calls": []}}]},
+        ) as mock_request:
+            agent._call_llm(execution_confirmed=True)
+
+        messages = mock_request.call_args.kwargs["messages"]
+        assert "[执行确认]" in messages[0]["content"]
+        assert "[已确认请求]" in messages[0]["content"]
+        assert "search_hot_projects、scan_star_range、fetch_trending" in messages[0]["content"]
+        assert "generate_report" in messages[0]["content"]
+
     def test_compress_conversation_preserves_recent_messages_and_adds_summary(self):
         from github_hot_projects.agent import HotProjectAgent, KEEP_RECENT_MESSAGES, MAX_CONVERSATION_MESSAGES
 
@@ -488,3 +632,133 @@ class TestValidateToolArgs:
 
         result = validate_tool_args("check_repo_growth", {"repo": "org/repo"})
         assert result["repo"] == "org/repo"
+
+
+class TestConfirmedRequestExecution:
+    def test_batch_check_growth_blocks_until_all_required_collection_tools_exist(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="comprehensive_ranking",
+            intent_label_zh="综合热榜",
+            resolved_params={"mode": "comprehensive", "time_window_days": 10},
+        )
+        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range"}
+        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
+
+        result = agent._execute_tool("batch_check_growth", {})
+
+        assert "缺少必要数据源" in result["error"]
+        assert "fetch_trending" in result["error"]
+
+    def test_batch_check_growth_injects_confirmed_request_defaults(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="hot_new_ranking",
+            intent_label_zh="新项目热榜",
+            resolved_params={
+                "mode": "hot_new",
+                "time_window_days": 10,
+                "new_project_days": 30,
+                "growth_threshold": 400,
+                "force_refresh": True,
+            },
+            user_specified_params={"new_project_days": 30, "force_refresh": True},
+        )
+        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
+
+        with patch(
+            "github_hot_projects.agent.tool_batch_check_growth",
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": False},
+        ) as mock_batch:
+            result = agent._execute_tool("batch_check_growth", {})
+
+        assert "candidates" in result
+        assert mock_batch.call_args.kwargs["time_window_days"] == 10
+        assert mock_batch.call_args.kwargs["new_project_days"] == 30
+        assert mock_batch.call_args.kwargs["growth_threshold"] == 400
+        assert mock_batch.call_args.kwargs["force_refresh"] is True
+
+    def test_batch_check_growth_hot_new_persists_desc_only(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="hot_new_ranking",
+            intent_label_zh="新项目热榜",
+            resolved_params={"mode": "hot_new", "new_project_days": 30, "force_refresh": True},
+        )
+        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
+
+        with patch(
+            "github_hot_projects.agent.tool_batch_check_growth",
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": True},
+        ):
+            with patch("github_hot_projects.agent.save_db") as mock_save:
+                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                    agent._execute_tool("batch_check_growth", {})
+
+        mock_save.assert_not_called()
+        mock_desc_save.assert_called_once_with(agent.state.db)
+
+    def test_generate_report_hot_new_persists_desc_only(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.last_mode = "hot_new"
+        agent.state.last_ranked = [("org/repo", {"growth": 100, "star": 200})]
+
+        with patch(
+            "github_hot_projects.agent.tool_generate_report",
+            return_value={"report_path": "reports/now.md"},
+        ):
+            with patch("github_hot_projects.agent.save_db") as mock_save:
+                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                    agent._execute_tool("generate_report", {})
+
+        mock_save.assert_not_called()
+        mock_desc_save.assert_called_once_with(agent.state.db)
+
+    def test_generate_report_comprehensive_persists_full_db(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        agent.state.last_mode = "comprehensive"
+        agent.state.last_ranked = [("org/repo", {"growth": 100, "star": 200})]
+
+        with patch(
+            "github_hot_projects.agent.tool_generate_report",
+            return_value={"report_path": "reports/now.md"},
+        ):
+            with patch("github_hot_projects.agent.save_db") as mock_save:
+                with patch("github_hot_projects.agent.save_db_desc_only") as mock_desc_save:
+                    agent._execute_tool("generate_report", {})
+
+        mock_save.assert_called_once_with(agent.state.db)
+        mock_desc_save.assert_not_called()
+
+    def test_batch_check_growth_comprehensive_persists_db(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="comprehensive_ranking",
+            intent_label_zh="综合热榜",
+            resolved_params={"mode": "comprehensive", "time_window_days": 7},
+        )
+        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
+
+        with patch(
+            "github_hot_projects.agent.tool_batch_check_growth",
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 7, "db_updated": True},
+        ):
+            with patch("github_hot_projects.agent.save_db") as mock_save:
+                agent._execute_tool("batch_check_growth", {})
+
+        mock_save.assert_called_once()

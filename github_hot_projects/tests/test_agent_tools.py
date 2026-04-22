@@ -197,7 +197,7 @@ class TestToolRankCandidates:
         result = tool_rank_candidates(sample_candidates, top_n=-1, mode="bad-mode")
 
         assert result["mode"] == "comprehensive"
-        assert result["returned"] == len(sample_candidates)
+        assert result["returned"] == 1
 
 
 class TestToolGenerateReport:

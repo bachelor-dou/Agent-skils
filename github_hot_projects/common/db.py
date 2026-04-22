@@ -173,6 +173,81 @@ def save_db(db: dict) -> None:
         logger.error(f"DB 保存失败: {e}")
 
 
+def save_db_desc_only(db: dict) -> int:
+    """仅持久化 desc 相关字段，避免刷新快照基线字段。
+
+    该函数用于实时/轻量场景：只合并 projects 下的 `desc` 与 `desc_level`，
+    不更新顶层 `date`/`valid`，从而避免影响增长差值窗口判断。
+
+    Returns:
+        实际发生 desc 变更的项目数量。
+    """
+    changed_projects = 0
+    try:
+        with _db_lock:
+            lock_fd = open(_lock_file_path(), "w")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)  # 排他锁（阻塞其他读写）
+
+                disk_db: dict = {}
+                if os.path.exists(DB_FILE_PATH):
+                    try:
+                        with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
+                            disk_db = json.load(f)
+                    except (json.JSONDecodeError, IOError):
+                        disk_db = {}
+
+                disk_projects = disk_db.get("projects", {})
+                if not isinstance(disk_projects, dict):
+                    disk_projects = {}
+
+                for name, info in db.get("projects", {}).items():
+                    if not isinstance(info, dict):
+                        continue
+
+                    payload = {}
+                    if "desc" in info:
+                        payload["desc"] = info.get("desc", "")
+                    if "desc_level" in info:
+                        payload["desc_level"] = info.get("desc_level", "")
+
+                    if not payload:
+                        continue
+
+                    existing = disk_projects.get(name)
+                    if isinstance(existing, dict):
+                        has_change = False
+                        for key, value in payload.items():
+                            if existing.get(key) != value:
+                                existing[key] = value
+                                has_change = True
+                        if has_change:
+                            changed_projects += 1
+                    else:
+                        disk_projects[name] = dict(payload)
+                        changed_projects += 1
+
+                if changed_projects == 0:
+                    return 0
+
+                merged_db = dict(disk_db)
+                merged_db["projects"] = disk_projects
+
+                temp_path = DB_FILE_PATH + ".tmp"
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(merged_db, f, ensure_ascii=False, indent=2)
+                os.replace(temp_path, DB_FILE_PATH)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+
+        logger.info(f"DB 仅描述字段已保存: {changed_projects} 个项目。")
+        return changed_projects
+    except IOError as e:
+        logger.error(f"DB 描述字段保存失败: {e}")
+        return 0
+
+
 def update_db_project(
     db_projects: dict, full_name: str, current_star: int, repo_item: dict
 ) -> None:

@@ -8,11 +8,12 @@
   - arg_validator   — 基于 schema 的机械校验 + 工具函数
 """
 
-from .arg_validator import latest_user_message
 from .arg_validator import validate_tool_args, log_validated_params
+from .schema import TOOL_PARAM_SCHEMA, TOOL_SCHEMAS
 
 __all__ = [
-    "latest_user_message",
     "validate_tool_args",
     "log_validated_params",
+    "TOOL_PARAM_SCHEMA",
+    "TOOL_SCHEMAS",
 ]

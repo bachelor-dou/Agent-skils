@@ -90,11 +90,3 @@ def log_validated_params(tool_name: str, raw_args: dict, validated_args: dict) -
 
     if parts:
         logger.info("[Agent] Tool 参数: %s | %s", tool_name, " | ".join(parts))
-
-
-def latest_user_message(conversation: list[dict]) -> str:
-    """返回对话历史中最近一条用户消息的小写文本。"""
-    for msg in reversed(conversation):
-        if msg.get("role") == "user":
-            return (msg.get("content") or "").lower()
-    return ""

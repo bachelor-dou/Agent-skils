@@ -91,16 +91,26 @@
         <button type="button" class="usage-help-close" id="usage-help-close">关闭</button>
       </div>
       <p class="usage-help-summary">
-        下面这些是当前前端公开给用户的常用参数入口，你可以直接把条件写进一句话里。
+        下面这些是当前可识别的常用参数，你可以直接把条件写进一句话里（不用写参数名）。
       </p>
       <p class="usage-help-note">
-        现在可以直接指定增长统计窗口，例如“近10天热榜”“近30天综合榜”；只有“30天内创建的新项目”这类明确创建时间语义，才会走新项目创建窗口。
+        增长统计窗口和新项目创建窗口彼此独立，可同时指定；含“实时/当前/现在”语义会触发实时刷新。实时路径仅落 desc，非实时与定时更新会全量更新 DB。
       </p>
       <div class="usage-help-grid">
+        <article class="usage-help-item">
+          <h3>任务类型</h3>
+          <p>默认：综合榜流程</p>
+          <p>示例：综合热榜 / 新项目热榜 / GitHub Trending / 查单仓库增长</p>
+        </article>
         <article class="usage-help-item">
           <h3>增长窗口</h3>
           <p>默认：7 天</p>
           <p>示例：近 10 天热榜、近 30 天综合榜</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>新项目窗口</h3>
+          <p>默认：45 天（仅新项目语义生效）</p>
+          <p>示例：30 天内创建的新项目、一个月内创建的新项目榜</p>
         </article>
         <article class="usage-help-item">
           <h3>榜单数量</h3>
@@ -128,30 +138,26 @@
           <p>示例：扫描 5000 到 20000 star</p>
         </article>
         <article class="usage-help-item">
-          <h3>新项目窗口</h3>
-          <p>默认：45 天</p>
-          <p>示例：30 天内创建的新项目、一个月内创建的新项目榜</p>
-        </article>
-        <article class="usage-help-item">
           <h3>Trending 周期</h3>
           <p>默认：weekly</p>
           <p>示例：daily、weekly、monthly</p>
         </article>
         <article class="usage-help-item">
-          <h3>编程语言</h3>
-          <p>默认：全部语言</p>
-          <p>示例：Python、Go、TypeScript</p>
+          <h3>多周期汇总</h3>
+          <p>默认：关闭</p>
+          <p>示例：把 daily、weekly、monthly 一起汇总</p>
         </article>
         <article class="usage-help-item">
-          <h3>自然语言 / 多周期汇总</h3>
-          <p>默认：全部语言 / 不汇总</p>
-          <p>示例：中文 Trending、把 daily weekly monthly 一起汇总</p>
+          <h3>实时刷新</h3>
+          <p>默认：关闭（按意图自动判断）</p>
+          <p>示例：实时刷新一下、按当前数据重算</p>
         </article>
       </div>
       <div class="usage-help-examples">
         <strong>示例提问</strong>
-        <p>生成前 20 名 AI Agent 新项目榜，近 30 天创建，增长&gt;=500</p>
-        <p>看看本周 Python Trending，也把 daily、weekly、monthly 一起汇总</p>
+        <p>生成前 20 名 AI Agent 新项目榜，近 30 天创建，增长窗口 10 天，增长&gt;=500</p>
+        <p>看看本周 Trending，也把 daily、weekly、monthly 一起汇总</p>
+        <p>综合热榜前 50，按当前数据实时刷新</p>
       </div>
     </section>
   </div>
@@ -461,6 +467,7 @@
       let revealTimer = null;
       let chromeHidden = false;
       let isTouchHolding = false;
+      let lastScrollTop = messagesEl.scrollTop;
 
       function syncHeights() {
         heroEl.style.setProperty("--chrome-height", `${heroEl.offsetHeight}px`);
@@ -490,14 +497,18 @@
       }
 
       function hideChatChrome() {
-        syncHeights();
         if (chromeHidden || document.activeElement === inputEl) {
           return;
         }
+        syncHeights();
         heroEl.classList.add("is-reading-hidden");
         statusStripEl.classList.add("is-reading-hidden");
         composerEl.classList.add("is-reading-hidden");
         chromeHidden = true;
+      }
+
+      function isMessagesScrollable() {
+        return (messagesEl.scrollHeight - messagesEl.clientHeight) > 8;
       }
 
       function scheduleReveal() {
@@ -512,6 +523,19 @@
           showChatChrome();
           return;
         }
+
+        if (!isMessagesScrollable()) {
+          showChatChrome();
+          return;
+        }
+
+        const currentScrollTop = messagesEl.scrollTop;
+        const delta = Math.abs(currentScrollTop - lastScrollTop);
+        lastScrollTop = currentScrollTop;
+        if (delta < 2) {
+          return;
+        }
+
         hideChatChrome();
         if (!isTouchHolding) {
           scheduleReveal();
@@ -524,13 +548,17 @@
           showChatChrome();
           return;
         }
+        if (!isMessagesScrollable()) {
+          showChatChrome();
+          return;
+        }
         clearRevealTimer();
         hideChatChrome();
       }
 
       function handleTouchEnd() {
         isTouchHolding = false;
-        if (document.activeElement === inputEl) {
+        if (document.activeElement === inputEl || !isMessagesScrollable()) {
           showChatChrome();
           return;
         }
@@ -538,7 +566,6 @@
       }
 
       messagesEl.addEventListener("scroll", handleReadingScroll, { passive: true });
-      messagesEl.addEventListener("wheel", handleReadingScroll, { passive: true });
       messagesEl.addEventListener("touchstart", handleTouchStart, { passive: true });
       messagesEl.addEventListener("touchmove", handleReadingScroll, { passive: true });
       messagesEl.addEventListener("touchend", handleTouchEnd, { passive: true });
@@ -549,7 +576,11 @@
       composerEl.addEventListener("mouseenter", showChatChrome);
       composerEl.addEventListener("focusin", showChatChrome);
       inputEl.addEventListener("focus", showChatChrome);
-      inputEl.addEventListener("blur", scheduleReveal);
+      inputEl.addEventListener("blur", () => {
+        if (chromeHidden) {
+          scheduleReveal();
+        }
+      });
 
       showChatChrome();
     }

@@ -13,7 +13,7 @@
 做的事情：
     1. 从历史日志恢复最近一次运行的候选仓库。
     2. 复用现有 ranking.step2_rank_and_select 与 report.step3_generate_report。
-    3. 先在内存里补齐缺失 desc，再生成报告，最后统一 save_db(db) 持久化。
+    3. 先在内存里补齐缺失 desc，再生成报告，最后统一仅持久化 desc 字段。
     4. 通过 patch report.datetime 回放历史日期，不改动主逻辑代码。
     5. 生成出的报告文件名和报告标题日期都以日志中的历史日期为准，不以脚本执行当天为准。
 
@@ -46,7 +46,7 @@ from unittest.mock import patch
 
 if __package__:
     from .common.config import DEFAULT_SCORE_MODE, HOT_PROJECT_COUNT, STAR_GROWTH_THRESHOLD, TIME_WINDOW_DAYS
-    from .common.db import load_db, save_db
+    from .common.db import load_db, save_db_desc_only
     from .common.llm import call_llm_describe
     from .ranking import step2_rank_and_select
     from .report import step3_generate_report
@@ -63,7 +63,7 @@ else:
     STAR_GROWTH_THRESHOLD = common_config.STAR_GROWTH_THRESHOLD
     TIME_WINDOW_DAYS = common_config.TIME_WINDOW_DAYS
     load_db = common_db.load_db
-    save_db = common_db.save_db
+    save_db_desc_only = common_db.save_db_desc_only
     call_llm_describe = common_llm.call_llm_describe
     step2_rank_and_select = ranking_module.step2_rank_and_select
     step3_generate_report = report_module.step3_generate_report
@@ -332,7 +332,7 @@ def recover_report_from_log(
     if not report_path:
         raise RuntimeError("报告生成失败。")
 
-    save_db(db)
+            save_db_desc_only(db)
     return {
         "report_path": report_path,
         "report_date": context.report_date,
