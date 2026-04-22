@@ -1050,7 +1050,7 @@ class HotProjectAgent:
             repo = validated.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
-            return tool_describe_project(repo=repo, db=state.db)
+            return tool_describe_project(repo=repo, db=state.db, token_mgr=state.token_mgr)
 
         elif name == "generate_report":
             if not state.last_ranked:

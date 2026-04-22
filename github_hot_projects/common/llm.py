@@ -20,6 +20,62 @@ from .config import (
 logger = logging.getLogger("discover_hot")
 
 
+def _truncate_text(text: str, limit: int) -> str:
+    clean = (text or "").strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[:limit] + "..."
+
+
+def _format_recent_releases(releases: list[dict]) -> str:
+    if not isinstance(releases, list) or not releases:
+        return ""
+
+    parts: list[str] = []
+    for item in releases[:5]:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag_name") or item.get("name") or "").strip()
+        date = str(item.get("published_at") or "").strip()
+        if not tag:
+            continue
+        state = []
+        if item.get("prerelease"):
+            state.append("prerelease")
+        if item.get("draft"):
+            state.append("draft")
+        state_text = f"({'/'.join(state)})" if state else ""
+        date_text = date[:10] if date else ""
+        if date_text:
+            parts.append(f"{tag}{state_text}@{date_text}")
+        else:
+            parts.append(f"{tag}{state_text}")
+    return "; ".join(parts)
+
+
+def _format_recent_commits(commits: list[dict]) -> str:
+    if not isinstance(commits, list) or not commits:
+        return ""
+
+    parts: list[str] = []
+    for item in commits[:8]:
+        if not isinstance(item, dict):
+            continue
+        date = str(item.get("date") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if not date and not message:
+            continue
+        date_text = date[:10] if date else ""
+        message_text = _truncate_text(message, 60)
+        if date_text and message_text:
+            parts.append(f"{date_text}:{message_text}")
+        elif date_text:
+            parts.append(date_text)
+        else:
+            parts.append(message_text)
+    return "; ".join(parts)
+
+
 def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
                       detail_level: str = "standard") -> str:
     """
@@ -42,39 +98,44 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
     info_parts = [f"项目名称: {repo_name}", f"项目地址: {html_url}"]
     if short_desc := repo_info.get("short_desc", ""):
         info_parts.append(f"官方简介: {short_desc}")
-    if language := repo_info.get("language", ""):
-        info_parts.append(f"主要语言: {language}")
     if topics := repo_info.get("topics", []):
         info_parts.append(f"标签: {', '.join(topics)}")
     if readme_url := repo_info.get("readme_url", ""):
         info_parts.append(f"README链接（仅供标识，不能视为已读取内容）: {readme_url}")
+    if readme_excerpt := repo_info.get("readme_excerpt", ""):
+        info_parts.append(f"README摘录（已读取文本，可能截断）: {_truncate_text(str(readme_excerpt), 3200)}")
+    if recent_releases := _format_recent_releases(repo_info.get("recent_releases", [])):
+        info_parts.append(f"近期发布节奏: {recent_releases}")
+    if recent_commits := _format_recent_commits(repo_info.get("recent_commits", [])):
+        info_parts.append(f"近期提交线索: {recent_commits}")
 
     prompt = (
         f"请基于以下已提供信息，用中文总结这个 GitHub 开源项目。\n"
         f"输出要求：\n"
         f"1. 只能基于下方明确提供的信息，不要把项目地址或 README 链接当作已读取内容。\n"
         f"2. 不要补充未在输入中出现、且无法确认的外部知识；信息不足时使用保守表述。\n"
+        f"3. 如果输入中包含 README摘录、发布记录或提交记录，可以引用；若缺失，请明确说明信息不足。\n"
     )
     if detail_level == "detailed":
         prompt += (
-            f"3. 必须严格输出以下六个字段，字段名保持原样：\n"
+            f"4. 必须严格输出以下六个字段，字段名保持原样：\n"
             f"项目定位与用途：...\n"
             f"解决的问题：...\n"
             f"使用场景：...\n"
             f"技术架构与特性：...\n"
             f"核心依赖与生态：...\n"
             f"已知局限或注意事项：...\n"
-            f"4. 每个字段建议 120-250 字，总长度控制在 800-1500 字。\n"
-            f"5. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
+            f"5. 每个字段建议 120-250 字，总长度控制在 800-1500 字。\n"
+            f"6. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
         )
     else:
         prompt += (
-            f"3. 必须严格输出以下三个字段，字段名保持原样：\n"
+            f"4. 必须严格输出以下三个字段，字段名保持原样：\n"
             f"项目定位与用途：...\n"
             f"解决的问题：...\n"
             f"使用场景：...\n"
-            f"4. 每个字段建议 70-160 字，总长度控制在 260-520 字。\n"
-            f"5. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
+            f"5. 每个字段建议 70-160 字，总长度控制在 260-520 字。\n"
+            f"6. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
         )
     prompt += "\n".join(info_parts) + "\n"
 

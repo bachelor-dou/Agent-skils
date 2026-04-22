@@ -13,6 +13,8 @@ GitHub API 封装
 
 import logging
 import time
+import base64
+import binascii
 from datetime import datetime, timezone
 
 import requests
@@ -159,6 +161,159 @@ def fetch_repo_info(
             time.sleep(3 * 2 ** attempt)
 
     return None
+
+
+def _fetch_repo_endpoint_json(
+    token_mgr: TokenManager,
+    url: str,
+    token_idx: int = 0,
+    params: dict | None = None,
+    accept: str | None = None,
+) -> dict | list | None:
+    """请求单个仓库相关 REST 接口，返回 JSON（404/422 视为无数据）。"""
+    headers = token_mgr.get_rest_headers(token_idx)
+    if accept:
+        headers = dict(headers)
+        headers["Accept"] = accept
+
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
+            _check_response(resp, token_idx)
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except ValueError:
+                    logger.warning("仓库接口 JSON 解析失败: %s", url)
+                    return None
+            if resp.status_code in (404, 422):
+                return None
+            time.sleep(2 * 2 ** attempt)
+        except (TokenInvalidError, RateLimitError):
+            raise
+        except requests.RequestException as e:
+            logger.warning(
+                "仓库接口请求异常: %s, attempt=%d, error=%s",
+                url,
+                attempt + 1,
+                e,
+            )
+            time.sleep(2 * 2 ** attempt)
+
+    return None
+
+
+def fetch_repo_readme_excerpt(
+    token_mgr: TokenManager,
+    owner: str,
+    repo_name: str,
+    token_idx: int = 0,
+    max_chars: int = 4000,
+) -> dict:
+    """获取 README 摘录（文本可能被截断）。"""
+    url = f"https://api.github.com/repos/{owner}/{repo_name}/readme"
+    data = _fetch_repo_endpoint_json(token_mgr, url, token_idx=token_idx)
+    if not isinstance(data, dict):
+        return {}
+
+    text = ""
+    content = data.get("content", "")
+    encoding = str(data.get("encoding", "")).lower()
+    if isinstance(content, str) and content:
+        if encoding == "base64":
+            raw = content.replace("\n", "")
+            try:
+                decoded = base64.b64decode(raw, validate=False)
+                text = decoded.decode("utf-8", errors="ignore")
+            except (ValueError, binascii.Error):
+                text = ""
+        else:
+            text = content
+
+    text = text.strip()
+    if not text:
+        return {}
+
+    excerpt = text[:max_chars]
+    return {
+        "text": excerpt,
+        "truncated": len(text) > max_chars,
+        "sha": data.get("sha", ""),
+        "path": data.get("path", ""),
+    }
+
+
+def fetch_repo_recent_releases(
+    token_mgr: TokenManager,
+    owner: str,
+    repo_name: str,
+    token_idx: int = 0,
+    per_page: int = 5,
+) -> list[dict]:
+    """获取近期 release 元信息。"""
+    url = f"https://api.github.com/repos/{owner}/{repo_name}/releases"
+    data = _fetch_repo_endpoint_json(
+        token_mgr,
+        url,
+        token_idx=token_idx,
+        params={"per_page": per_page, "page": 1},
+    )
+    if not isinstance(data, list):
+        return []
+
+    releases: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        releases.append(
+            {
+                "tag_name": item.get("tag_name", ""),
+                "name": item.get("name", ""),
+                "published_at": item.get("published_at", ""),
+                "prerelease": bool(item.get("prerelease", False)),
+                "draft": bool(item.get("draft", False)),
+            }
+        )
+    return releases
+
+
+def fetch_repo_recent_commits(
+    token_mgr: TokenManager,
+    owner: str,
+    repo_name: str,
+    token_idx: int = 0,
+    per_page: int = 10,
+) -> list[dict]:
+    """获取默认分支近期提交摘要。"""
+    url = f"https://api.github.com/repos/{owner}/{repo_name}/commits"
+    data = _fetch_repo_endpoint_json(
+        token_mgr,
+        url,
+        token_idx=token_idx,
+        params={"per_page": per_page, "page": 1},
+    )
+    if not isinstance(data, list):
+        return []
+
+    commits: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        commit_info = item.get("commit")
+        if not isinstance(commit_info, dict):
+            continue
+        author_info = commit_info.get("author")
+        if not isinstance(author_info, dict):
+            author_info = {}
+        message = str(commit_info.get("message") or "").strip().splitlines()[0:1]
+        commits.append(
+            {
+                "sha": item.get("sha", ""),
+                "date": author_info.get("date", ""),
+                "message": (message[0] if message else "")[:140],
+            }
+        )
+    return commits
 
 
 # ══════════════════════════════════════════════════════════════

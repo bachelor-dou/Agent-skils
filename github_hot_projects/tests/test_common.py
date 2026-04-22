@@ -516,3 +516,32 @@ class TestLLM:
                     "https://github.com/test/repo",
                 )
                 assert desc == ""
+
+    def test_call_llm_describe_includes_enriched_context_fields(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "项目定位与用途：x\n解决的问题：y\n使用场景：z"}}]
+        }
+
+        with patch("github_hot_projects.common.llm.requests.post", return_value=mock_resp) as mock_post:
+            from github_hot_projects.common.llm import call_llm_describe
+
+            call_llm_describe(
+                "test/repo",
+                {
+                    "short_desc": "Test",
+                    "topics": ["ai"],
+                    "readme_excerpt": "README 内容节选",
+                    "recent_releases": [{"tag_name": "v1.0.0", "published_at": "2026-04-20T00:00:00Z"}],
+                    "recent_commits": [{"date": "2026-04-21T00:00:00Z", "message": "update docs"}],
+                },
+                "https://github.com/test/repo",
+                detail_level="detailed",
+            )
+
+        payload = mock_post.call_args.kwargs["json"]
+        prompt = payload["messages"][0]["content"]
+        assert "README摘录" in prompt
+        assert "近期发布节奏" in prompt
+        assert "近期提交线索" in prompt

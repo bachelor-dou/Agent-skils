@@ -312,25 +312,81 @@ class TestToolGetDBInfo:
 
 
 class TestToolDescribeProject:
-    def test_describe_with_llm(self):
-        """DB 无描述 → 调用 LLM。"""
+    def test_describe_with_api_enriched_llm(self, mock_token_mgr):
+        """describe_project 会优先拉取实时 API 上下文并传给 LLM。"""
         from github_hot_projects.agent_tools import tool_describe_project
 
-        db = {"projects": {"org/repo": {"star": 5000, "desc": ""}}}
+        db = {"projects": {"org/repo": {"star": 5000, "desc": "旧缓存"}}}
 
-        with patch("github_hot_projects.agent_tools.call_llm_describe", return_value="LLM生成的描述"):
-            result = tool_describe_project("org/repo", db)
-            assert result["description"] == "LLM生成的描述"
-            assert result["source"] == "LLM生成"
+        repo_item = {
+            "description": "A framework for building LLM apps",
+            "language": "Python",
+            "topics": ["llm", "agent"],
+            "html_url": "https://github.com/org/repo",
+        }
 
-    def test_describe_uses_cache(self):
-        """DB 已有 desc → 不调用 LLM。"""
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=repo_item):
+            with patch(
+                "github_hot_projects.agent_tools.fetch_repo_readme_excerpt",
+                return_value={"text": "README 摘录", "sha": "abc123"},
+            ):
+                with patch(
+                    "github_hot_projects.agent_tools.fetch_repo_recent_releases",
+                    return_value=[{"tag_name": "v1.2.0", "published_at": "2026-04-20T00:00:00Z"}],
+                ):
+                    with patch(
+                        "github_hot_projects.agent_tools.fetch_repo_recent_commits",
+                        return_value=[{"date": "2026-04-21T00:00:00Z", "message": "improve docs"}],
+                    ):
+                        with patch(
+                            "github_hot_projects.agent_tools.call_llm_describe",
+                            return_value="LLM生成的综合描述",
+                        ) as mock_llm:
+                            result = tool_describe_project("org/repo", db, token_mgr=mock_token_mgr)
+
+        assert result["description"] == "LLM生成的综合描述"
+        assert result["source"] == "LLM生成(API增强上下文)"
+        assert db["projects"]["org/repo"]["desc"] == "LLM生成的综合描述"
+        assert db["projects"]["org/repo"]["readme_sha"] == "abc123"
+
+        llm_repo_info = mock_llm.call_args.args[1]
+        assert llm_repo_info["readme_excerpt"] == "README 摘录"
+        assert "language" not in llm_repo_info
+        assert "languages_breakdown" not in llm_repo_info
+        assert "roadmap_signals" not in llm_repo_info
+
+    def test_describe_api_failure_falls_back_to_cached_desc(self, mock_token_mgr):
+        """API 失败时若 DB 有缓存，回退到缓存描述。"""
         from github_hot_projects.agent_tools import tool_describe_project
 
         db = {"projects": {"org/repo": {"star": 5000, "desc": "已缓存描述"}}}
 
-        with patch("github_hot_projects.agent_tools.call_llm_describe") as mock_llm:
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=None):
+            result = tool_describe_project("org/repo", db, token_mgr=mock_token_mgr)
+
+        assert result["description"] == "已缓存描述"
+        assert result["source"] == "DB缓存(API失败回退)"
+
+    def test_describe_api_failure_without_cache_returns_error(self, mock_token_mgr):
+        """API 失败且无缓存时返回 error，避免凭空猜测。"""
+        from github_hot_projects.agent_tools import tool_describe_project
+
+        db = {"projects": {"org/repo": {"star": 5000, "desc": ""}}}
+
+        with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=None):
+            result = tool_describe_project("org/repo", db, token_mgr=mock_token_mgr)
+
+        assert "error" in result
+
+    def test_describe_without_token_mgr_keeps_legacy_path(self):
+        """未传 token_mgr 时兼容旧行为：直接调用 LLM。"""
+        from github_hot_projects.agent_tools import tool_describe_project
+
+        db = {"projects": {"org/repo": {"star": 5000, "desc": ""}}}
+
+        with patch("github_hot_projects.agent_tools.call_llm_describe", return_value="LLM生成的描述") as mock_llm:
             result = tool_describe_project("org/repo", db)
-            mock_llm.assert_not_called()
-            assert result["description"] == "已缓存描述"
-            assert result["source"] == "DB缓存"
+
+        mock_llm.assert_called_once()
+        assert result["description"] == "LLM生成的描述"
+        assert result["source"] == "LLM生成"

@@ -43,7 +43,14 @@ from .common.config import (
     TIME_WINDOW_DAYS,
 )
 from .common.db import save_db, update_db_project
-from .common.github_api import auto_split_star_range, fetch_repo_info, search_github_repos
+from .common.github_api import (
+    auto_split_star_range,
+    fetch_repo_info,
+    fetch_repo_readme_excerpt,
+    fetch_repo_recent_commits,
+    fetch_repo_recent_releases,
+    search_github_repos,
+)
 from .growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
     estimate_star_growth_binary,
@@ -852,30 +859,132 @@ def tool_rank_candidates(
     }
 
 
-def tool_describe_project(repo: str, db: dict) -> dict:
+def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = None) -> dict:
     """
     Tool 6: 调用 LLM 为单个项目生成描述。
 
     Args:
         repo: "owner/repo"
         db:   DB 字典
+        token_mgr: 可选，提供后将实时拉取 GitHub API 丰富上下文
     """
     db_projects = db.get("projects", {})
     saved = db_projects.get(repo, {})
-    existing = saved.get("desc", "")
-    if existing:
-        return {"repo": repo, "description": existing, "source": "DB缓存"}
 
-    html_url = f"https://github.com/{repo}"
-    desc = call_llm_describe(repo, saved, html_url, detail_level="detailed")
-    if desc and repo in db_projects:
-        db_projects[repo]["desc"] = desc
-        db_projects[repo]["desc_level"] = "detailed"
+    parts = repo.split("/", 1)
+    if len(parts) != 2:
+        return {"error": f"仓库格式错误，应为 owner/repo: {repo}"}
+    owner, repo_name = parts
+
+    existing = str(saved.get("desc", "") or "").strip()
+
+    if token_mgr is None:
+        html_url = f"https://github.com/{repo}"
+        desc = call_llm_describe(repo, saved, html_url, detail_level="detailed")
+        if desc and repo in db_projects:
+            db_projects[repo]["desc"] = desc
+            db_projects[repo]["desc_level"] = "detailed"
+        if desc:
+            return {
+                "repo": repo,
+                "description": desc,
+                "source": "LLM生成",
+            }
+        if existing:
+            return {
+                "repo": repo,
+                "description": existing,
+                "source": "DB缓存(回退)",
+                "warning": "未提供 token_mgr，描述生成失败后回退到 DB 缓存。",
+            }
+        return {
+            "repo": repo,
+            "description": "描述生成失败",
+            "source": "LLM生成",
+        }
+
+    repo_item = fetch_repo_info(token_mgr, owner, repo_name, token_idx=0)
+    if not repo_item:
+        if existing:
+            return {
+                "repo": repo,
+                "description": existing,
+                "source": "DB缓存(API失败回退)",
+                "warning": "实时 GitHub API 信息获取失败，已回退为 DB 缓存描述。",
+            }
+        return {
+            "error": f"未找到仓库: {repo}（可能不存在或为私有仓库）",
+            "hint": "请确认仓库名，或稍后重试。",
+        }
+
+    html_url = repo_item.get("html_url", f"https://github.com/{repo}")
+
+    readme = fetch_repo_readme_excerpt(token_mgr, owner, repo_name, token_idx=0)
+    releases = fetch_repo_recent_releases(token_mgr, owner, repo_name, token_idx=0, per_page=5)
+    commits = fetch_repo_recent_commits(token_mgr, owner, repo_name, token_idx=0, per_page=10)
+
+    repo_info = {
+        "short_desc": repo_item.get("description", ""),
+        "topics": repo_item.get("topics", []),
+        "readme_url": f"{html_url}#readme",
+        "readme_excerpt": readme.get("text", ""),
+        "recent_releases": releases,
+        "recent_commits": commits,
+    }
+
+    desc = call_llm_describe(repo, repo_info, html_url, detail_level="detailed")
+
+    project_record = db_projects.setdefault(repo, {})
+    if repo_item.get("description"):
+        project_record["short_desc"] = repo_item.get("description", "")[:500]
+    if repo_item.get("topics"):
+        project_record["topics"] = repo_item.get("topics", [])
+    project_record["readme_url"] = f"{html_url}#readme"
+    if readme.get("sha"):
+        project_record["readme_sha"] = readme.get("sha")
+
+    if desc:
+        project_record["desc"] = desc
+        project_record["desc_level"] = "detailed"
+    elif existing:
+        project_record.setdefault("desc", existing)
+        project_record.setdefault("desc_level", saved.get("desc_level", "") or "")
+        return {
+            "repo": repo,
+            "description": existing,
+            "source": "DB缓存(LLM失败回退)",
+            "warning": "实时上下文已拉取，但 LLM 生成失败，已回退为 DB 缓存描述。",
+            "context_sources": {
+                "repo_api": True,
+                "readme_excerpt": bool(readme),
+                "releases": len(releases),
+                "commits": len(commits),
+            },
+        }
+
+    if not desc:
+        return {
+            "repo": repo,
+            "description": "描述生成失败",
+            "source": "LLM生成(API增强上下文)",
+            "context_sources": {
+                "repo_api": True,
+                "readme_excerpt": bool(readme),
+                "releases": len(releases),
+                "commits": len(commits),
+            },
+        }
 
     return {
         "repo": repo,
-        "description": desc or "描述生成失败",
-        "source": "LLM生成",
+        "description": desc,
+        "source": "LLM生成(API增强上下文)",
+        "context_sources": {
+            "repo_api": True,
+            "readme_excerpt": bool(readme),
+            "releases": len(releases),
+            "commits": len(commits),
+        },
     }
 
 
