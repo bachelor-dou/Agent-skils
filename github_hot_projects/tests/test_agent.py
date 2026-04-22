@@ -683,6 +683,38 @@ class TestConfirmedRequestExecution:
         assert mock_batch.call_args.kwargs["growth_threshold"] == 400
         assert mock_batch.call_args.kwargs["force_refresh"] is True
 
+    def test_log_execution_overview_prints_full_parameter_snapshot(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.current_user_turn = 7
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="hot_new_ranking",
+            intent_label_zh="新项目热榜",
+            resolved_params={
+                "mode": "hot_new",
+                "time_window_days": 10,
+                "new_project_days": 30,
+                "force_refresh": True,
+            },
+            user_specified_params={"time_window_days": 10, "new_project_days": 30},
+            defaulted_params={"mode": "hot_new", "force_refresh": True},
+            report_requested=True,
+        )
+
+        with patch("github_hot_projects.agent.logger.info") as mock_info:
+            agent._log_execution_overview()
+
+        merged_logs = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_info.call_args_list
+        )
+        assert "运行参数总览" in merged_logs
+        assert "desc_only" in merged_logs
+        assert "运行参数(user_specified)" in merged_logs
+        assert "运行参数(resolved)" in merged_logs
+        assert '"time_window_days": 10' in merged_logs
+
     def test_batch_check_growth_hot_new_persists_desc_only(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 

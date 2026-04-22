@@ -328,6 +328,8 @@ class HotProjectAgent:
             return intercept_reply
 
         self.state.current_turn_tools = set()
+        if execution_confirmed:
+            self._log_execution_overview()
 
         for step in range(MAX_TOOL_CALLS_PER_TURN):
             response = self._call_llm(execution_confirmed=execution_confirmed)
@@ -889,6 +891,37 @@ class HotProjectAgent:
             merged.setdefault("mode", mode)
 
         return merged
+
+    def _log_execution_overview(self) -> None:
+        """在执行开始时打印本轮完整参数快照，便于排查。"""
+        resolved_request = self.state.last_confirmed_request
+        if resolved_request is None:
+            logger.info(
+                "[Agent] 运行参数总览: turn=%s | 当前无已确认请求（将按 LLM/工具默认参数执行）。",
+                self.state.current_user_turn,
+            )
+            return
+
+        mode = resolved_request.resolved_params.get("mode")
+        mode_text = mode if isinstance(mode, str) else None
+        persistence_policy = self._persistence_policy_for_request(mode=mode_text)
+
+        logger.info(
+            "[Agent] 运行参数总览: turn=%s | intent=%s(%s) | report_requested=%s | persistence_policy=%s",
+            self.state.current_user_turn,
+            resolved_request.intent_family,
+            resolved_request.intent_label_zh,
+            resolved_request.report_requested,
+            persistence_policy,
+        )
+        logger.info(
+            "[Agent] 运行参数(user_specified): %s",
+            json.dumps(resolved_request.user_specified_params, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        logger.info(
+            "[Agent] 运行参数(resolved): %s",
+            json.dumps(resolved_request.resolved_params, ensure_ascii=False, sort_keys=True, default=str),
+        )
 
     def _missing_required_collection_tools(self, tool_name: str) -> list[str]:
         resolved_request = self.state.last_confirmed_request
