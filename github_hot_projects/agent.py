@@ -918,9 +918,12 @@ class HotProjectAgent:
             "[Agent] 运行参数(user_specified): %s",
             json.dumps(resolved_request.user_specified_params, ensure_ascii=False, sort_keys=True, default=str),
         )
+        resolved_payload = dict(resolved_request.resolved_params)
+        if resolved_payload.get("include_all_periods") is True:
+            resolved_payload.setdefault("trending_periods", ["daily", "weekly", "monthly"])
         logger.info(
             "[Agent] 运行参数(resolved): %s",
-            json.dumps(resolved_request.resolved_params, ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(resolved_payload, ensure_ascii=False, sort_keys=True, default=str),
         )
 
     def _missing_required_collection_tools(self, tool_name: str) -> list[str]:

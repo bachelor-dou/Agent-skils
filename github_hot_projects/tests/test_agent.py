@@ -715,6 +715,32 @@ class TestConfirmedRequestExecution:
         assert "运行参数(resolved)" in merged_logs
         assert '"time_window_days": 10' in merged_logs
 
+    def test_log_execution_overview_expands_trending_periods_when_include_all_periods(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.current_user_turn = 9
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="comprehensive_ranking",
+            intent_label_zh="综合热榜",
+            resolved_params={
+                "mode": "comprehensive",
+                "since": "weekly",
+                "include_all_periods": True,
+            },
+            user_specified_params={"mode": "comprehensive"},
+        )
+
+        with patch("github_hot_projects.agent.logger.info") as mock_info:
+            agent._log_execution_overview()
+
+        merged_logs = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_info.call_args_list
+        )
+        assert '"include_all_periods": true' in merged_logs
+        assert '"trending_periods": ["daily", "weekly", "monthly"]' in merged_logs
+
     def test_batch_check_growth_hot_new_persists_desc_only(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 

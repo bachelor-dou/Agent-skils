@@ -1059,8 +1059,16 @@ def tool_fetch_trending(
     normalized_since = validated.get("since", "weekly")
     include_all_periods = validated.get("include_all_periods", False)
     if include_all_periods:
+        logger.info(
+            "[Tool fetch_trending] include_all_periods=true，实际抓取周期: daily/weekly/monthly（since=%s 仅作兼容参数保留）。",
+            normalized_since,
+        )
         repos = fetch_trending_all()
     else:
+        logger.info(
+            "[Tool fetch_trending] include_all_periods=false，仅抓取周期: %s",
+            normalized_since,
+        )
         repos = fetch_trending(since=normalized_since)
 
     period_label = {"daily": "今日增长", "weekly": "本周增长", "monthly": "本月增长"}
