@@ -88,13 +88,6 @@ PROMPT_PARAMETER_SCHEMA = [
         "examples": ["今日热门", "本周 Trending", "本月 Trending", "全部时段"],
     },
     {
-        "name": "force_refresh",
-        "type": "bool",
-        "default": "False",
-        "description": "强制实时刷新，全量更新 DB 快照（仅综合热榜生效）。",
-        "examples": ["实时刷新一下", "按当前数据重算", "实时热榜"],
-    },
-    {
         "name": "repo",
         "type": "str",
         "default": "必填时由用户指定",

@@ -626,11 +626,11 @@ def tool_batch_check_growth(
     增长计算策略：
     - 综合榜：未指定窗口用DB年龄窗口+DB差值；指定窗口匹配DB用差值；不匹配用实时
     - 新项目榜：始终实时计算（因为新项目DB无历史数据）
-    - force_refresh=True：强制实时计算
+    - force_refresh=True（仅定时脚本）：强制实时计算并刷新DB快照
 
     DB写入权限（can_write_db）：
-    - 只有 force_refresh=True 或定时脚本才能刷新DB快照
-    - 其他场景只读不写（包括新项目榜）
+    - 定时脚本 force_refresh=True → 允许刷新DB快照
+    - 其他场景（force_refresh=False）→ 只写候选 desc 字段，不刷新快照
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
@@ -638,7 +638,7 @@ def tool_batch_check_growth(
         growth_threshold: 增长阈值
         new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
         time_window_days: 增长统计窗口（天）
-        force_refresh:    用户明确说"强制刷新/实时热榜"时为True，允许刷新DB
+        force_refresh:    定时脚本传入 True 以刷新DB快照；Agent 始终传入 False
         window_specified: 调用方是否显式指定了 time_window_days
     """
     from datetime import timedelta
@@ -654,7 +654,7 @@ def tool_batch_check_growth(
     growth_threshold = validated.get("growth_threshold", STAR_GROWTH_THRESHOLD)
     new_project_days = validated.get("new_project_days")
     time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
-    # force_refresh 不在 schema 中，由 agent 内部传递，跳过验证
+    # force_refresh 不在 schema 中，由定时脚本内部传递，跳过验证
     window_specified = bool(window_specified)
 
     # 新项目榜始终实时计算；综合榜根据窗口匹配决定
@@ -822,7 +822,6 @@ def tool_rank_candidates(
     db: dict | None = None,
     new_project_days: int | None = None,
     prefiltered_new_project_days: int | None = None,
-    persist_db: bool = True,
 ) -> dict:
     """
     Tool 5: 对候选列表评分排序。
@@ -835,7 +834,6 @@ def tool_rank_candidates(
         prefiltered_new_project_days:
                           候选池在 batch_check_growth 阶段已按该窗口预筛；
                           与 new_project_days 一致时，排名阶段可直接按增长排序
-        persist_db:       是否允许工具内部持久化 DB（hot_new 模式下生效）
     """
     validated = validate_tool_args(
         "rank_candidates",

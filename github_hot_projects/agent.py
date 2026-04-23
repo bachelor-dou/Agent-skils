@@ -60,87 +60,102 @@ logger = logging.getLogger("discover_hot")
 # Agent 单轮最大 Tool 调用次数（防止无限循环）
 MAX_TOOL_CALLS_PER_TURN = 15
 
-CONFIRMATION_PROMPT = f"""你是 GitHub 热门项目助手的第一阶段参数解析器。
+# ══════════════════════════════════════════════════════════════════════════════════════
+# 提示词（意图分类阶段）
+# ══════════════════════════════════════════════════════════════════════════════════════
 
-你的任务只有两件事：
-1. 从当前用户消息、最近对话、上一条待确认请求中，识别用户真正要执行的 GitHub 热门项目任务。
-2. 输出结构化 JSON，既保留内部字段，也生成一条面向用户的中文确认语句。
+CONFIRMATION_PROMPT = """你是GitHub热门项目助手。理解用户需求，输出结构化JSON。
 
-严格要求：
-1. 只处理这个 agent 支持的能力：综合热榜、新项目热榜、Trending、单仓库增长、仓库描述、数据库概览、报告。
-2. 只提取用户明确指定或刚刚修改的参数；不要替用户补默认值。
-3. 如果用户是在修改上一条待确认请求，要输出“合并后的最新请求”，不是只输出增量。
-4. confirmation_text_zh 必须是自然中文，不要出现参数英文名、Tool 名、JSON 字段名。
-5. 只输出一个 JSON object，不要输出 Markdown、代码块或额外解释。
-6. 如果存在歧义，在 ambiguous_fields 中指出；confirmation_text_zh 里也要用中文把歧义说清楚。
+""" + PROMPT_PARAMETER_SCHEMA_CONTEXT + """
 
-{PROMPT_PARAMETER_SCHEMA_CONTEXT}
+意图类型（选择最匹配的一个）：
+- comprehensive_ranking：综合热榜（全量候选收集，三源合一）
+- hot_new_ranking：新项目热榜（全量收集+创建时间过滤）
+- keyword_ranking：关键词热榜（只搜索指定关键词/类别，不需scan/trending）
+- trending_only：查看Trending页面
+- repo_growth：单个仓库增长趋势查询
+- repo_description：单个项目功能介绍
+- db_info：数据库概览查询
 
-输出 JSON schema：
-{{
-  "intent_family": "comprehensive_ranking | hot_new_ranking | trending_only | repo_growth | repo_description | db_info | report_only | capability_or_greeting | unknown",
-  "intent_label_zh": "给用户看的中文任务名称",
-  "specified_params": {{"只放用户明确指定的参数": "值"}},
-  "ambiguous_fields": ["需要澄清的点，若无则为空数组"],
-  "report_requested": false,
-  "confirmation_text_zh": "收到！我理解为：……。确认请回复“开始”，或直接告诉我需要修改的地方。"
-}}
-"""
-
-CONFIRMATION_ACK_FALLBACK_PROMPT = """你是执行确认判定器。
-
-任务：判断用户回复是否表示“按当前待确认请求直接执行，不再修改参数”。
-
-判定规则：
-1. 仅当用户明确表示“可以执行/就按这个来/继续”等同意执行意图，返回 true。
-2. 若用户在补充条件、修改参数、提出问题、表达否定或含义不明确，返回 false。
-3. 严格依据用户回复，不要臆测。
-4. 只输出一个 JSON object，不要输出其他文字。
-
-输出 JSON schema：
+输出JSON：
 {
-    "is_confirmation_ack": true
+  "intent_family": "意图类型",
+  "intent_label_zh": "中文任务名",
+  "specified_params": {"用户明确指定的参数": "值"},
+  "ambiguous_fields": ["需要澄清的点，无则为空"],
+  "confirmation_text_zh": "收到！我理解为：……。确认请回复\"开始\"，或直接告诉修改点。"
 }
 """
+
+CONFIRMATION_ACK_PROMPT = """判断用户回复是否表示确认执行当前待确认请求。
+
+规则：
+- 用户说"可以/执行/开始/继续/就按这个来"等 → {"is_ack": true}
+- 用户补充条件、修改参数、提出问题 → {"is_ack": false}
+
+只输出JSON，无其他文字。"""
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# 意图类型 + 工具映射（混合架构核心）
+# ══════════════════════════════════════════════════════════════════════════════════════
 
 INTENT_LABELS = {
     "comprehensive_ranking": "综合热榜",
     "hot_new_ranking": "新项目热榜",
-    "trending_only": "Trending 热门",
-    "repo_growth": "单仓库增长查询",
+    "keyword_ranking": "关键词热榜",       # 新增：只搜索指定关键词/类别
+    "trending_only": "Trending热门",
+    "repo_growth": "单仓库增长",
     "repo_description": "项目介绍",
     "db_info": "数据库查询",
-    "report_only": "报告生成",
-    "capability_or_greeting": "问候或能力咨询",
     "unknown": "未确定请求",
 }
+
+# 意图 → 可用工具范围（LLM在此范围内自主选择）
+AVAILABLE_TOOLS_BY_INTENT: dict[str, set[str]] = {
+    "comprehensive_ranking": {
+        "search_hot_projects", "scan_star_range", "fetch_trending",
+        "batch_check_growth", "rank_candidates", "generate_report",
+    },
+    "hot_new_ranking": {
+        "search_hot_projects", "scan_star_range", "fetch_trending",
+        "batch_check_growth", "rank_candidates", "generate_report",
+    },
+    "keyword_ranking": {
+        "search_hot_projects",                 # 只需要关键词搜索
+        "batch_check_growth", "rank_candidates", "generate_report",
+    },
+    "trending_only": {"fetch_trending"},
+    "repo_growth": {"check_repo_growth"},
+    "repo_description": {"describe_project"},
+    "db_info": {"get_db_info"},
+    "unknown": set(),  # 空集，LLM可自主探索
+}
+
+# 榜单型意图（需要候选收集→增长计算→排名的完整流程）
+RANKING_INTENTS = {"comprehensive_ranking", "hot_new_ranking", "keyword_ranking"}
+
+# 建议的候选收集工具（仅作提示，不强制阻断）
+SUGGESTED_COLLECTION_TOOLS = {"search_hot_projects", "scan_star_range", "fetch_trending"}
 
 INTENT_ALIASES = {
     "comprehensive": "comprehensive_ranking",
     "hot_new": "hot_new_ranking",
+    "keyword": "keyword_ranking",
     "trending": "trending_only",
-    "repo_info": "db_info",
-    "database_info": "db_info",
     "describe_project": "repo_description",
     "check_repo_growth": "repo_growth",
-    "greeting": "capability_or_greeting",
 }
 
-RANKING_INTENTS = {"comprehensive_ranking", "hot_new_ranking"}
-REQUIRED_COLLECTION_TOOLS = {"search_hot_projects", "scan_star_range", "fetch_trending"}
-
+# 参数显示（用于生成确认文本）
 PARAM_DISPLAYERS = {
-    "categories": lambda value: f"关注方向为{'、'.join(value)}" if isinstance(value, list) and value else None,
-    "project_min_star": lambda value: f"关键词搜索最低 star 为 {value}",
-    "min_star": lambda value: f"扫描最小 star 为 {value}",
-    "max_star": lambda value: f"扫描最大 star 为 {value}",
-    "time_window_days": lambda value: f"统计近 {value} 天的增长",
-    "new_project_days": lambda value: f"只看近 {value} 天内创建的项目",
-    "growth_threshold": lambda value: f"star 增长门槛为 {value}",
-    "top_n": lambda value: f"返回前 {value} 名",
-    "trending_range": lambda value: f"Trending范围: {value}",
-    "force_refresh": lambda value: "强制实时刷新" if value else None,
-    "repo": lambda value: f"仓库为 {value}" if value else None,
+    "categories": lambda v: f"关注方向为{'、'.join(v)}" if isinstance(v, list) and v else None,
+    "project_min_star": lambda v: f"关键词搜索最低star为{v}",
+    "time_window_days": lambda v: f"统计近{v}天的增长",
+    "new_project_days": lambda v: f"只看近{v}天内创建的项目",
+    "growth_threshold": lambda v: f"增长门槛为{v}",
+    "top_n": lambda v: f"返回前{v}名",
+    "trending_range": lambda v: f"Trending范围:{v}",
+    "repo": lambda v: f"仓库为{v}" if v else None,
 }
 
 
@@ -195,56 +210,44 @@ class ResolvedRequest:
             "[已确认请求]",
             f"intent_family={self.intent_family}",
             f"intent_label_zh={self.intent_label_zh}",
-            f"user_specified_params={json.dumps(self.user_specified_params, ensure_ascii=False, sort_keys=True)}",
+            f"可用工具={sorted(AVAILABLE_TOOLS_BY_INTENT.get(self.intent_family, set()))}",
             f"resolved_params={json.dumps(self.resolved_params, ensure_ascii=False, sort_keys=True)}",
-            f"defaulted_params={json.dumps(self.defaulted_params, ensure_ascii=False, sort_keys=True)}",
         ]
-        if self.requires_full_collection():
-            lines.append(
-                "执行约束：榜单型任务在调用 batch_check_growth 或 rank_candidates 前，必须先完成 search_hot_projects、scan_star_range、fetch_trending 三个候选收集工具；其中 fetch_trending 必须使用 trending_range=all。"
-            )
-        if self.report_requested:
-            lines.append("执行约束：用户要求最终输出报告，完成排序后应调用 generate_report。")
         return "\n".join(lines)
 
-# System Prompt：指导 LLM 如何使用 Tools
-SYSTEM_PROMPT = f"""你是 GitHub 热门项目发现助手。你可以帮用户搜索、分析和发现近期增长最快的开源项目。
+# ══════════════════════════════════════════════════════════════════════════════════════
+# SYSTEM_PROMPT（LLM自主决策阶段 - 工具详情已通过API tools参数传递）
+# ══════════════════════════════════════════════════════════════════════════════════════
 
-你的回复必须始终围绕这个 agent 的能力范围，不要宣称可以处理通用编程问题、通用问答或与 GitHub 热门项目无关的任务。
+SYSTEM_PROMPT = f"""你是GitHub热门项目发现助手。根据用户需求自主调用提供的工具完成任务。
 
-你拥有以下能力（通过 Tool 调用实现）：
-1. **搜索项目**：按关键词类别搜索（search_hot_projects）或按 star 范围扫描（scan_star_range）
-2. **增长分析**：单个仓库增长详情（check_repo_growth）或批量筛选（batch_check_growth）
-3. **排序筛选**：两种评分模式 — comprehensive（综合排名）/ hot_new（新项目专榜）
-4. **GitHub Trending**：获取 Trending 页面热门仓库（fetch_trending）
-5. **描述生成**：调用 LLM 为项目生成详细中文描述（describe_project）
-6. **报告输出**：生成 Markdown 格式的热门项目报告（generate_report）
-7. **数据库查询**：查询历史数据和仓库信息（get_db_info）
+工具详情已通过API tools参数传递，请参考function定义中的description和parameters。
 
-## 当前默认配置
-- 时间窗口：{TIME_WINDOW_DAYS} 天
-- 增长阈值：>= {STAR_GROWTH_THRESHOLD} stars
-- 默认 Top N：{HOT_PROJECT_COUNT}
-- 新项目窗口：创建时间 <= {NEW_PROJECT_DAYS} 天
-- 可搜索类别：{list(SEARCH_KEYWORDS.keys())}
+## 默认配置
+- 时间窗口：{TIME_WINDOW_DAYS}天
+- 增长阈值：{STAR_GROWTH_THRESHOLD} stars
+- 综合榜Top N：{HOT_PROJECT_COUNT}
+- 新项目榜Top N：{HOT_NEW_PROJECT_COUNT}
+- 新项目窗口：{NEW_PROJECT_DAYS}天
+- 搜索类别：{list(SEARCH_KEYWORDS.keys())}
 
+## 调用流程建议（根据意图自主选择）
+| 意图 | 推荐流程 | 说明 |
+|------|----------|------|
+| comprehensive_ranking | search→scan→trending→batch→rank→report | 三源合一，全量收集 |
+| hot_new_ranking | search→scan→trending→batch→rank→report | 同上，batch/rank阶段会按new_project_days过滤 |
+| keyword_ranking | search→batch→rank→report | 只搜索指定类别，不需要scan/trending |
+| trending_only | fetch_trending | 直接获取Trending页面 |
+| repo_growth | check_repo_growth | 查询单仓库增长，需repo参数 |
+| repo_description | describe_project | 查询单项目功能介绍，需repo参数 |
+| db_info | get_db_info | 查询本地DB状态 |
 
-### Tool 执行前：先确认参数再调用tool执行
-
-## 注意事项
-- 所有信息必须真实准确，基于 GitHub API 或者搜索总结得到的实际数据，不得编造或假设数据。(必须严格遵守)
-- 搜索和增长计算需要较长时间，请告知用户正在处理
-- 结果以结构化方式呈现，重点突出增长数据
-- 对话中保持上下文，用户可以基于上次搜索结果继续操作
-- 如果用户意图不明确（比如没说清楚排名模式、类别、数量），请先确认再执行
-- 用户明确要求"报告"、"报告链接"、"榜单链接"、"HTML 链接"时，完成排名后必须调用 generate_report，再把可打开的报告文件名或链接返回给用户
-- **Trending 参数说明**：
-  - 用户查看 Trending 未指定周期 → trending_range="weekly"（默认）
-  - 用户指定"日榜/周榜/月榜" → trending_range="daily"/"weekly"/"monthly"
-  - 综合榜/新项目榜候选补充 → trending_range="all"（抓取三档去重）
-- 用户说"新项目"、"新创建"、"新仓库"等明确提示词时，才进入 hot_new；若未明确提到新项目，则热榜默认走 comprehensive
-- 用户说"近7天"、"近10天"、"近30天"等时间表述时，默认指增长统计窗口，而不是新项目创建窗口；只有"30天内创建的新项目"这类明确创建时间语义才映射为 new_project_days
-- **force_refresh 仅在用户明确说"实时/最新/当前/现在/强制刷新/实时热榜"时才设置为 true。新项目榜(hot_new)不需要设置 force_refresh，除非用户主动要求强制刷新。**
+## 核心规则
+1. **数据真实性**：必须基于GitHub API或Trending页面，不得编造数据
+2. **报告生成**：用户要求"报告"时，排名完成后必须调用generate_report
+3. **Trending参数**：未指定→weekly，指定"日榜/周榜/月榜"→daily/weekly/monthly，候选补充→all
+4. **参数传递**：用户指定的参数（time_window_days/new_project_days等）必须传递给对应工具
+5. **单仓库查询**：用户问"这个项目做什么/功能"→describe_project，问"增长趋势"→check_repo_growth
 """
 
 
@@ -433,7 +436,7 @@ class HotProjectAgent:
             temperature=0.3,
             max_tokens=16384,
             log_prefix="[Agent]",
-            enable_thinking=True,
+            enable_thinking=False,
             thinking_budget=8192,
         )
 
@@ -578,7 +581,7 @@ class HotProjectAgent:
             return False
 
         for kw in keywords:
-            # 单字确认词仅接受精确匹配，避免把“是不是”误判为确认。
+            # 单字确认词仅接受精确匹配，避免把"是不是"误判为确认。
             if len(kw) == 1:
                 if normalized == kw:
                     return True
@@ -715,7 +718,7 @@ class HotProjectAgent:
         )
         fallback = (
             "收到！我会先按你刚才的 GitHub 热门项目需求整理参数。"
-            "确认请回复“开始”，或直接告诉我需要修改的地方。"
+            "确认请回复\"开始\"，或直接告诉我需要修改的地方。"
         )
         if response is None:
             self.state.last_confirmed_request = None
@@ -748,7 +751,7 @@ class HotProjectAgent:
     def _parse_pending_request_content(self, content: str) -> PendingRequest:
         fallback = (
             content or
-            "收到！我会先按你刚才的 GitHub 热门项目需求整理参数。确认请回复“开始”，或直接告诉我需要修改的地方。"
+            "收到！我会先按你刚才的 GitHub 热门项目需求整理参数。确认请回复\"开始\"，或直接告诉我需要修改的地方。"
         )
         payload = self._extract_json_object(content)
         if not isinstance(payload, dict):
@@ -821,7 +824,7 @@ class HotProjectAgent:
             body = f"{body}。另外还需要确认：{ambiguous_text}"
         if not body:
             body = "你的 GitHub 热门项目需求"
-        return f"收到！我理解为：{body}。确认请回复“开始”，或直接告诉我需要修改的地方。"
+        return f"收到！我理解为：{body}。确认请回复\"开始\"，或直接告诉我需要修改的地方。"
 
     def _resolve_pending_request(self, pending: PendingRequest) -> ResolvedRequest:
         defaults = self._default_params_for_intent(pending.intent_family)
@@ -853,7 +856,6 @@ class HotProjectAgent:
                 "min_star": STAR_RANGE_MIN,
                 "max_star": STAR_RANGE_MAX,
                 "trending_range": "all",
-                "force_refresh": False,
             }
         if intent_family == "hot_new_ranking":
             return {
@@ -866,7 +868,6 @@ class HotProjectAgent:
                 "min_star": STAR_RANGE_MIN,
                 "max_star": STAR_RANGE_MAX,
                 "trending_range": "all",
-                "force_refresh": False,
             }
         if intent_family == "trending_only":
             return {"trending_range": "weekly"}
@@ -924,45 +925,36 @@ class HotProjectAgent:
             json.dumps(resolved_request.resolved_params, ensure_ascii=False, sort_keys=True, default=str),
         )
 
-    def _missing_required_collection_tools(self, tool_name: str) -> list[str]:
+    def _check_suggested_collection_tools(self, tool_name: str) -> list[str]:
+        """检查建议的候选收集工具是否已调用（仅作提示，不强制阻断）。
+
+        LLM自主决策为主，硬编码只做建议提示：
+        - 返回缺失的建议工具列表
+        - 不强制阻断执行，只记录日志警告
+        """
         resolved_request = self.state.last_confirmed_request
         if resolved_request is None or not resolved_request.requires_full_collection():
             return []
         if tool_name not in {"batch_check_growth", "rank_candidates"}:
             return []
-        missing = REQUIRED_COLLECTION_TOOLS - self.state.current_turn_tools
+        missing = SUGGESTED_COLLECTION_TOOLS - self.state.current_turn_tools
         return sorted(missing)
 
     def _persistence_policy_for_request(self, mode: str | None = None) -> str:
-        """返回请求对应的 DB 持久化策略：`full`、`desc_only` 或 `none`。
+        """返回请求对应的 DB 持久化策略：`desc_only` 或 `none`。
 
         规则：
-        - 综合热榜 + 用户说"实时/最新/当前/现在/强制刷新" → full（写完整快照 + desc）
-        - 定时更新脚本 → full（调用方直接 save_db）
-        - 综合热榜（无实时关键词）→ desc_only（只写 desc）
-        - 新项目热榜 → desc_only（只写 desc，无论是否有实时关键词）
-        - 其他通道 → none（完全不写，包括元数据）
+        - 榜单型任务（comprehensive/hot_new/keyword）→ desc_only
+        - 其他通道 → none
         """
         resolved_request = self.state.last_confirmed_request
 
-        # 判断 force_refresh（用户说"实时/最新/当前/现在/强制刷新")
-        force_refresh = False
-        if resolved_request is not None:
-            force_refresh = resolved_request.resolved_params.get("force_refresh", False)
-
-        # hot_new 模式：永远只写 desc_only，不允许 full
-        if mode == "hot_new":
+        # 榜单型任务：只写 desc_only
+        if mode in {"comprehensive", "hot_new"}:
             return "desc_only"
-        if resolved_request is not None and resolved_request.intent_family == "hot_new_ranking":
+        if resolved_request is not None and resolved_request.requires_full_collection():
             return "desc_only"
 
-        # comprehensive 模式：force_refresh=True → full，否则 → desc_only
-        if mode == "comprehensive":
-            return "full" if force_refresh else "desc_only"
-        if resolved_request is not None and resolved_request.intent_family == "comprehensive_ranking":
-            return "full" if force_refresh else "desc_only"
-
-        # 其他 → none（只读不写）
         return "none"
 
     def _execute_tool(self, name: str, args: dict) -> dict:
@@ -1014,10 +1006,14 @@ class HotProjectAgent:
             )
 
         elif name == "batch_check_growth":
-            missing_tools = self._missing_required_collection_tools(name)
-            if missing_tools:
-                missing_text = "、".join(missing_tools)
-                return {"error": f"当前榜单任务缺少必要数据源：{missing_text}。请先补齐这几个候选收集工具再继续。"}
+            # 检查建议的候选收集工具（仅提示，不强制阻断）
+            suggested_tools = self._check_suggested_collection_tools(name)
+            if suggested_tools:
+                suggested_text = "、".join(suggested_tools)
+                logger.warning(
+                    "[Agent] batch_check_growth: 建议先调用 %s 以最大化候选覆盖，但LLM可自主决策是否跳过。",
+                    suggested_text,
+                )
             if not state.last_search_repos:
                 return {"error": "没有搜索结果，请先调用 search_hot_projects"}
             time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
@@ -1033,26 +1029,26 @@ class HotProjectAgent:
                 growth_threshold=validated.get("growth_threshold", STAR_GROWTH_THRESHOLD),
                 new_project_days=new_project_days,
                 time_window_days=time_window_days,
-                force_refresh=validated.get("force_refresh", False),
                 window_specified=window_specified,
             )
             state.last_candidates = result.get("candidates", {})
             state.last_candidate_new_project_days = new_project_days
             state.last_time_window_days = result.get("time_window_days", time_window_days)
             persistence_policy = self._persistence_policy_for_request()
-            if result.get("db_updated", False) and persistence_policy != "none":
-                if persistence_policy == "full":
-                    save_db(state.db)
-                else:
-                    changed = save_db_desc_only(state.db)
-                    logger.info("[Agent] batch_check_growth 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
+            if result.get("db_updated", False) and persistence_policy == "desc_only":
+                changed = save_db_desc_only(state.db)
+                logger.info("[Agent] batch_check_growth 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
             return result
 
         elif name == "rank_candidates":
-            missing_tools = self._missing_required_collection_tools(name)
-            if missing_tools:
-                missing_text = "、".join(missing_tools)
-                return {"error": f"当前榜单任务缺少必要数据源：{missing_text}。请先补齐这几个候选收集工具再继续。"}
+            # 检查建议的候选收集工具（仅提示，不强制阻断）
+            suggested_tools = self._check_suggested_collection_tools(name)
+            if suggested_tools:
+                suggested_text = "、".join(suggested_tools)
+                logger.warning(
+                    "[Agent] rank_candidates: 建议先调用 %s 以最大化候选覆盖，但LLM可自主决策是否跳过。",
+                    suggested_text,
+                )
             if not state.last_candidates:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
             mode = validated.get("mode", "comprehensive")
@@ -1065,7 +1061,6 @@ class HotProjectAgent:
                 db=state.db,
                 new_project_days=new_project_days,
                 prefiltered_new_project_days=state.last_candidate_new_project_days,
-                persist_db=self._persistence_policy_for_request(mode=mode) == "full",
             )
             state.last_ranked = result.pop("_ordered_tuples", [])
             state.last_mode = mode
@@ -1089,9 +1084,7 @@ class HotProjectAgent:
                 time_window_days=state.last_time_window_days,
             )
             persistence_policy = self._persistence_policy_for_request(mode=state.last_mode)
-            if persistence_policy == "full":
-                save_db(state.db)
-            elif persistence_policy == "desc_only":
+            if persistence_policy == "desc_only":
                 changed = save_db_desc_only(state.db)
                 logger.info("[Agent] generate_report 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
             return result

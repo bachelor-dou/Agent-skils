@@ -166,35 +166,72 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     "Database": [
         "database", "sql database", "nosql", "time series database",
         "graph database", "document database",
+        # 热门数据库引擎
+        "postgresql", "mysql", "redis", "sqlite", "elasticsearch",
+        "mongodb", "clickhouse", "vector search", "olap database",
     ],
     "Cloud-Native": [
         "kubernetes", "docker", "terraform", "serverless", "service mesh",
+        # 云原生工具链
+        "helm chart", "prometheus", "grafana", "argo workflow", "cilium",
+        "container runtime", "istio", "envoy proxy", "knative",
     ],
     "Frontend": [
-        "react", "vue framework", "svelte", "ui component library",
-        "nextjs", "tailwind",
+        "react", "vue", "svelte", "ui component", "nextjs", "tailwindcss",
+        # 前端框架与工具
+        "angular", "nuxt", "vite", "webpack", "electron app",
+        "flutter", "react native", "typescript", "webgl",
     ],
     "Backend": [
-        "web framework", "api framework", "microservice",
-        "graphql server", "rpc framework",
+        "web framework", "api framework", "microservice", "graphql server", "rpc framework",
+        # 后端框架
+        "fastapi", "django", "spring boot", "golang http", "nodejs framework",
+        "gin", "express", "nestjs", "flask", "koa",
     ],
     "DevOps": [
-        "ci cd", "monitoring", "infrastructure as code", "gitops",
-        "observability",
+        "ci cd pipeline", "monitoring", "infrastructure as code", "gitops",
+        # DevOps工具
+        "ansible", "pulumi", "github actions", "jenkins", "gitlab ci",
+        "argo cd", "flux", "terraform provider",
     ],
     "Security": [
         "security tool", "authentication", "vulnerability scanner",
-        "encryption", "zero trust",
+        # 安全工具
+        "waf", "ids ips", "penetration testing", "security scanner",
+        "cve scanner", "secret scanner", "sast dast", "dependency check",
     ],
     "Data-Engineering": [
         "data pipeline", "etl", "stream processing", "feature store",
-        "data lake",
+        "data lake", "data warehouse",
+        # 数据工程工具
+        "apache spark", "kafka", "flink", "airflow", "dbt",
+        "duckdb", "polars", "pandas",
     ],
     "System-Tool": [
         "terminal tool", "cli tool", "shell", "wasm runtime",
-        "file manager",
+        # 系统工具
+        "terminal emulator", "file sync", "backup tool", "text editor",
+        "neovim", "helix editor", "zsh", "fish shell", "tmux",
     ],
     "Programming-Language": [
         "programming language", "compiler", "language server",
+        # 语言与编译器
+        "rust", "golang", "zig", "lua", "julia",
+        "python tooling", "typescript compiler", "lisp",
+    ],
+    # ─── 新兴领域补充 ───
+    "Web3-Blockchain": [
+        "blockchain", "ethereum", "smart contract", "defi",
+        "web3", "nft", "crypto", "solidity", "layer2",
+        "bitcoin", "solana", "arbitrum", "optimism",
+    ],
+    "Game-Engine": [
+        "game engine", "unity", "unreal engine", "godot",
+        "game framework", "game dev", "3d engine", "physics engine",
+    ],
+    "Audio-Video": [
+        "video processing", "audio processing", "ffmpeg",
+        "video editor", "audio editor", "media player",
+        "streaming media", "video codec", "audio codec",
     ],
 }

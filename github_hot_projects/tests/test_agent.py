@@ -150,7 +150,6 @@ class TestArgValidation:
 
         assert mock_rank.call_args.kwargs["top_n"] == HOT_NEW_PROJECT_COUNT
         assert mock_rank.call_args.kwargs["new_project_days"] == NEW_PROJECT_DAYS
-        assert mock_rank.call_args.kwargs["persist_db"] is False
 
     def test_batch_check_growth_passes_time_window(self):
         """batch_check_growth 应正确传递 time_window_days 参数。"""
@@ -561,7 +560,8 @@ class TestAgentStateHelpers:
         messages = mock_request.call_args.kwargs["messages"]
         assert "[执行确认]" in messages[0]["content"]
         assert "[已确认请求]" in messages[0]["content"]
-        assert "search_hot_projects、scan_star_range、fetch_trending" in messages[0]["content"]
+        # 新架构使用 Python 列表格式显示可用工具
+        assert "search_hot_projects" in messages[0]["content"]
         assert "generate_report" in messages[0]["content"]
 
     def test_compress_conversation_preserves_recent_messages_and_adds_summary(self):
@@ -655,7 +655,8 @@ class TestValidateToolArgs:
 
 
 class TestConfirmedRequestExecution:
-    def test_batch_check_growth_blocks_until_all_required_collection_tools_exist(self):
+    def test_batch_check_growth_suggests_missing_collection_tools_but_not_required(self):
+        """LLM决策为主：缺失建议工具只打印警告，不强制阻断。"""
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
         agent = HotProjectAgent()
@@ -667,10 +668,15 @@ class TestConfirmedRequestExecution:
         agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
-        result = agent._execute_tool("batch_check_growth", {})
+        # 现在不强制返回错误，只是打印警告
+        with patch(
+            "github_hot_projects.agent.tool_batch_check_growth",
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": False},
+        ):
+            result = agent._execute_tool("batch_check_growth", {})
 
-        assert "缺少必要数据源" in result["error"]
-        assert "fetch_trending" in result["error"]
+        # 应该正常执行，不返回错误
+        assert "candidates" in result
 
     def test_batch_check_growth_injects_confirmed_request_defaults(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
@@ -798,32 +804,8 @@ class TestConfirmedRequestExecution:
         mock_save.assert_not_called()
         mock_desc_save.assert_called_once_with(agent.state.db)
 
-    def test_generate_report_comprehensive_with_force_refresh_persists_full_db(self):
-        """comprehensive 模式 + force_refresh=True 应写完整 DB。"""
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
-
-        agent = HotProjectAgent()
-        agent.state.last_mode = "comprehensive"
-        agent.state.last_ranked = [("org/repo", {"growth": 100, "star": 200})]
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="comprehensive_ranking",
-            intent_label_zh="综合热榜",
-            resolved_params={"mode": "comprehensive", "force_refresh": True},
-        )
-
-        with patch(
-            "github_hot_projects.agent.tool_generate_report",
-            return_value={"report_path": "reports/now.md"},
-        ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                with patch("github_hot_projects.agent.save_db_desc_only") as mock_desc_save:
-                    agent._execute_tool("generate_report", {})
-
-        mock_save.assert_called_once_with(agent.state.db)
-        mock_desc_save.assert_not_called()
-
-    def test_generate_report_comprehensive_without_force_refresh_writes_desc_only(self):
-        """comprehensive 模式 + 无 force_refresh 应只写 desc_only。"""
+    def test_generate_report_comprehensive_writes_desc_only(self):
+        """comprehensive 模式应只写 desc_only（full DB 写入由定时脚本负责）。"""
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
         agent = HotProjectAgent()
@@ -846,30 +828,8 @@ class TestConfirmedRequestExecution:
         mock_save.assert_not_called()
         mock_desc_save.assert_called_once()
 
-    def test_batch_check_growth_comprehensive_with_force_refresh_persists_db(self):
-        """comprehensive 模式 + force_refresh=True 应写完整 DB。"""
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
-
-        agent = HotProjectAgent()
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="comprehensive_ranking",
-            intent_label_zh="综合热榜",
-            resolved_params={"mode": "comprehensive", "time_window_days": 7, "force_refresh": True},
-        )
-        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
-        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
-
-        with patch(
-            "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 7, "db_updated": True},
-        ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                agent._execute_tool("batch_check_growth", {})
-
-        mock_save.assert_called_once()
-
-    def test_batch_check_growth_comprehensive_without_force_refresh_writes_desc_only(self):
-        """comprehensive 模式 + 无 force_refresh 应只写 desc_only。"""
+    def test_batch_check_growth_comprehensive_writes_desc_only(self):
+        """comprehensive 模式应只写 desc_only（full DB 写入由定时脚本负责）。"""
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
         agent = HotProjectAgent()
@@ -892,15 +852,15 @@ class TestConfirmedRequestExecution:
         mock_save.assert_not_called()
         mock_desc_save.assert_called_once()
 
-    def test_batch_check_growth_hot_new_with_force_refresh_only_desc_only(self):
-        """hot_new 模式 + force_refresh=True 也只能写 desc_only，不允许 full。"""
+    def test_batch_check_growth_hot_new_writes_desc_only(self):
+        """hot_new 模式应只写 desc_only。"""
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
         agent = HotProjectAgent()
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="hot_new_ranking",
             intent_label_zh="新项目热榜",
-            resolved_params={"mode": "hot_new", "new_project_days": 10, "force_refresh": True},
+            resolved_params={"mode": "hot_new", "new_project_days": 10},
         )
         agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
