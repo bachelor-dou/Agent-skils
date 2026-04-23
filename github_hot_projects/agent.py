@@ -1146,11 +1146,11 @@ class HotProjectAgent:
 
     def _compress_conversation(self) -> None:
         """
-        压缩对话历史：将早期消息摘要化，保留最近 KEEP_RECENT_MESSAGES 条。
+        压缩对话历史：用 LLM 将早期消息语义摘要化，保留最近 KEEP_RECENT_MESSAGES 条。
 
         策略：
           1. 提取 system prompt（始终保留）
-          2. 将中间的旧消息提取为摘要文本
+          2. 用 LLM 将旧消息浓缩为语义摘要
           3. 注入摘要到 system prompt 之后
           4. 保留最近的消息
         """
@@ -1169,26 +1169,29 @@ class HotProjectAgent:
         old_msgs = non_system[:-KEEP_RECENT_MESSAGES]
         recent_msgs = non_system[-KEEP_RECENT_MESSAGES:]
 
-        # 生成摘要：提取用户消息和关键 assistant 回复
-        summary_parts = []
-        if self.state.conversation_summary:
-            summary_parts.append(self.state.conversation_summary)
+        # 用 LLM 生成语义摘要
+        llm_summary = self._generate_summary_with_llm(old_msgs)
+        if llm_summary:
+            self.state.conversation_summary = llm_summary
+        else:
+            # fallback: 简单截取（LLM 调用失败时）
+            summary_parts = []
+            if self.state.conversation_summary:
+                summary_parts.append(self.state.conversation_summary)
+            for msg in old_msgs:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user" and content:
+                    summary_parts.append(f"用户: {content[:200]}")
+                elif role == "assistant" and content:
+                    summary_parts.append(f"助手: {content[:200]}")
+            self.state.conversation_summary = "\n".join(summary_parts[-20:])
+            logger.warning("[Agent] LLM 摘要生成失败，fallback 到简单截取")
 
-        for msg in old_msgs:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "user" and content:
-                summary_parts.append(f"用户: {content[:200]}")
-            elif role == "assistant" and content:
-                summary_parts.append(f"助手: {content[:200]}")
-            # tool 调用和结果省略
-
-        self.state.conversation_summary = "\n".join(summary_parts[-20:])  # 保留最近 20 条
-
-        # 重建对话：将摘要合并到初始 system prompt 内，避免产生多条独立 system 消息
+        # 重建对话：将摘要合并到初始 system prompt 内
         summary_text = (
             f"\n\n[对话历史摘要]\n"
-            f"以下是之前对话的关键内容：\n{self.state.conversation_summary}\n"
+            f"{self.state.conversation_summary}\n"
             f"[当前状态] 搜索结果: {len(self.state.last_search_repos)} 个, "
             f"候选仓库: {len(self.state.last_candidates)} 个, "
             f"已排序: {len(self.state.last_ranked)} 个, "
@@ -1209,6 +1212,72 @@ class HotProjectAgent:
 
         self.state.conversation = initial_system + recent_msgs
         logger.info(
-            f"[Agent] 对话历史已压缩: {len(old_msgs)} 条旧消息 → 摘要, "
+            f"[Agent] 对话历史已压缩: {len(old_msgs)} 条旧消息 → LLM摘要, "
             f"保留 {len(recent_msgs)} 条近期消息"
         )
+
+    def _generate_summary_with_llm(self, old_msgs: list[dict]) -> str | None:
+        """
+        用 LLM 将旧消息浓缩为语义摘要。
+
+        Args:
+            old_msgs: 要压缩的旧消息列表
+
+        Returns:
+            摘要文本，失败时返回 None
+        """
+        SUMMARY_PROMPT = """你是对话历史压缩器。请将以下对话历史浓缩为简洁摘要。
+
+要求：
+1. 保留用户的核心意图和关键参数（类别、star范围、时间窗口、top_n等）
+2. 保留已完成的关键操作（搜索、扫描、排序、生成报告）
+3. 保留重要结果结论（如排名Top项目、增长数据）
+4. 去除：进度提示、重复内容、无关细节、tool调用细节
+5. 使用简洁的中文，不超过500字
+
+格式示例：
+- 用户意图：搜索AI Agent热门项目，top_n=20，时间窗口7天
+- 已执行：搜索关键词、扫描star范围1000-5000、批量增长分析
+- 关键结果：排名第一为langchain(增长2300 stars)，第二为autogen(增长1800 stars)
+- 待跟进：用户曾提到想看新项目，但尚未执行
+
+对话历史：
+{conversation_history}
+
+请输出摘要（不要输出任何额外内容）："""
+
+        # 构建对话历史文本（简化格式，减少 token）
+        history_parts = []
+        if self.state.conversation_summary:
+            history_parts.append(f"[之前的摘要]\n{self.state.conversation_summary}")
+
+        for msg in old_msgs:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                history_parts.append(f"[用户] {content}")
+            elif role == "assistant":
+                # assistant 消息可能很长，截取关键部分
+                history_parts.append(f"[助手] {content[:500] if content else '(tool调用)'}")
+            elif role == "tool":
+                # tool 结果保留关键信息提示，不保留完整数据
+                history_parts.append(f"[Tool结果] (已执行)")
+
+        history_text = "\n".join(history_parts)
+
+        # 调用 LLM（低成本配置）
+        response = self._request_llm(
+            messages=[{"role": "user", "content": SUMMARY_PROMPT.format(conversation_history=history_text)}],
+            temperature=0.1,  # 低温度，稳定输出
+            max_tokens=600,
+            log_prefix="[摘要生成]",
+            enable_thinking=False,  # 不需要思考过程
+        )
+
+        if response:
+            choice = response.get("choices", [{}])[0]
+            content = choice.get("message", {}).get("content", "")
+            if content:
+                return content.strip()
+
+        return None
