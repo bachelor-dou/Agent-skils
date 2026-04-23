@@ -106,6 +106,16 @@ INTRO_SECTION_TITLES = (
     "项目定位与用途",
     "解决的问题",
     "使用场景",
+    "技术架构与特性",
+)
+
+ALL_SECTION_TITLES = (
+    "项目定位与用途",
+    "解决的问题",
+    "使用场景",
+    "技术架构与特性",
+    "核心依赖与生态",
+    "已知局限或注意事项",
 )
 
 _MODE_META = {
@@ -174,6 +184,7 @@ def _split_description_blocks(text: str) -> list[str]:
 
 
 def _extract_structured_sections(text: str) -> dict[str, str]:
+    """从 LLM 输出中提取结构化字段，只返回 INTRO_SECTION_TITLES 中定义的字段。"""
     if not text:
         return {}
     sections = {title: "" for title in INTRO_SECTION_TITLES}
@@ -184,22 +195,34 @@ def _extract_structured_sections(text: str) -> dict[str, str]:
         if not line:
             continue
 
+        # 检查是否是任何已知字段标题（包括 ALL_SECTION_TITLES）
         matched_title = ""
-        for title in INTRO_SECTION_TITLES:
+        for title in ALL_SECTION_TITLES:
             if line.startswith(f"{title}："):
                 matched_title = title
-                sections[title] = line.split("：", 1)[1].strip()
+                content_part = line.split("：", 1)[1].strip()
+                # 只有 INTRO_SECTION_TITLES 中的字段才记录内容
+                if title in INTRO_SECTION_TITLES:
+                    sections[title] = content_part
                 break
             if line.startswith(f"{title}:"):
                 matched_title = title
-                sections[title] = line.split(":", 1)[1].strip()
+                content_part = line.split(":", 1)[1].strip()
+                if title in INTRO_SECTION_TITLES:
+                    sections[title] = content_part
                 break
 
         if matched_title:
-            current_title = matched_title
+            # 更新 current_title，只有 INTRO_SECTION_TITLES 中的才用于追加
+            if matched_title in INTRO_SECTION_TITLES:
+                current_title = matched_title
+            else:
+                # 遇到不需要的字段标题时，停止追加到前一个字段
+                current_title = ""
             continue
 
-        if current_title:
+        # 只有当前字段是我们需要的字段时才追加
+        if current_title and current_title in INTRO_SECTION_TITLES:
             sections[current_title] = f"{sections[current_title]} {line}".strip()
 
     return {title: content for title, content in sections.items() if content}
@@ -263,6 +286,29 @@ def _build_usage_text(saved: dict, hot_new_window: int) -> str:
     return " ".join(parts)
 
 
+def _build_tech_arch_text(saved: dict, detailed_desc: str) -> str:
+    """构建技术架构与特性的 fallback 文本。"""
+    parts: list[str] = []
+    language = (saved.get("language") or "").strip()
+    topics = [topic for topic in saved.get("topics", []) if topic]
+    short_desc = (saved.get("short_desc") or "").strip()
+
+    if language:
+        parts.append(f"主要使用 {language} 实现。")
+    if topics:
+        tech_topics = [t for t in topics[:4] if not any(kw in t.lower() for kw in ["ai", "llm", "agent", "tool", "library", "framework"])]
+        if tech_topics:
+            parts.append(f"技术关键词包括 {', '.join(tech_topics)}。")
+    if short_desc and len(short_desc) > 30:
+        # 尝试从短描述中提取技术信息
+        desc_blocks = _split_description_blocks(detailed_desc)
+        if len(desc_blocks) >= 3:
+            parts.append(desc_blocks[2][:150])
+    if not parts:
+        parts.append("暂无详细技术架构信息，可查看仓库 README 或源码了解实现细节。")
+    return " ".join(parts)
+
+
 def _resolve_intro_sections(saved: dict, detailed_desc: str, hot_new_window: int) -> list[tuple[str, str]]:
     structured = _extract_structured_sections(detailed_desc)
     return [
@@ -278,6 +324,10 @@ def _resolve_intro_sections(saved: dict, detailed_desc: str, hot_new_window: int
             INTRO_SECTION_TITLES[2],
             structured.get(INTRO_SECTION_TITLES[2]) or _build_usage_text(saved, hot_new_window),
         ),
+        (
+            INTRO_SECTION_TITLES[3],
+            structured.get(INTRO_SECTION_TITLES[3]) or _build_tech_arch_text(saved, detailed_desc),
+        ),
     ]
 
 
@@ -291,18 +341,10 @@ def _normalize_markdown_blocks(text: str) -> list[str]:
 
 
 def _is_detailed_desc(text: str) -> bool:
-    """判断描述是否为完整详细版（六字段）。"""
+    """判断描述是否为完整详细版（四字段）。"""
     if not text:
         return False
-    required_titles = (
-        "项目定位与用途",
-        "解决的问题",
-        "使用场景",
-        "技术架构与特性",
-        "核心依赖与生态",
-        "已知局限或注意事项",
-    )
-    return all(f"{title}：" in text or f"{title}:" in text for title in required_titles)
+    return all(f"{title}：" in text or f"{title}:" in text for title in INTRO_SECTION_TITLES)
 
 
 def _render_stat_badge(kind: str, icon_svg: str, label: str, value: str) -> str:
@@ -341,12 +383,14 @@ def _render_topic_tags(topics: list[str]) -> str:
 
 
 def _render_repo_card(
+    rank: int,
     full_name: str,
     info: dict,
     saved: dict,
     detailed_desc: str,
     hot_new_window: int,
     time_window_days: int,
+    max_growth: int,
 ) -> str:
     html_url = f"https://github.com/{full_name}"
     readme_url = saved.get("readme_url") or f"{html_url}#readme"
@@ -357,6 +401,10 @@ def _render_repo_card(
     refresh_badge_value = report_date
     refresh_badge_label = "报告生成"
     intro_sections = _resolve_intro_sections(saved, detailed_desc, hot_new_window)
+
+    # 计算热度百分比（基于最大增长）
+    heat_percent = min(100, int((growth / max_growth) * 100)) if max_growth > 0 else 0
+
     badge_items = [
         _render_stat_badge("star", STAR_ICON_SVG, "总 Star", _format_number(star)),
         _render_stat_badge("growth", TREND_ICON_SVG, f"{time_window_days}天增长", f"+{_format_number(growth)}"),
@@ -378,7 +426,9 @@ def _render_repo_card(
 
     return "\n".join([
         '<section class="repo-card">',
+        f'<div class="repo-card__rank">{rank}</div>',
         f'<div class="repo-card__stats">{"".join(badge_items)}</div>',
+        f'<div class="repo-card__heat"><div class="repo-card__heat-bar" style="width: {heat_percent}%"></div></div>',
         _render_topic_tags(saved.get("topics", [])),
         '<div class="repo-card__grid">',
         *section_html,

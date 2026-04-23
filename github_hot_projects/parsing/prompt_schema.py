@@ -15,11 +15,9 @@ SCAN_MIN_STAR_SPEC = TOOL_PARAM_SCHEMA["scan_star_range"]["min_star"]
 SCAN_MAX_STAR_SPEC = TOOL_PARAM_SCHEMA["scan_star_range"]["max_star"]
 BATCH_GROWTH_THRESHOLD_SPEC = TOOL_PARAM_SCHEMA["batch_check_growth"]["growth_threshold"]
 BATCH_TIME_WINDOW_SPEC = TOOL_PARAM_SCHEMA["batch_check_growth"]["time_window_days"]
-BATCH_FORCE_REFRESH_SPEC = TOOL_PARAM_SCHEMA["batch_check_growth"]["force_refresh"]
 RANK_TOP_N_SPEC = TOOL_PARAM_SCHEMA["rank_candidates"]["top_n"]
 RANK_NEW_PROJECT_DAYS_SPEC = TOOL_PARAM_SCHEMA["rank_candidates"]["new_project_days"]
-TRENDING_SINCE_SPEC = TOOL_PARAM_SCHEMA["fetch_trending"]["since"]
-TRENDING_INCLUDE_ALL_PERIODS_SPEC = TOOL_PARAM_SCHEMA["fetch_trending"]["include_all_periods"]
+TRENDING_RANGE_SPEC = TOOL_PARAM_SCHEMA["fetch_trending"]["trending_range"]
 
 # Prompt 展示层 schema：用于生成 markdown 语义表并注入系统提示词。
 PROMPT_PARAMETER_SCHEMA = [
@@ -83,18 +81,18 @@ PROMPT_PARAMETER_SCHEMA = [
         "examples": ["综合榜", "新项目榜"],
     },
     {
-        "name": "since",
-        "type": "enum(daily|weekly|monthly)",
-        "default": TRENDING_SINCE_SPEC["default"],
-        "description": "查看 Trending 时使用的时间范围。",
-        "examples": ["今日热门", "本周 Trending", "本月 Trending"],
+        "name": "trending_range",
+        "type": "enum(daily|weekly|monthly|all)",
+        "default": TRENDING_RANGE_SPEC["default"],
+        "description": "查看 Trending 时使用的时间范围。all 表示同时抓取日榜、周榜、月榜。",
+        "examples": ["今日热门", "本周 Trending", "本月 Trending", "全部时段"],
     },
     {
         "name": "force_refresh",
         "type": "bool",
-        "default": BATCH_FORCE_REFRESH_SPEC["default"],
-        "description": "强制实时刷新，跳过已有缓存与差值。",
-        "examples": ["实时热榜", "强制刷新"],
+        "default": "False",
+        "description": "强制实时刷新，全量更新 DB 快照（仅综合热榜生效）。",
+        "examples": ["实时刷新一下", "按当前数据重算", "实时热榜"],
     },
     {
         "name": "repo",
@@ -102,13 +100,6 @@ PROMPT_PARAMETER_SCHEMA = [
         "default": "必填时由用户指定",
         "description": "目标仓库，格式为 owner/repo。",
         "examples": ["vllm-project/vllm"],
-    },
-    {
-        "name": "include_all_periods",
-        "type": "bool",
-        "default": TRENDING_INCLUDE_ALL_PERIODS_SPEC["default"],
-        "description": "是否同时抓取日榜、周榜、月榜。通常只在榜单补源时启用。",
-        "examples": ["把日榜周榜月榜都补进来"],
     },
 ]
 

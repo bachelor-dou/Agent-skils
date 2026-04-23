@@ -175,6 +175,62 @@ class TestReportEndpoints:
             resp = client.get("/api/reports/nonexistent.md/html")
             assert resp.status_code == 404
 
+    def test_delete_report_success(self, client, tmp_path):
+        """DELETE /api/reports/{name} 应删除本地文件。"""
+        report_file = tmp_path / "2026-04-14.md"
+        report_file.write_text("# 测试报告\n\nhello")
+
+        with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
+            # 先确认文件存在
+            resp = client.get("/api/reports/2026-04-14.md/html")
+            assert resp.status_code == 200
+
+            # 删除报告
+            resp = client.delete("/api/reports/2026-04-14.md")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["deleted"] == "2026-04-14.md"
+            assert "已删除" in data["message"]
+
+            # 删除后文件不存在
+            assert not report_file.exists()
+
+            # 再次访问应返回 404
+            resp = client.get("/api/reports/2026-04-14.md/html")
+            assert resp.status_code == 404
+
+    def test_delete_report_not_found(self, client, tmp_path):
+        """删除不存在的报告应返回 404。"""
+        with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
+            resp = client.delete("/api/reports/nonexistent.md")
+            assert resp.status_code == 404
+
+    def test_delete_report_invalid_name_rejected(self, client, tmp_path):
+        """非法报告名称应返回 400 或不被处理。"""
+        with patch("github_hot_projects.api_server.REPORT_DIR", str(tmp_path)):
+            # 不以 .md 结尾
+            resp = client.delete("/api/reports/report.txt")
+            assert resp.status_code == 400
+
+            # 直接调用 delete_report 函数测试路径注入防护
+            from github_hot_projects.api_server import delete_report
+            from fastapi import HTTPException
+
+            # 包含路径遍历
+            try:
+                import asyncio
+                asyncio.run(delete_report("../secret.md"))
+                assert False, "应抛出 HTTPException"
+            except HTTPException as e:
+                assert e.status_code == 400
+
+            # 包含斜杠
+            try:
+                asyncio.run(delete_report("subdir/report.md"))
+                assert False, "应抛出 HTTPException"
+            except HTTPException as e:
+                assert e.status_code == 400
+
 
 class TestStatusEndpoint:
     def test_status_includes_session_ttl(self, client):

@@ -746,6 +746,24 @@ async def get_report_html(name: str):
     )
 
 
+@app.delete("/api/reports/{name}")
+async def delete_report(name: str):
+    """删除指定报告（本地文件）。"""
+    # 安全检查：防止路径注入
+    if not name.endswith(".md") or "/" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="无效的报告名称")
+
+    report_path = os.path.join(REPORT_DIR, name)
+    if not os.path.exists(report_path):
+        raise HTTPException(status_code=404, detail="报告不存在")
+
+    try:
+        os.remove(report_path)
+        return {"message": f"报告 {name} 已删除", "deleted": name}
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
     """清除指定会话（释放内存）。"""

@@ -94,7 +94,7 @@
         下面这些是当前可识别的常用参数，你可以直接把条件写进一句话里（不用写参数名）。
       </p>
       <p class="usage-help-note">
-        增长统计窗口和新项目创建窗口彼此独立，可同时指定；含“实时/当前/现在”语义会触发实时刷新。实时路径仅落 desc，非实时与定时更新会全量更新 DB。
+        增长统计窗口和新项目创建窗口彼此独立，可同时指定；含"实时/当前/现在/最新/强制刷新"语义会触发实时刷新。实时刷新会全量更新 DB，非实时榜单只写描述字段，定时更新脚本会全量更新。
       </p>
       <div class="usage-help-grid">
         <article class="usage-help-item">
@@ -907,21 +907,55 @@
 
     function renderReports(reports) {
       if (!reports.length) {
-        reportListEl.innerHTML = '<div class="empty">当前还没有日报。你可以点击“生成综合热榜”看看效果。</div>';
+        reportListEl.innerHTML = '<div class="empty">当前还没有日报。你可以点击"生成综合热榜"看看效果。</div>';
         return;
       }
 
       reportListEl.innerHTML = reports.map((report) => {
         return `
-          <a class="report-card" href="${getReportHtmlUrl(report.name)}" target="_blank" rel="noopener">
-            <strong>${escapeHtml(report.name)}</strong>
-            <div class="report-meta">
-              <span>${formatReportTime(report.modified_at)}</span>
-              <span>${formatSize(report.size)}</span>
-            </div>
-          </a>
+          <div class="report-card-wrapper">
+            <a class="report-card" href="${getReportHtmlUrl(report.name)}" target="_blank" rel="noopener">
+              <strong>${escapeHtml(report.name)}</strong>
+              <div class="report-meta">
+                <span>${formatReportTime(report.modified_at)}</span>
+                <span>${formatSize(report.size)}</span>
+              </div>
+            </a>
+            <button type="button" class="report-delete-btn" data-report="${escapeHtml(report.name)}" title="删除报告" aria-label="删除报告">
+              <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M6 6H14M6 6V14C6 15.1046 6.89543 16 8 16H12C13.1046 16 14 15.1046 14 14V6M6 6H4M14 6H16M9 9V12M11 9V12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
         `;
       }).join("");
+
+      // 绑定删除按钮事件
+      reportListEl.querySelectorAll(".report-delete-btn").forEach(function(btn) {
+        btn.addEventListener("click", async function(e) {
+          e.stopPropagation();
+          e.preventDefault();
+          const reportName = btn.getAttribute("data-report");
+          if (!reportName) return;
+
+          const confirmed = window.confirm("确定要删除报告 " + reportName + " 吗？\n删除后将无法恢复。");
+          if (!confirmed) return;
+
+          btn.disabled = true;
+          try {
+            const resp = await fetch("/api/reports/" + encodeURIComponent(reportName), { method: "DELETE" });
+            if (!resp.ok) {
+              const data = await resp.json().catch(() => ({}));
+              throw new Error(data.detail || "删除失败");
+            }
+            // 刷新报告列表
+            loadReports();
+          } catch(err) {
+            window.alert("删除失败: " + err.message);
+            btn.disabled = false;
+          }
+        });
+      });
     }
 
     function enhanceReply(text) {

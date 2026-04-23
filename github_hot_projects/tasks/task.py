@@ -333,7 +333,7 @@ class CalcGrowthTask(Task):
         pending_created_at = self._ctx["pending_created_at"]
         growth_threshold = self._ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
         use_checkpoint = self._ctx.get("use_checkpoint", True)
-        update_db = self._ctx.get("update_db", False)
+        can_write_db = self._ctx.get("can_write_db", False)
 
         _, growth, current_star = result
         created_at = pending_created_at.get(self.full_name, "")
@@ -358,7 +358,7 @@ class CalcGrowthTask(Task):
             self._ctx["completed_since_save"][0] += 1
 
         if growth >= 0:
-            if update_db:
+            if can_write_db:
                 update_db_project(db_projects, self.full_name, current_star, self.repo_item)
             if growth >= growth_threshold:
                 _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
@@ -406,8 +406,9 @@ def _submit_growth_tasks(
     """
     db_projects = db.get("projects", {})
     growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
-    force_refresh = bool(growth_ctx.get("force_refresh", False))
-    use_checkpoint = bool(growth_ctx.get("use_checkpoint", not force_refresh))
+    use_realtime_growth = bool(growth_ctx.get("use_realtime_growth", False))
+    can_write_db = bool(growth_ctx.get("can_write_db", False))
+    use_checkpoint = bool(growth_ctx.get("use_checkpoint", not use_realtime_growth))
 
     checkpoint = {} if not use_checkpoint else _load_checkpoint()
     growth_ctx["checkpoint"] = checkpoint
@@ -445,10 +446,11 @@ def _submit_growth_tasks(
 
     time_window = growth_ctx.get("time_window_days", TIME_WINDOW_DAYS)
     window_specified = bool(growth_ctx.get("window_specified", True))
-    is_comprehensive = growth_ctx.get("new_project_days") is None
+    is_hot_new = bool(growth_ctx.get("is_hot_new", False))
     db_age = get_db_age_days(db)
 
-    if is_comprehensive and not window_specified:
+    # 综合榜未指定窗口时，自动采用 DB 年龄窗口
+    if not is_hot_new and not window_specified:
         if db_age is not None and db_age > 0:
             time_window = db_age
             growth_ctx["time_window_days"] = time_window
@@ -456,7 +458,12 @@ def _submit_growth_tasks(
 
     growth_ctx["effective_time_window_days"] = time_window
 
-    if is_comprehensive:
+    # 判断能否走 DB 差值
+    if is_hot_new:
+        # 新项目榜：始终实时计算，不走 DB 差值
+        can_use_db_diff = False
+    else:
+        # 综合榜：根据窗口匹配判断
         if window_specified:
             can_use_db_diff = bool(
                 db.get("valid", False)
@@ -465,25 +472,20 @@ def _submit_growth_tasks(
             )
         else:
             can_use_db_diff = bool(db.get("valid", False))
-    else:
-        # 新项目榜仅依赖仓库级 refreshed_at 与窗口精确匹配（不依赖全局 date）。
-        can_use_db_diff = True
 
-    if not force_refresh:
+    # 只在允许 DB 差值且非实时模式时，才尝试走 DB 差值
+    if can_use_db_diff and not use_realtime_growth:
         for full_name in list(pending.keys()):
             info = pending[full_name]
             current_star = info["star"]
             created_at = info.get("created_at", "")
 
-            if can_use_db_diff and full_name in db_projects:
+            if full_name in db_projects:
                 project_age = _project_refresh_age_days(db_projects[full_name])
-                if is_comprehensive:
-                    project_ok = (
-                        project_age == time_window
-                        and is_project_same_batch(db_projects[full_name], db)
-                    )
-                else:
-                    project_ok = project_age == time_window
+                project_ok = (
+                    project_age == time_window
+                    and is_project_same_batch(db_projects[full_name], db)
+                )
 
                 if project_ok:
                     saved_star = db_projects[full_name].get("star", 0)
@@ -494,8 +496,9 @@ def _submit_growth_tasks(
                     if growth >= growth_threshold:
                         _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
                     del pending[full_name]
-    else:
-        logger.info("强制刷新模式：跳过 checkpoint 和 DB 差值，全部走实时增长估算。")
+
+    if use_realtime_growth:
+        logger.info("实时计算模式：跳过 checkpoint 和 DB 差值，全部走实时增长估算。")
 
     if use_checkpoint and checkpoint_dirty:
         _save_checkpoint(checkpoint)

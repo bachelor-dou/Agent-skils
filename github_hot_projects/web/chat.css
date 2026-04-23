@@ -862,6 +862,48 @@ textarea:focus {
   font-size: 12px;
 }
 
+/* 报告卡片包装器 + 删除按钮 */
+.report-card-wrapper {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.report-card-wrapper .report-card {
+  flex: 1;
+  min-width: 0;
+}
+
+.report-delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(185, 28, 28, 0.18);
+  color: #b91c1c;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+  flex-shrink: 0;
+}
+
+.report-delete-btn:hover {
+  background: rgba(254, 202, 202, 0.45);
+  border-color: rgba(185, 28, 28, 0.35);
+}
+
+.report-delete-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.report-delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .empty {
   padding: 22px 18px;
   border-radius: 18px;

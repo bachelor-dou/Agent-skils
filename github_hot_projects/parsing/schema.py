@@ -40,7 +40,6 @@ TOOL_PARAM_SCHEMA: dict[str, dict] = {
         "growth_threshold": {"type": "int", "min": 0, "default": STAR_GROWTH_THRESHOLD},
         "time_window_days": {"type": "int", "min": 1, "default": TIME_WINDOW_DAYS},
         "new_project_days": {"type": "int", "min": 1, "default": None},
-        "force_refresh": {"type": "bool", "default": False},
     },
     "rank_candidates": {
         "mode": {
@@ -74,12 +73,11 @@ TOOL_PARAM_SCHEMA: dict[str, dict] = {
         "repo": {"type": "str", "default": None},
     },
     "fetch_trending": {
-        "since": {
+        "trending_range": {
             "type": "enum",
-            "choices": ["daily", "weekly", "monthly"],
+            "choices": ["daily", "weekly", "monthly", "all"],
             "default": "weekly",
         },
-        "include_all_periods": {"type": "bool", "default": False},
     },
 }
 
@@ -201,8 +199,7 @@ TOOL_SCHEMAS = [
                 "【批量增长筛选】对 search_hot_projects/scan_star_range 收集的候选仓库批量计算 star 增长，"
                 "筛选满足阈值的候选。通常在搜索/扫描之后、排序之前调用。"
                 "不适合查询单个项目。"
-                "支持 time_window_days（自定义增长统计窗口）、new_project_days（按创建时间前置过滤）、"
-                "force_refresh（跳过缓存强制实时估算）等参数。"
+                "支持 time_window_days（自定义增长统计窗口）、new_project_days（按创建时间前置过滤）等参数。"
             ),
             "parameters": {
                 "type": "object",
@@ -227,14 +224,6 @@ TOOL_SCHEMAS = [
                             "增长统计窗口（天）。计算最近N天的star增长量。"
                             "例如用户说'近10天热榜'则传 10。与 new_project_days（创建时间过滤）完全独立。"
                         ),
-                    },
-                    "force_refresh": {
-                        "type": "boolean",
-                        "description": (
-                            "是否强制实时刷新。true=不走checkpoint/growth_cache/DB差值，"
-                            "直接重新估算增长并刷新数据库。默认false。"
-                        ),
-                        "default": False,
                     },
                 },
             },
@@ -347,19 +336,15 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "since": {
+                    "trending_range": {
                         "type": "string",
-                        "enum": ["daily", "weekly", "monthly"],
-                        "description": "时间范围，直接浏览 Trending 时默认 weekly",
-                        "default": "weekly",
-                    },
-                    "include_all_periods": {
-                        "type": "boolean",
+                        "enum": ["daily", "weekly", "monthly", "all"],
                         "description": (
-                            "为 true 时抓取 daily、weekly、monthly 三个 Trending 维度并按仓库去重汇总。"
-                            "适合综合排名和新项目排名的候选补充阶段。"
+                            "Trending 时间范围："
+                            "- daily=今日榜，weekly=本周榜（默认），monthly=本月榜"
+                            "- all=抓取三档并去重汇总，用于综合榜/新项目榜候选补充"
                         ),
-                        "default": False,
+                        "default": "weekly",
                     },
                 },
             },

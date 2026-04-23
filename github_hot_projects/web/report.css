@@ -129,6 +129,52 @@ h1 {
   box-shadow: 0 12px 22px rgba(24, 52, 78, 0.12);
 }
 
+/* 删除报告按钮样式 */
+.toolbar-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 42px;
+  width: 100%;
+  padding: 0 16px;
+  border-radius: 18px;
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  color: var(--brand);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(24, 52, 78, 0.12);
+  box-shadow: 0 8px 18px rgba(24, 52, 78, 0.08);
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+  cursor: pointer;
+}
+
+.toolbar-link:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 22px rgba(24, 52, 78, 0.12);
+}
+
+.toolbar-link--danger {
+  color: #b91c1c;
+  border-color: rgba(185, 28, 28, 0.25);
+}
+
+.toolbar-link--danger:hover {
+  background: rgba(254, 202, 202, 0.45);
+}
+
+.toolbar-link--danger .toolbar-link__icon {
+  background: linear-gradient(135deg, #b91c1c, #dc2626);
+}
+
+.toolbar-link:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .toolbar-link__icon {
   display: inline-flex;
   align-items: center;
@@ -382,14 +428,62 @@ h1 {
 }
 
 .content .repo-card {
-  margin: 16px 0 32px;
-  padding: 20px;
-  border-radius: 26px;
+  position: relative;
+  counter-increment: repo-counter;
+  margin: 24px 0 36px;
+  padding: 24px 20px 20px;
+  border-radius: 28px;
   background:
-    radial-gradient(circle at top right, rgba(248, 216, 176, 0.22), transparent 28%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(246, 250, 243, 0.94));
-  border: 1px solid rgba(24, 52, 78, 0.10);
-  box-shadow: 0 16px 42px rgba(24, 52, 78, 0.10);
+    radial-gradient(circle at top right, rgba(248, 216, 176, 0.28), transparent 35%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(246, 250, 243, 0.96));
+  border: 1px solid rgba(24, 52, 78, 0.08);
+  box-shadow:
+    0 20px 50px rgba(24, 52, 78, 0.12),
+    0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.content .repo-card:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 28px 60px rgba(24, 52, 78, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+}
+
+/* 排名徽章 */
+.content .repo-card__rank {
+  position: absolute;
+  top: -12px;
+  left: 20px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), #f0a040);
+  color: #fff;
+  font-weight: 800;
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 16px rgba(215, 137, 57, 0.35);
+  z-index: 1;
+}
+
+/* 热度指示条 */
+.content .repo-card__heat {
+  height: 5px;
+  margin: 12px 0 16px;
+  border-radius: 3px;
+  background: rgba(24, 52, 78, 0.08);
+  overflow: hidden;
+}
+
+.content .repo-card__heat-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #f0a040, var(--accent));
+  transition: width 300ms ease;
 }
 
 .content .repo-card__stats {
@@ -500,7 +594,7 @@ h1 {
 
 .content .repo-card__grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-top: 16px;
 }
@@ -511,6 +605,26 @@ h1 {
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(24, 52, 78, 0.08);
+  transition: background 160ms ease, transform 160ms ease;
+}
+
+/* Panel 差异化边框颜色 */
+.content .repo-panel:nth-child(1) {
+  border-left: 3px solid #4a90a4;
+}
+.content .repo-panel:nth-child(2) {
+  border-left: 3px solid #7a5a2a;
+}
+.content .repo-panel:nth-child(3) {
+  border-left: 3px solid #5a8a5a;
+}
+.content .repo-panel:nth-child(4) {
+  border-left: 3px solid #8a5a8a;
+}
+
+.content .repo-panel:hover {
+  background: rgba(255, 255, 255, 0.88);
+  transform: translateY(-1px);
 }
 
 .content .repo-panel h3 {
@@ -729,8 +843,16 @@ h1 {
   }
 
   .content .repo-card {
-    padding: 16px 14px;
+    padding: 20px 16px 16px;
     border-radius: 22px;
+  }
+
+  .content .repo-card__rank {
+    top: -10px;
+    left: 16px;
+    min-width: 32px;
+    height: 32px;
+    font-size: 13px;
   }
 
   .content .repo-stat {
@@ -739,6 +861,10 @@ h1 {
 
   .content .repo-card__grid {
     grid-template-columns: 1fr;
+  }
+
+  .content .repo-panel {
+    padding: 14px 12px;
   }
 }
 
@@ -809,6 +935,19 @@ h1 {
     border-color: rgba(200, 220, 190, 0.08);
   }
 
+  .content .repo-card__rank {
+    background: linear-gradient(135deg, var(--accent), #d08030);
+    box-shadow: 0 6px 16px rgba(200, 150, 60, 0.3);
+  }
+
+  .content .repo-card__heat {
+    background: rgba(200, 220, 190, 0.1);
+  }
+
+  .content .repo-card__heat-bar {
+    background: linear-gradient(90deg, #d08030, var(--accent));
+  }
+
   .content .repo-stat {
     background: rgba(200, 220, 190, 0.05);
     border-color: rgba(200, 220, 190, 0.08);
@@ -817,6 +956,24 @@ h1 {
   .content .repo-panel {
     background: rgba(255, 255, 255, 0.04);
     border-color: rgba(200, 220, 190, 0.08);
+  }
+
+  /* 深色模式 Panel 边框颜色 */
+  .content .repo-panel:nth-child(1) {
+    border-left-color: #5a90a4;
+  }
+  .content .repo-panel:nth-child(2) {
+    border-left-color: #a08050;
+  }
+  .content .repo-panel:nth-child(3) {
+    border-left-color: #6a9a6a;
+  }
+  .content .repo-panel:nth-child(4) {
+    border-left-color: #a060a0;
+  }
+
+  .content .repo-panel:hover {
+    background: rgba(255, 255, 255, 0.08);
   }
 
   .content .repo-panel p {

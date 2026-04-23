@@ -124,10 +124,10 @@ def _ensure_project_record(
     current_star: int,
     repo_item: dict,
     *,
-    allow_snapshot_refresh: bool,
+    can_write_db: bool,
 ) -> dict:
     """确保 DB 中存在仓库记录；仅在允许时刷新快照字段。"""
-    if allow_snapshot_refresh:
+    if can_write_db:
         update_db_project(db_projects, full_name, current_star, repo_item)
         project = db_projects.setdefault(full_name, {})
         project.setdefault("desc_level", "")
@@ -175,7 +175,7 @@ def _write_candidate_brief_desc(
     raw_repos: dict[str, dict],
     db_projects: dict[str, dict],
     *,
-    allow_snapshot_refresh: bool,
+    can_write_db: bool,
 ) -> int:
     """为候选仓库补充 LLM 简述（brief）并写入 DB 的 desc 字段。"""
     if not candidate_map:
@@ -193,7 +193,7 @@ def _write_candidate_brief_desc(
             full_name,
             current_star,
             repo_item,
-            allow_snapshot_refresh=allow_snapshot_refresh,
+            can_write_db=can_write_db,
         )
 
         existing_desc = (project.get("desc") or "").strip()
@@ -580,21 +580,15 @@ def tool_check_repo_growth(
         meets_threshold = growth >= STAR_GROWTH_THRESHOLD
         growth_warning = ""
 
-    # LLM 生成项目描述（README 浓缩摘要），优先复用 DB 中已有描述
+    # 单仓库查询：不读 DB desc，始终实时抓取并生成描述
     html_url = repo_item.get("html_url", f"https://github.com/{repo}")
-    cached_desc = ""
-    if db:
-        cached_desc = db.get("projects", {}).get(repo, {}).get("desc", "")
-    if cached_desc:
-        description = cached_desc
-    else:
-        repo_info = {
-            "short_desc": repo_item.get("description", ""),
-            "language": repo_item.get("language", ""),
-            "topics": repo_item.get("topics", []),
-            "readme_url": f"{html_url}#readme",
-        }
-        description = call_llm_describe(repo, repo_info, html_url, detail_level="detailed")
+    repo_info = {
+        "short_desc": repo_item.get("description", ""),
+        "language": repo_item.get("language", ""),
+        "topics": repo_item.get("topics", []),
+        "readme_url": f"{html_url}#readme",
+    }
+    description = call_llm_describe(repo, repo_info, html_url, detail_level="detailed")
 
     return {
         "repo": repo,
@@ -628,7 +622,15 @@ def tool_batch_check_growth(
 
     使用 TokenWorkerPool + CalcGrowthTask 并行计算。
     当 new_project_days 指定时，先按创建时间筛选新项目，只对新项目计算增长。
-    当 force_refresh=True 时，跳过 checkpoint/DB 差值并走实时估算，并允许刷新 DB 快照。
+
+    增长计算策略：
+    - 综合榜：未指定窗口用DB年龄窗口+DB差值；指定窗口匹配DB用差值；不匹配用实时
+    - 新项目榜：始终实时计算（因为新项目DB无历史数据）
+    - force_refresh=True：强制实时计算
+
+    DB写入权限（can_write_db）：
+    - 只有 force_refresh=True 或定时脚本才能刷新DB快照
+    - 其他场景只读不写（包括新项目榜）
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
@@ -636,7 +638,7 @@ def tool_batch_check_growth(
         growth_threshold: 增长阈值
         new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
         time_window_days: 增长统计窗口（天）
-        force_refresh:    是否强制实时刷新（不复用 DB 与缓存）
+        force_refresh:    用户明确说"强制刷新/实时热榜"时为True，允许刷新DB
         window_specified: 调用方是否显式指定了 time_window_days
     """
     from datetime import timedelta
@@ -647,16 +649,23 @@ def tool_batch_check_growth(
             "growth_threshold": growth_threshold,
             "new_project_days": new_project_days,
             "time_window_days": time_window_days,
-            "force_refresh": force_refresh,
         },
     )
     growth_threshold = validated.get("growth_threshold", STAR_GROWTH_THRESHOLD)
     new_project_days = validated.get("new_project_days")
     time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
-    force_refresh = validated.get("force_refresh", False)
+    # force_refresh 不在 schema 中，由 agent 内部传递，跳过验证
     window_specified = bool(window_specified)
-    effective_force_refresh = force_refresh or time_window_days != TIME_WINDOW_DAYS
-    allow_snapshot_refresh = force_refresh
+
+    # 新项目榜始终实时计算；综合榜根据窗口匹配决定
+    is_hot_new = new_project_days is not None
+    if is_hot_new:
+        use_realtime_growth = True  # 新项目榜：始终实时
+    else:
+        use_realtime_growth = force_refresh or (window_specified and time_window_days != TIME_WINDOW_DAYS)
+
+    # DB写入权限：只有用户说"强制刷新"才允许写
+    can_write_db = force_refresh
 
     # 构建 raw_repos 格式
     raw_repos: dict[str, dict] = {}
@@ -708,7 +717,7 @@ def tool_batch_check_growth(
         logger.info(f"created_at 补全: API 获取 {api_fetched_count} 个")
 
     seeded_count = 0
-    if allow_snapshot_refresh:
+    if can_write_db:
         for fn, info in raw_repos.items():
             repo_item = info.get("repo_item", {})
             if info.get("created_at") and not repo_item.get("created_at"):
@@ -756,11 +765,12 @@ def tool_batch_check_growth(
             "db_projects": db.get("projects", {}),
             "candidate_map": candidate_map,
             "growth_threshold": growth_threshold,
-            "force_refresh": effective_force_refresh,
-            "update_db": allow_snapshot_refresh,
+            "use_realtime_growth": use_realtime_growth,
+            "can_write_db": can_write_db,
             "window_specified": window_specified,
             "time_window_days": time_window_days,
-            "use_checkpoint": (not effective_force_refresh) and window_specified,
+            "is_hot_new": is_hot_new,
+            "use_checkpoint": (not use_realtime_growth) and window_specified,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
@@ -782,10 +792,10 @@ def tool_batch_check_growth(
         candidate_map,
         raw_repos,
         db_projects,
-        allow_snapshot_refresh=allow_snapshot_refresh,
+        can_write_db=can_write_db,
     )
 
-    db_updated = bool(allow_snapshot_refresh or brief_desc_written > 0)
+    db_updated = bool(can_write_db or brief_desc_written > 0)
     effective_time_window = growth_ctx.get("effective_time_window_days", time_window_days)
 
     return {
@@ -796,7 +806,7 @@ def tool_batch_check_growth(
         "unresolved_sampling_count": growth_ctx["unresolved_count"][0],
         "skipped_by_creation_time": skipped_count,
         "threshold": growth_threshold,
-        "force_refresh": effective_force_refresh,
+        "use_realtime_growth": use_realtime_growth,
         "db_updated": db_updated,
         "seeded_snapshot_count": seeded_count,
         "brief_desc_written": brief_desc_written,
@@ -849,8 +859,7 @@ def tool_rank_candidates(
         prefiltered_new_project_days=prefiltered_new_project_days,
     )[:top_n]
 
-    if mode == "hot_new" and db is not None and persist_db:
-        save_db(db)
+    # 注意: DB 保存逻辑在 agent.py 中统一处理，此处不直接调用 save_db
 
     ranked = []
     for i, (name, info) in enumerate(top, 1):
@@ -888,25 +897,34 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
     owner, repo_name = parts
 
     existing = str(saved.get("desc", "") or "").strip()
+    desc_level = (saved.get("desc_level") or "").strip().lower()
 
+    # 只有 detailed desc 才能直接使用
+    if existing and desc_level == "detailed":
+        return {
+            "repo": repo,
+            "description": existing,
+            "source": "DB缓存(detailed)",
+        }
+
+    # brief desc 或无 desc，需要重新获取（但不写入 DB，因为这是其他通道）
     if token_mgr is None:
         html_url = f"https://github.com/{repo}"
         desc = call_llm_describe(repo, saved, html_url, detail_level="detailed")
-        if desc and repo in db_projects:
-            db_projects[repo]["desc"] = desc
-            db_projects[repo]["desc_level"] = "detailed"
+        # 注意：其他通道不写入 DB，只返回结果
         if desc:
             return {
                 "repo": repo,
                 "description": desc,
                 "source": "LLM生成",
+                "note": "描述已生成但未写入DB（其他通道只读不写）",
             }
         if existing:
             return {
                 "repo": repo,
                 "description": existing,
-                "source": "DB缓存(回退)",
-                "warning": "未提供 token_mgr，描述生成失败后回退到 DB 缓存。",
+                "source": "DB缓存(brief回退)",
+                "warning": "DB缓存为 brief desc，建议通过榜单任务重新生成 detailed desc。",
             }
         return {
             "repo": repo,
@@ -921,7 +939,7 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
                 "repo": repo,
                 "description": existing,
                 "source": "DB缓存(API失败回退)",
-                "warning": "实时 GitHub API 信息获取失败，已回退为 DB 缓存描述。",
+                "warning": "实时 GitHub API 信息获取失败，回退为 DB 缓存（可能是 brief desc）。",
             }
         return {
             "error": f"未找到仓库: {repo}（可能不存在或为私有仓库）",
@@ -978,26 +996,13 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
 
     desc = call_llm_describe(repo, repo_info, html_url, detail_level="detailed")
 
-    project_record = db_projects.setdefault(repo, {})
-    if repo_item.get("description"):
-        project_record["short_desc"] = repo_item.get("description", "")[:500]
-    if repo_item.get("topics"):
-        project_record["topics"] = repo_item.get("topics", [])
-    project_record["readme_url"] = f"{html_url}#readme"
-    if readme.get("sha"):
-        project_record["readme_sha"] = readme.get("sha")
-
+    # 其他通道完全不写 DB（只读不写，包括元数据）
     if desc:
-        project_record["desc"] = desc
-        project_record["desc_level"] = "detailed"
-    elif existing:
-        project_record.setdefault("desc", existing)
-        project_record.setdefault("desc_level", saved.get("desc_level", "") or "")
         return {
             "repo": repo,
-            "description": existing,
-            "source": "DB缓存(LLM失败回退)",
-            "warning": "实时上下文已拉取，但 LLM 生成失败，已回退为 DB 缓存描述。",
+            "description": desc,
+            "source": "LLM生成",
+            "note": "其他通道只读不写DB",
             "context_sources": {
                 "repo_api": True,
                 "readme_excerpt": bool(readme),
@@ -1005,12 +1010,12 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
                 "commits": len(commits),
             },
         }
-
-    if not desc:
+    elif existing:
         return {
             "repo": repo,
-            "description": "描述生成失败",
-            "source": "LLM生成(API增强上下文)",
+            "description": existing,
+            "source": "DB缓存(LLM失败回退)",
+            "warning": "实时上下文已拉取，但 LLM 生成失败，回退为 DB 缓存（可能是 brief desc）。",
             "context_sources": {
                 "repo_api": True,
                 "readme_excerpt": bool(readme),
@@ -1021,8 +1026,8 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
 
     return {
         "repo": repo,
-        "description": desc,
-        "source": "LLM生成(API增强上下文)",
+        "description": "描述生成失败",
+        "source": "LLM生成",
         "context_sources": {
             "repo_api": True,
             "readme_excerpt": bool(readme),
@@ -1076,52 +1081,37 @@ def tool_get_db_info(db: dict, repo: str | None = None) -> dict:
 
 
 def tool_fetch_trending(
-    since: str = "weekly",
-    include_all_periods: bool = False,
+    trending_range: str = "weekly",
 ) -> dict:
     """
     Tool 9: 获取 GitHub Trending 仓库列表。
 
-    两种使用路径：
-      路径 1 — 直接展示：用户问 Trending 上有什么，默认返回 weekly
-      路径 2 — 候选补充：可抓取 daily / weekly / monthly 三档并去重后加入候选池
+    参数说明：
+      - "daily"   : 今日热门榜
+      - "weekly"  : 本周热门榜（默认）
+      - "monthly" : 本月热门榜
+      - "all"     : 抓取三档（daily/weekly/monthly）并去重汇总，用于候选池补充
 
-    Args:
-        since:           时间范围 ("daily" | "weekly" | "monthly")，默认 weekly
-        include_all_periods:
-                         为 True 时抓取 daily / weekly / monthly 三档并去重汇总
+    使用场景：
+      - 用户查看 Trending → 默认 "weekly"
+      - 综合榜/新项目榜候选补充 → 使用 "all"
+      - 用户指定"日榜/周榜/月榜" → 对应 "daily"/"weekly"/"monthly"
     """
     from .github_trending import fetch_trending, fetch_trending_all
 
     validated = validate_tool_args(
         "fetch_trending",
         {
-            "since": since,
-            "include_all_periods": include_all_periods,
+            "trending_range": trending_range,
         },
     )
-    normalized_since = validated.get("since", "weekly")
-    include_all_periods = validated.get("include_all_periods", False)
-    if include_all_periods:
-        logger.info(
-            "[Tool fetch_trending] include_all_periods=true，实际抓取周期: daily/weekly/monthly（since=%s 仅作兼容参数保留）。",
-            normalized_since,
-        )
-        repos = fetch_trending_all()
-    else:
-        logger.info(
-            "[Tool fetch_trending] include_all_periods=false，仅抓取周期: %s",
-            normalized_since,
-        )
-        repos = fetch_trending(since=normalized_since)
+    trending_range = validated.get("trending_range", "weekly")
 
     period_label = {"daily": "今日增长", "weekly": "本周增长", "monthly": "本月增长"}
 
-    # 用 LLM 批量浓缩描述（最多70字），失败时回退截断
-    from .common.llm import batch_condense_descriptions
-    condensed = batch_condense_descriptions(repos, max_chars=70)
-
-    if include_all_periods:
+    if trending_range == "all":
+        logger.info("[Tool fetch_trending] trending_range=all，抓取三档并去重")
+        repos = fetch_trending_all()
         display_repos = [
             {
                 "full_name": r["full_name"],
@@ -1129,13 +1119,33 @@ def tool_fetch_trending(
                 "forks": r["forks"],
                 "periods": r.get("periods", []),
                 "stars_by_period": r.get("stars_by_period", {}),
-                "description": condensed[i],
+                "description": r.get("description", ""),
                 "language": r["language"],
             }
-            for i, r in enumerate(repos)
+            for r in repos
         ]
+        # 用 LLM 批量浓缩描述
+        from .common.llm import batch_condense_descriptions
+        condensed = batch_condense_descriptions(repos, max_chars=70)
+        for i, r in enumerate(display_repos):
+            r["description"] = condensed[i]
+
+        return {
+            "repos": display_repos,
+            "count": len(display_repos),
+            "trending_range": "all",
+            "periods": ["daily", "weekly", "monthly"],
+            "_raw_repos": repos,
+        }
     else:
-        growth_field = period_label.get(normalized_since, "增长")
+        logger.info(f"[Tool fetch_trending] trending_range={trending_range}，仅抓取该周期")
+        repos = fetch_trending(since=trending_range)
+
+        # 用 LLM 批量浓缩描述
+        from .common.llm import batch_condense_descriptions
+        condensed = batch_condense_descriptions(repos, max_chars=70)
+
+        growth_field = period_label.get(trending_range, "增长")
         display_repos = [
             {
                 "full_name": r["full_name"],
@@ -1148,16 +1158,10 @@ def tool_fetch_trending(
             for i, r in enumerate(repos)
         ]
 
-    result = {
-        "repos": display_repos,
-        "count": len(display_repos),
-        "include_all_periods": include_all_periods,
-        "_raw_repos": repos,  # 内部使用
-    }
-    if include_all_periods:
-        result["periods"] = ["daily", "weekly", "monthly"]
-    else:
-        result["since"] = normalized_since
-
-    return result
+        return {
+            "repos": display_repos,
+            "count": len(display_repos),
+            "trending_range": trending_range,
+            "_raw_repos": repos,
+        }
 

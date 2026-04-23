@@ -208,7 +208,7 @@ class DiscoveryPipeline:
         logger.info("[Pipeline]   范围扫描补充: %d 个, 累计 %d 个", len(scan_repos), len(all_repos))
 
         logger.info("[Pipeline] Step 1c: Trending 补源（daily+weekly+monthly）")
-        trending_result = tool_fetch_trending(include_all_periods=True)
+        trending_result = tool_fetch_trending(trending_range="all")
         trending_repos = trending_result.pop("_raw_repos", [])
         added = 0
         for repo in trending_repos:

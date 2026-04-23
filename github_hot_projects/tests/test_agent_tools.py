@@ -23,7 +23,7 @@ class TestToolCheckRepoGrowth:
         }
 
     def test_single_repo_always_realtime_estimate(self, mock_token_mgr):
-        """单仓库查询始终走实时估算，不走 DB 差值法。"""
+        """单仓库查询始终走实时估算，不走 DB 差值法。desc_level 为 detailed 才能使用缓存。"""
         from github_hot_projects.agent_tools import tool_check_repo_growth
 
         refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -31,7 +31,7 @@ class TestToolCheckRepoGrowth:
             "valid": True,
             "date": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d"),
             "projects": {
-                "org/repo": {"star": 4800, "desc": "已有描述", "refreshed_at": refreshed_at},
+                "org/repo": {"star": 4800, "desc": "已有详细描述", "desc_level": "detailed", "refreshed_at": refreshed_at},
             },
         }
 
@@ -41,7 +41,7 @@ class TestToolCheckRepoGrowth:
 
         assert result["growth"] == 200
         assert "二分法" in result["method"]
-        assert result["description"] == "已有描述"
+        assert result["description"] == "已有详细描述"
 
     def test_stale_project_falls_back_to_estimate(self, mock_token_mgr):
         """仓库 refreshed_at 过旧 → 不走 DB 差值法，回退到二分法。"""
@@ -120,6 +120,7 @@ class TestToolBatchCheckGrowth:
         ]
 
     def test_custom_window_generates_brief_desc_without_snapshot_refresh(self, mock_token_mgr):
+        """指定非默认窗口时使用实时计算，生成 brief 描述但不刷新 DB 快照。"""
         from github_hot_projects.agent_tools import tool_batch_check_growth
 
         repos = self._repo_input()
@@ -144,7 +145,7 @@ class TestToolBatchCheckGrowth:
                     )
 
         mock_update_db.assert_not_called()
-        assert result["force_refresh"] is True
+        assert result["use_realtime_growth"] is True  # 指定窗口导致实时计算
         assert result["brief_desc_written"] == 1
         assert result["db_updated"] is True
         assert db["projects"]["org/repo"]["desc"] == "LLM简述"
@@ -313,10 +314,10 @@ class TestToolGetDBInfo:
 
 class TestToolDescribeProject:
     def test_describe_with_api_enriched_llm(self, mock_token_mgr):
-        """describe_project 会优先拉取实时 API 上下文并传给 LLM。"""
+        """describe_project 拉取实时 API 上下文并传给 LLM，但完全不写 DB（其他通道只读不写）。"""
         from github_hot_projects.agent_tools import tool_describe_project
 
-        db = {"projects": {"org/repo": {"star": 5000, "desc": "旧缓存"}}}
+        db = {"projects": {"org/repo": {"star": 5000, "desc": "旧缓存", "desc_level": "brief"}}}
 
         repo_item = {
             "description": "A framework for building LLM apps",
@@ -345,9 +346,12 @@ class TestToolDescribeProject:
                             result = tool_describe_project("org/repo", db, token_mgr=mock_token_mgr)
 
         assert result["description"] == "LLM生成的综合描述"
-        assert result["source"] == "LLM生成(API增强上下文)"
-        assert db["projects"]["org/repo"]["desc"] == "LLM生成的综合描述"
-        assert db["projects"]["org/repo"]["readme_sha"] == "abc123"
+        assert result["source"] == "LLM生成"
+        assert "note" in result  # 包含"其他通道只读不写DB"的提示
+        # 其他通道完全不写 DB（包括元数据）
+        assert db["projects"]["org/repo"]["desc"] == "旧缓存"
+        assert db["projects"]["org/repo"]["desc_level"] == "brief"
+        assert "readme_sha" not in db["projects"]["org/repo"]
 
         llm_repo_info = mock_llm.call_args.args[1]
         assert llm_repo_info["readme_excerpt"] == "README 摘录"

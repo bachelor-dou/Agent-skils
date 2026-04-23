@@ -329,8 +329,9 @@ class TestCalcGrowthTask:
         assert len(pool.submitted) == 1
         assert isinstance(pool.submitted[0], CalcGrowthTask)
 
-    def test_submit_growth_tasks_hot_new_uses_project_refreshed_at_only(self, mock_token_mgr):
-        from github_hot_projects.tasks.task import _submit_growth_tasks
+    def test_submit_growth_tasks_hot_new_always_realtime(self, mock_token_mgr):
+        """新项目榜始终使用实时计算，不走 DB 差值。"""
+        from github_hot_projects.tasks.task import _submit_growth_tasks, CalcGrowthTask
 
         class DummyPool:
             def __init__(self):
@@ -340,7 +341,6 @@ class TestCalcGrowthTask:
                 self.submitted.append(task)
 
         db_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
-        refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
         raw_repos = {
             "org/repo": {
                 "star": 5000,
@@ -358,7 +358,7 @@ class TestCalcGrowthTask:
             "projects": {
                 "org/repo": {
                     "star": 4300,
-                    "refreshed_at": refreshed_at,
+                    "refreshed_at": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }
             },
         }
@@ -368,10 +368,13 @@ class TestCalcGrowthTask:
             "db_projects": db["projects"],
             "candidate_map": {},
             "growth_threshold": 500,
-            "force_refresh": False,
+            "use_realtime_growth": True,  # 新项目榜始终实时
+            "can_write_db": False,
             "window_specified": True,
             "time_window_days": 7,
             "new_project_days": 45,
+            "is_hot_new": True,  # 新项目榜标记
+            "use_checkpoint": False,  # 实时模式不使用 checkpoint
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
@@ -383,8 +386,9 @@ class TestCalcGrowthTask:
         ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
-        assert len(pool.submitted) == 0
-        assert checkpoint["org/repo"]["growth"] == 700
+        # 新项目榜必须提交实时计算任务
+        assert len(pool.submitted) == 1
+        assert isinstance(pool.submitted[0], CalcGrowthTask)
 
 
 # ──────────────────────────────────────────────────────────────
