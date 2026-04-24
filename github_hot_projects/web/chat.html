@@ -808,11 +808,29 @@
           return;
         }
 
+        // 检测是否为JSON格式（服务端偶尔可能返回JSON而非文本）
+        let displayText = event.data;
+        try {
+          const parsed = JSON.parse(event.data);
+          // 如果JSON包含confirmation_text_zh或intent_label_zh，提取文本
+          if (parsed.confirmation_text_zh) {
+            displayText = parsed.confirmation_text_zh;
+          } else if (parsed.intent_label_zh && !parsed.resolved_params) {
+            // PendingRequest格式，生成简单确认文本
+            displayText = `收到！我理解为：${parsed.intent_label_zh}。确认请回复"开始"，或直接告诉我需要修改的地方。`;
+          } else if (parsed.intent_label_zh) {
+            // ResolvedRequest格式，不应该直接返回给用户，生成提示
+            displayText = `正在执行：${parsed.intent_label_zh}`;
+          }
+        } catch (e) {
+          // 不是JSON，正常处理
+        }
+
         addMessage("agent", "", { asHtml: true, typing: false });
         const msg = messagesEl.lastElementChild;
         const body = msg.lastElementChild;
         body.className = "md-body";
-        body.innerHTML = enhanceReply(event.data);
+        body.innerHTML = enhanceReply(displayText);
         chatHistory.push({ role: "agent", content: body.innerHTML, isHtml: true });
         saveChatHistory();
       });
