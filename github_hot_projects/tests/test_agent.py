@@ -61,11 +61,10 @@ class TestArgValidation:
             "github_hot_projects.agent.tool_batch_check_growth",
             return_value={"candidates": {}, "total": 0},
         ) as mock_batch:
-            with patch("github_hot_projects.agent.save_db"):
-                agent._execute_tool("batch_check_growth", {
-                    "time_window_days": 10,
-                    "new_project_days": 20,
-                })
+            agent._execute_tool("batch_check_growth", {
+                "time_window_days": 10,
+                "new_project_days": 20,
+            })
 
         assert mock_batch.call_args.kwargs["time_window_days"] == 10
         assert mock_batch.call_args.kwargs["new_project_days"] == 20
@@ -159,8 +158,7 @@ class TestArgValidation:
         agent.state.last_search_repos = [{"full_name": "org/repo", "_raw": {}}]
 
         with patch("github_hot_projects.agent.tool_batch_check_growth", return_value={"candidates": {}, "total": 0}) as mock_batch:
-            with patch("github_hot_projects.agent.save_db"):
-                agent._execute_tool("batch_check_growth", {"time_window_days": 10})
+            agent._execute_tool("batch_check_growth", {"time_window_days": 10})
 
         assert mock_batch.call_args.kwargs["time_window_days"] == 10
 
@@ -200,49 +198,86 @@ class TestAgentStateMachine:
         assert agent.state.conversation[-1] == {"role": "assistant", "content": "直接回复"}
 
     def test_chat_requests_confirmation_before_tool_execution(self):
-        from github_hot_projects.agent import HotProjectAgent
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
-
-        with patch.object(agent, "_build_confirmation_message", return_value="收到！我理解为：综合热榜，统计近10天增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。") as mock_confirm:
-            with patch.object(agent, "_call_llm") as mock_llm:
-                reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
-
-        assert "确认请回复“开始”" in reply
-        mock_confirm.assert_called_once()
-        mock_llm.assert_not_called()
-        assert agent.state.awaiting_confirmation is True
-
-    def test_chat_executes_after_confirmation_ack(self):
-        from github_hot_projects.agent import HotProjectAgent
-
-        agent = HotProjectAgent()
-
-        with patch.object(agent, "_build_confirmation_message", return_value="收到！我理解为：综合热榜，统计近10天增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。"):
-            first_reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
-
-        assert "确认请回复“开始”" in first_reply
 
         with patch.object(
             agent,
-            "_call_llm",
-            return_value={"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
-        ) as mock_llm:
-            reply = agent.chat("开始")
+            "_build_route_pending_request",
+            return_value=PendingRequest(
+                intent_family="comprehensive_ranking",
+                intent_label_zh="综合热榜",
+                user_specified_params={"time_window_days": 10, "top_n": 100},
+                should_execute_now=True,
+                source_turn_id=1,
+            ),
+        ) as mock_route:
+            with patch.object(
+                agent,
+                "_call_llm",
+                return_value={"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
+            ) as mock_llm:
+                reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
+
+        assert reply == "这是最终结果"
+        mock_route.assert_called_once()
+        mock_llm.assert_called_once()
+        assert agent.state.awaiting_confirmation is False
+        assert mock_llm.call_args.kwargs["execution_confirmed"] is True
+
+    def test_chat_executes_after_confirmation_ack(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+
+        agent = HotProjectAgent()
+
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            side_effect=[
+                PendingRequest(
+                    intent_family="unknown",
+                    intent_label_zh="未确定请求",
+                    ambiguous_fields=["请确认这里的 10 天是增长窗口还是创建窗口"],
+                    should_execute_now=False,
+                    source_turn_id=1,
+                ),
+                PendingRequest(
+                    intent_family="comprehensive_ranking",
+                    intent_label_zh="综合热榜",
+                    user_specified_params={"time_window_days": 10, "top_n": 100},
+                    should_execute_now=True,
+                    source_turn_id=2,
+                ),
+            ],
+        ) as mock_route:
+            first_reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
+
+            assert "需要确认" in first_reply or "请确认" in first_reply
+
+            with patch.object(
+                agent,
+                "_call_llm",
+                return_value={"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
+            ) as mock_llm:
+                reply = agent.chat("10天指增长窗口")
 
         assert reply == "这是最终结果"
         assert agent.state.awaiting_confirmation is False
         assert mock_llm.call_args.kwargs["execution_confirmed"] is True
+        assert mock_route.call_count == 2
 
     def test_chat_executes_after_confirmation_ack_with_shi(self):
-        from github_hot_projects.agent import HotProjectAgent
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
-
-        with patch.object(agent, "_build_confirmation_message", return_value="收到！我理解为：Trending 本周榜。确认请回复“开始”，或直接告诉我需要修改的地方。"):
-            first_reply = agent.chat("看看本周 GitHub Trending")
-
-        assert "确认请回复“开始”" in first_reply
+        agent.state.awaiting_confirmation = True
+        agent.state.pending_request = PendingRequest(
+            intent_family="trending_only",
+            intent_label_zh="Trending 热门",
+            should_execute_now=True,
+            source_turn_id=1,
+        )
 
         with patch.object(
             agent,
@@ -255,7 +290,7 @@ class TestAgentStateMachine:
         assert agent.state.awaiting_confirmation is False
         assert mock_llm.call_args.kwargs["execution_confirmed"] is True
 
-    def test_confirmation_gate_accepts_llm_semantic_ack(self):
+    def test_confirmation_gate_accepts_short_ack(self):
         from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
@@ -263,36 +298,40 @@ class TestAgentStateMachine:
         agent.state.pending_request = PendingRequest(
             intent_family="hot_new_ranking",
             intent_label_zh="新项目热榜",
-            confirmation_text_zh="收到！我理解为：新项目热榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            should_execute_now=True,
             source_turn_id=1,
         )
 
-        with patch.object(agent, "_is_confirmation_ack_via_llm", return_value=True) as mock_semantic:
-            intercept, confirmed = agent._maybe_handle_confirmation_gate("就按这个来")
+        intercept, confirmed = agent._maybe_handle_confirmation_gate("开始")
 
         assert intercept is None
         assert confirmed is True
         assert agent.state.awaiting_confirmation is False
-        mock_semantic.assert_called_once()
 
-    def test_confirmation_ack_via_llm_supports_is_ack_field(self):
-        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+    def test_parse_pending_request_fact_check_enables_contract(self):
+        from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
-        agent.state.pending_request = PendingRequest(
-            intent_family="comprehensive_ranking",
-            intent_label_zh="综合热榜",
-            source_turn_id=1,
+        payload = json.dumps(
+            {
+                "turn_kind": "fact_check",
+                "intent_family": "repo_growth",
+                "intent_label_zh": "单仓库增长",
+                "target_repo": "org/repo",
+                "specified_params": {"repo": "org/repo"},
+                "ambiguous_fields": [],
+                "should_execute_now": True,
+                "must_call_tool_before_reply": False,
+            },
+            ensure_ascii=False,
         )
 
-        with patch.object(
-            agent,
-            "_request_llm",
-            return_value={"choices": [{"message": {"content": '{"is_ack": true}'}}]},
-        ):
-            assert agent._is_confirmation_ack_via_llm("就按这个来") is True
+        pending = agent._parse_pending_request_content(payload)
+        assert pending.turn_kind == "fact_check"
+        assert pending.must_call_tool_before_reply is True
+        assert pending.target_repo == "org/repo"
 
-    def test_confirmation_gate_skips_llm_fallback_for_modification_reply(self):
+    def test_confirmation_gate_rebuilds_pending_when_user_modifies_request(self):
         from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
@@ -300,52 +339,98 @@ class TestAgentStateMachine:
         agent.state.pending_request = PendingRequest(
             intent_family="trending_only",
             intent_label_zh="Trending 热门",
-            confirmation_text_zh="收到！我理解为：Trending 本周榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            ambiguous_fields=["请确认是周榜还是日榜"],
+            should_execute_now=False,
             source_turn_id=1,
         )
 
-        with patch.object(agent, "_is_confirmation_ack_via_llm") as mock_semantic:
-            with patch.object(agent, "_build_confirmation_message", return_value="重新确认") as mock_confirm:
-                intercept, confirmed = agent._maybe_handle_confirmation_gate("是的，并且再加上今天的")
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            return_value=PendingRequest(
+                intent_family="trending_only",
+                intent_label_zh="Trending 热门",
+                ambiguous_fields=["请确认是 weekly 还是 daily"],
+                should_execute_now=False,
+                source_turn_id=2,
+            ),
+        ) as mock_route:
+            intercept, confirmed = agent._maybe_handle_confirmation_gate("是的，并且再加上今天的")
 
-        assert intercept == "重新确认"
+        assert "需要确认" in intercept or "请确认" in intercept
         assert confirmed is False
         assert agent.state.awaiting_confirmation is True
-        mock_semantic.assert_not_called()
-        mock_confirm.assert_called_once()
+        mock_route.assert_called_once()
 
     def test_chat_reconfirms_when_user_reply_is_long_modification(self):
-        from github_hot_projects.agent import HotProjectAgent
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
 
-        with patch.object(agent, "_build_confirmation_message", side_effect=[
-            "收到！我理解为：Trending 本周榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
-            "收到！我理解为：Trending 本周榜，并补充今日榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
-        ]) as mock_confirm:
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            side_effect=[
+                PendingRequest(
+                    intent_family="trending_only",
+                    intent_label_zh="Trending 热门",
+                    ambiguous_fields=["请确认需要 weekly 还是 all"],
+                    should_execute_now=False,
+                    source_turn_id=1,
+                ),
+                PendingRequest(
+                    intent_family="trending_only",
+                    intent_label_zh="Trending 热门",
+                    user_specified_params={"trending_range": "all"},
+                    should_execute_now=True,
+                    source_turn_id=2,
+                ),
+            ],
+        ) as mock_route:
             first_reply = agent.chat("看看本周 GitHub Trending")
-            second_reply = agent.chat("是的，并且再加上今天的")
+            with patch.object(
+                agent,
+                "_call_llm",
+                return_value={"choices": [{"message": {"content": "这是最终结果", "tool_calls": []}}]},
+            ):
+                second_reply = agent.chat("是的，并且再加上今天的")
 
-        assert "本周榜" in first_reply
-        assert "补充今日榜" in second_reply
-        assert mock_confirm.call_count == 2
-        assert agent.state.awaiting_confirmation is True
+        assert "需要确认" in first_reply or "请确认" in first_reply
+        assert second_reply == "这是最终结果"
+        assert mock_route.call_count == 2
+        assert agent.state.awaiting_confirmation is False
 
     def test_chat_reconfirms_when_user_modifies_unconfirmed_request(self):
-        from github_hot_projects.agent import HotProjectAgent
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
 
-        with patch.object(agent, "_build_confirmation_message", side_effect=[
-            "收到！我理解为：综合热榜，统计近10天增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。",
-            "收到！我理解为：综合热榜，统计近10天增长，返回前50名。确认请回复“开始”，或直接告诉我需要修改的地方。",
-        ]) as mock_confirm:
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            side_effect=[
+                PendingRequest(
+                    intent_family="comprehensive_ranking",
+                    intent_label_zh="综合热榜",
+                    ambiguous_fields=["请确认 top_n 的具体值"],
+                    should_execute_now=False,
+                    source_turn_id=1,
+                ),
+                PendingRequest(
+                    intent_family="comprehensive_ranking",
+                    intent_label_zh="综合热榜",
+                    ambiguous_fields=["请确认 top_n 的具体值"],
+                    should_execute_now=False,
+                    source_turn_id=2,
+                ),
+            ],
+        ) as mock_route:
             first_reply = agent.chat("给我实时综合热榜前100名，窗口为10天")
             second_reply = agent.chat("改成前50名")
 
-        assert "前100名" in first_reply
-        assert "前50名" in second_reply
-        assert mock_confirm.call_count == 2
+        assert "需要确认" in first_reply or "请确认" in first_reply
+        assert "需要确认" in second_reply or "请确认" in second_reply
+        assert mock_route.call_count == 2
         assert agent.state.awaiting_confirmation is True
 
     def test_confirmation_gate_reconfirms_when_reply_startswith_ack_but_has_modification(self):
@@ -356,17 +441,28 @@ class TestAgentStateMachine:
         agent.state.pending_request = PendingRequest(
             intent_family="comprehensive_ranking",
             intent_label_zh="综合热榜",
-            confirmation_text_zh="收到！我理解为：综合热榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            ambiguous_fields=["请确认 top_n"],
+            should_execute_now=False,
             source_turn_id=1,
         )
 
-        with patch.object(agent, "_build_confirmation_message", return_value="重新确认") as mock_confirm:
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            return_value=PendingRequest(
+                intent_family="comprehensive_ranking",
+                intent_label_zh="综合热榜",
+                ambiguous_fields=["请确认 top_n"],
+                should_execute_now=False,
+                source_turn_id=2,
+            ),
+        ) as mock_route:
             intercept, confirmed = agent._maybe_handle_confirmation_gate("可以改成前50名")
 
-        assert intercept == "重新确认"
+        assert "需要确认" in intercept or "请确认" in intercept
         assert confirmed is False
         assert agent.state.awaiting_confirmation is True
-        mock_confirm.assert_called_once()
+        mock_route.assert_called_once()
 
     def test_chat_returns_scoped_capability_reply_for_greeting(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -521,7 +617,7 @@ class TestAgentStateHelpers:
         assert "_repos_note" in result
         assert "结果已截断" in result or "已截取前" in result
 
-    def test_build_confirmation_message_disables_thinking(self):
+    def test_build_route_pending_request_disables_thinking(self):
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -530,15 +626,34 @@ class TestAgentStateHelpers:
         with patch.object(
             agent,
             "_request_llm",
-            return_value={"choices": [{"message": {"content": "收到！我理解为：综合热榜，统计近10天的增长，返回前100名。确认请回复“开始”，或直接告诉我需要修改的地方。"}}]},
+            return_value={
+                "choices": [{
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "turn_kind": "new_request",
+                                "intent_family": "comprehensive_ranking",
+                                "intent_label_zh": "综合热榜",
+                                "specified_params": {"time_window_days": 10, "top_n": 100},
+                                "ambiguous_fields": [],
+                                "report_requested": False,
+                                "should_execute_now": True,
+                                "must_call_tool_before_reply": False,
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }]
+            },
         ) as mock_request:
-            reply = agent._build_confirmation_message()
+            pending = agent._build_route_pending_request()
 
-        assert "确认请回复“开始”" in reply
+        assert pending.intent_family == "comprehensive_ranking"
+        assert pending.should_execute_now is True
         assert mock_request.call_args.kwargs["enable_thinking"] is False
         assert mock_request.call_args.kwargs["max_tokens"] == 1024
 
-    def test_build_confirmation_message_parses_structured_pending_request(self):
+    def test_build_route_pending_request_parses_structured_pending_request(self):
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -558,7 +673,9 @@ class TestAgentStateHelpers:
                                 "specified_params": {"time_window_days": 10, "top_n": 20},
                                 "ambiguous_fields": [],
                                 "report_requested": True,
-                                "confirmation_text_zh": "收到！我理解为：综合热榜，统计近10天的增长，返回前20名，并在结果后生成报告。确认请回复“开始”，或直接告诉我需要修改的地方。",
+                                "should_execute_now": True,
+                                "must_call_tool_before_reply": False,
+                                "confirmation_text_zh": "收到！我理解为：综合热榜，统计近10天的增长，返回前20名，并在结果后生成报告。",
                             },
                             ensure_ascii=False,
                         )
@@ -566,13 +683,12 @@ class TestAgentStateHelpers:
                 }]
             },
         ):
-            reply = agent._build_confirmation_message()
+            pending = agent._build_route_pending_request()
 
-        assert "返回前20名" in reply
-        assert agent.state.pending_request is not None
-        assert agent.state.pending_request.intent_family == "comprehensive_ranking"
-        assert agent.state.pending_request.user_specified_params == {"time_window_days": 10, "top_n": 20}
-        assert agent.state.pending_request.report_requested is True
+        assert "返回前20名" in pending.confirmation_text_zh
+        assert pending.intent_family == "comprehensive_ranking"
+        assert pending.user_specified_params == {"time_window_days": 10, "top_n": 20}
+        assert pending.report_requested is True
 
     def test_parse_pending_request_ignores_structured_confirmation_text(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -616,7 +732,7 @@ class TestAgentStateHelpers:
             agent._call_llm(execution_confirmed=True)
 
         messages = mock_request.call_args.kwargs["messages"]
-        assert "[执行确认]" in messages[0]["content"]
+        assert "[执行上下文]" in messages[0]["content"]
         assert "[已确认请求]" in messages[0]["content"]
         # 新架构使用 Python 列表格式显示可用工具
         assert "search_hot_projects" in messages[0]["content"]
@@ -871,11 +987,9 @@ class TestConfirmedRequestExecution:
             "github_hot_projects.agent.tool_batch_check_growth",
             return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": True},
         ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                    agent._execute_tool("batch_check_growth", {})
+            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                agent._execute_tool("batch_check_growth", {})
 
-        mock_save.assert_not_called()
         mock_desc_save.assert_called_once_with(agent.state.db)
 
     def test_generate_report_hot_new_persists_desc_only(self):
@@ -889,11 +1003,9 @@ class TestConfirmedRequestExecution:
             "github_hot_projects.agent.tool_generate_report",
             return_value={"report_path": "reports/now.md"},
         ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                    agent._execute_tool("generate_report", {})
+            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                agent._execute_tool("generate_report", {})
 
-        mock_save.assert_not_called()
         mock_desc_save.assert_called_once_with(agent.state.db)
 
     def test_generate_report_comprehensive_writes_desc_only(self):
@@ -913,11 +1025,9 @@ class TestConfirmedRequestExecution:
             "github_hot_projects.agent.tool_generate_report",
             return_value={"report_path": "reports/now.md"},
         ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                    agent._execute_tool("generate_report", {})
+            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                agent._execute_tool("generate_report", {})
 
-        mock_save.assert_not_called()
         mock_desc_save.assert_called_once()
 
     def test_batch_check_growth_comprehensive_writes_desc_only(self):
@@ -937,11 +1047,9 @@ class TestConfirmedRequestExecution:
             "github_hot_projects.agent.tool_batch_check_growth",
             return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 7, "db_updated": True},
         ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                    agent._execute_tool("batch_check_growth", {})
+            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                agent._execute_tool("batch_check_growth", {})
 
-        mock_save.assert_not_called()
         mock_desc_save.assert_called_once()
 
     def test_batch_check_growth_hot_new_writes_desc_only(self):
@@ -961,9 +1069,7 @@ class TestConfirmedRequestExecution:
             "github_hot_projects.agent.tool_batch_check_growth",
             return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 7, "db_updated": True},
         ):
-            with patch("github_hot_projects.agent.save_db") as mock_save:
-                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                    agent._execute_tool("batch_check_growth", {})
+            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                agent._execute_tool("batch_check_growth", {})
 
-        mock_save.assert_not_called()
         mock_desc_save.assert_called_once()

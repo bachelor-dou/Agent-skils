@@ -629,6 +629,27 @@
         return "";
       }
 
+      const ambiguousFields = Array.isArray(payload.ambiguous_fields)
+        ? payload.ambiguous_fields.filter((item) => typeof item === "string" && item.trim().length > 0)
+        : [];
+      if (ambiguousFields.length > 0) {
+        const clarificationText = typeof payload.clarification_text_zh === "string"
+          ? payload.clarification_text_zh.trim()
+          : "";
+        if (clarificationText) {
+          return clarificationText;
+        }
+
+        const confirmationText = typeof payload.confirmation_text_zh === "string"
+          ? payload.confirmation_text_zh.trim()
+          : "";
+        if (confirmationText) {
+          return confirmationText;
+        }
+
+        return `我还需要确认这些点：${ambiguousFields.join("；")}。请直接补充，我会继续执行。`;
+      }
+
       const fragments = [];
       const intentLabel = typeof payload.intent_label_zh === "string" ? payload.intent_label_zh.trim() : "";
       if (intentLabel) {
@@ -662,7 +683,7 @@
         return "";
       }
 
-      return `收到！我理解为：${fragments.join("，")}。确认请回复"开始"，或直接告诉我需要修改的地方。`;
+      return `收到！我理解为：${fragments.join("，")}。如果要调整参数请直接告诉我，我会继续执行。`;
     }
 
     function normalizeAgentReplyText(rawPayload) {
@@ -688,6 +709,13 @@
       const nestedReply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
       if (nestedReply) {
         return normalizeAgentReplyText(nestedReply);
+      }
+
+      const clarificationText = typeof parsed.clarification_text_zh === "string"
+        ? parsed.clarification_text_zh.trim()
+        : "";
+      if (clarificationText) {
+        return clarificationText;
       }
 
       const confirmationText = typeof parsed.confirmation_text_zh === "string"

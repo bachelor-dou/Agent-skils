@@ -23,7 +23,7 @@ class TestToolCheckRepoGrowth:
         }
 
     def test_single_repo_always_realtime_estimate(self, mock_token_mgr):
-        """单仓库查询始终走实时估算，不走 DB 差值法。desc_level 为 detailed 才能使用缓存。"""
+        """单仓库查询始终走实时估算，并实时生成描述（不复用 DB 缓存描述）。"""
         from github_hot_projects.agent_tools import tool_check_repo_growth
 
         refreshed_at = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -37,11 +37,12 @@ class TestToolCheckRepoGrowth:
 
         with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
             with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=200):
-                result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
+                with patch("github_hot_projects.agent_tools.call_llm_describe", return_value="实时描述"):
+                    result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=db)
 
         assert result["growth"] == 200
         assert "二分法" in result["method"]
-        assert result["description"] == "已有详细描述"
+        assert result["description"] == "实时描述"
 
     def test_stale_project_falls_back_to_estimate(self, mock_token_mgr):
         """仓库 refreshed_at 过旧 → 不走 DB 差值法，回退到二分法。"""

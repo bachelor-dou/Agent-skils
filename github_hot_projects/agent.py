@@ -49,7 +49,7 @@ from .agent_tools import (
     tool_fetch_trending,
     trending_repo_to_search_repo,
 )
-from .common.db import load_db, save_db, save_db_desc_only
+from .common.db import load_db, save_db_desc_only
 from .common.token_manager import TokenManager
 from .parsing.arg_validator import validate_tool_args, log_validated_params
 from .parsing.prompt_schema import PROMPT_PARAMETER_SCHEMA_CONTEXT
@@ -64,7 +64,7 @@ MAX_TOOL_CALLS_PER_TURN = 15
 # 提示词（意图分类阶段）
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-CONFIRMATION_PROMPT = """你是GitHub热门项目助手。理解用户需求，输出结构化JSON。
+CONFIRMATION_PROMPT = """你是 GitHub 热门项目助手的路由器。你只做结构化决策，不直接面向用户闲聊。
 
 """ + PROMPT_PARAMETER_SCHEMA_CONTEXT + """
 
@@ -77,26 +77,49 @@ CONFIRMATION_PROMPT = """你是GitHub热门项目助手。理解用户需求，�
 - repo_description：单个项目功能介绍
 - db_info：数据库概览查询
 
+turn_kind（选择最匹配的一个）：
+- new_request：全新请求
+- request_modification：在已有请求上补充或修改参数
+- clarification_answer：回答上轮澄清问题
+- execution_ack：仅表示“继续/开始/确认”
+- fact_check：质疑上轮结果并要求核查事实
+- capability_query：询问助手能做什么
+- greeting：问候
+- unknown：难以归类
+
+判定规则：
+- 只有关键歧义会影响工具选择或参数语义时，ambiguous_fields 才非空。
+- 对于 fact_check，默认 should_execute_now=true，must_call_tool_before_reply=true。
+- 如果可直接执行，should_execute_now=true，ambiguous_fields 为空。
+- clarification_text_zh 只在需要澄清时输出，不要出现“确认请回复开始”。
+
 输出JSON（必须严格按此格式，不要输出其他字段）：
 {
+    "turn_kind": "消息类型",
   "intent_family": "意图类型",
   "intent_label_zh": "中文任务名",
+    "target_repo": "owner/repo 或空字符串",
   "specified_params": {"用户明确指定的参数": "值"},
   "ambiguous_fields": ["需要澄清的点，无则为空"],
     "report_requested": true,
-  "confirmation_text_zh": "收到！我理解为：……。确认请回复\"开始\"，或直接告诉修改点。"
+    "should_execute_now": true,
+    "must_call_tool_before_reply": false,
+    "confirmation_text_zh": "澄清问题文案（仅在 ambiguous_fields 非空时填写）"
 }
 
 注意：confirmation_text_zh 必须是自然语言文本，不能是JSON或其他结构化格式。
 """
 
-CONFIRMATION_ACK_PROMPT = """判断用户回复是否表示确认执行当前待确认请求。
-
-规则：
-- 用户说"可以/执行/开始/继续/就按这个来"等 → {"is_ack": true}
-- 用户补充条件、修改参数、提出问题 → {"is_ack": false}
-
-只输出JSON，无其他文字。"""
+TURN_KINDS = {
+        "new_request",
+        "request_modification",
+        "clarification_answer",
+        "execution_ack",
+        "fact_check",
+        "capability_query",
+        "greeting",
+        "unknown",
+}
 
 # ══════════════════════════════════════════════════════════════════════════════════════
 # 意图类型 + 工具映射（混合架构核心）
@@ -144,24 +167,6 @@ SUGGESTED_COLLECTION_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "keyword_ranking": {"search_hot_projects"},
 }
 
-CONFIRMATION_MODIFICATION_MARKERS = (
-    "并且",
-    "另外",
-    "再加",
-    "加上",
-    "改成",
-    "改为",
-    "改下",
-    "换成",
-    "顺便",
-    "同时",
-    "但是",
-    "不过",
-    "以及",
-)
-
-CONFIRMATION_QUESTION_MARKERS = ("?", "？", "吗", "怎么", "为何", "为什么", "是不是", "是否")
-
 INTENT_ALIASES = {
     "comprehensive": "comprehensive_ranking",
     "hot_new": "hot_new_ranking",
@@ -186,21 +191,29 @@ PARAM_DISPLAYERS = {
 
 @dataclass
 class PendingRequest:
+    turn_kind: str = "unknown"
     intent_family: str = "unknown"
     intent_label_zh: str = "未确定请求"
+    target_repo: str = ""
     user_specified_params: dict[str, object] = field(default_factory=dict)
     ambiguous_fields: list[str] = field(default_factory=list)
     confirmation_text_zh: str = ""
     report_requested: bool = False
+    should_execute_now: bool = False
+    must_call_tool_before_reply: bool = False
     source_turn_id: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "turn_kind": self.turn_kind,
             "intent_family": self.intent_family,
             "intent_label_zh": self.intent_label_zh,
+            "target_repo": self.target_repo,
             "specified_params": self.user_specified_params,
             "ambiguous_fields": self.ambiguous_fields,
             "report_requested": self.report_requested,
+            "should_execute_now": self.should_execute_now,
+            "must_call_tool_before_reply": self.must_call_tool_before_reply,
             "confirmation_text_zh": self.confirmation_text_zh,
             "source_turn_id": self.source_turn_id,
         }
@@ -208,12 +221,15 @@ class PendingRequest:
 
 @dataclass
 class ResolvedRequest:
+    turn_kind: str = "unknown"
     intent_family: str = "unknown"
     intent_label_zh: str = "未确定请求"
+    target_repo: str = ""
     resolved_params: dict[str, object] = field(default_factory=dict)
     user_specified_params: dict[str, object] = field(default_factory=dict)
     defaulted_params: dict[str, object] = field(default_factory=dict)
     report_requested: bool = False
+    must_call_tool_before_reply: bool = False
     confirmation_text_zh: str = ""
 
     def requires_full_collection(self) -> bool:
@@ -221,20 +237,26 @@ class ResolvedRequest:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "turn_kind": self.turn_kind,
             "intent_family": self.intent_family,
             "intent_label_zh": self.intent_label_zh,
+            "target_repo": self.target_repo,
             "resolved_params": self.resolved_params,
             "user_specified_params": self.user_specified_params,
             "defaulted_params": self.defaulted_params,
             "report_requested": self.report_requested,
+            "must_call_tool_before_reply": self.must_call_tool_before_reply,
             "confirmation_text_zh": self.confirmation_text_zh,
         }
 
     def to_execution_context(self) -> str:
         lines = [
             "[已确认请求]",
+            f"turn_kind={self.turn_kind}",
             f"intent_family={self.intent_family}",
             f"intent_label_zh={self.intent_label_zh}",
+            f"target_repo={self.target_repo or '未指定'}",
+            f"must_call_tool_before_reply={self.must_call_tool_before_reply}",
             f"可用工具={sorted(AVAILABLE_TOOLS_BY_INTENT.get(self.intent_family, set()))}",
             f"resolved_params={json.dumps(self.resolved_params, ensure_ascii=False, sort_keys=True)}",
         ]
@@ -296,6 +318,10 @@ class AgentState:
     pending_request: PendingRequest | None = None
     last_confirmed_request: ResolvedRequest | None = None
     current_turn_tools: set[str] = field(default_factory=set)
+    current_turn_tool_call_count: int = 0
+    current_turn_requires_tool_call: bool = False
+    active_repo: str | None = None
+    recent_verified_claims: list[dict[str, object]] = field(default_factory=list)
     # 对话记忆：历史摘要
     conversation_summary: str = ""  # 早期对话的摘要（压缩后保留）
 
@@ -358,16 +384,25 @@ class HotProjectAgent:
             return intercept_reply
 
         self.state.current_turn_tools = set()
+        self.state.current_turn_tool_call_count = 0
+        self.state.current_turn_requires_tool_call = bool(
+            execution_confirmed
+            and self.state.last_confirmed_request is not None
+            and self.state.last_confirmed_request.must_call_tool_before_reply
+        )
+        contract_hint: str | None = None
+        contract_retry_used = False
         if execution_confirmed:
             self._log_execution_overview()
 
         for step in range(MAX_TOOL_CALLS_PER_TURN):
-            response = self._call_llm(execution_confirmed=execution_confirmed)
+            response = self._call_llm(
+                execution_confirmed=execution_confirmed,
+                contract_hint=contract_hint,
+            )
             if response is None:
                 error_msg = "抱歉，LLM 调用失败，请稍后重试。"
                 self.state.conversation.append({"role": "assistant", "content": error_msg})
-                if execution_confirmed:
-                    self.state.awaiting_confirmation = True
                 return error_msg
 
             message = response.get("choices", [{}])[0].get("message", {})
@@ -378,8 +413,22 @@ class HotProjectAgent:
             if not tool_calls:
                 # LLM 直接回复用户
                 content = message.get("content", "") or ""
+                if self._violates_execution_contract(content):
+                    if not contract_retry_used:
+                        contract_retry_used = True
+                        contract_hint = (
+                            "[执行契约] 当前请求属于事实核查，必须先调用至少一个 Tool 获取事实，"
+                            "再给出回复。不要直接输出等待文案或结论。"
+                        )
+                        logger.warning("[Agent] 命中执行契约重试：本轮尚无 Tool 调用，触发强制二次规划。")
+                        continue
+                    safe_reply = self._build_contract_fallback_reply()
+                    self.state.conversation.append({"role": "assistant", "content": safe_reply})
+                    return safe_reply
                 self.state.conversation.append({"role": "assistant", "content": content})
                 return content if content else "（Agent 未生成回复，请重试或换个问法。）"
+
+            contract_hint = None
 
             # 有 Tool 调用 → 执行每个 Tool
             self.state.conversation.append({
@@ -426,6 +475,8 @@ class HotProjectAgent:
                     result = {"error": f"工具执行异常: {e}"}
                 if not (isinstance(result, dict) and result.get("error")):
                     self.state.current_turn_tools.add(tool_name)
+                    self.state.current_turn_tool_call_count += 1
+                self._remember_tool_observation(tool_name, tool_args, result)
                 try:
                     result_str = self._serialize_result(result)
                 except Exception as serialize_err:
@@ -440,15 +491,21 @@ class HotProjectAgent:
 
         return "已达到单轮最大 Tool 调用次数，请尝试简化请求。"
 
-    def _call_llm(self, execution_confirmed: bool = False) -> dict | None:
+    def _call_llm(
+        self,
+        execution_confirmed: bool = False,
+        contract_hint: str | None = None,
+    ) -> dict | None:
         """调用 LLM（带 Tool 定义）。"""
         messages = list(self.state.conversation)
         if messages and messages[0].get("role") == "system":
             extra_sections = []
             if execution_confirmed:
-                extra_sections.append("[执行确认] 用户刚刚已经确认了最新请求中的参数。请直接执行对应的 Tool 流程，不要再次做执行前确认，也不要输出泛化能力介绍。")
+                extra_sections.append("[执行上下文] 当前请求已通过路由判定可执行。请直接执行对应 Tool，不要回到“确认请回复开始”。")
             if self.state.last_confirmed_request is not None:
                 extra_sections.append(self.state.last_confirmed_request.to_execution_context())
+            if contract_hint:
+                extra_sections.append(contract_hint)
             if extra_sections:
                 messages[0] = {
                     "role": "system",
@@ -464,6 +521,66 @@ class HotProjectAgent:
             enable_thinking=False,
             thinking_budget=8192,
         )
+
+    def _violates_execution_contract(self, content: str) -> bool:
+        """执行契约：必须先调 Tool 的轮次，禁止无取证直接回复。"""
+        if not self.state.current_turn_requires_tool_call:
+            return False
+        if self.state.current_turn_tool_call_count > 0:
+            return False
+        return True
+
+    def _build_contract_fallback_reply(self) -> str:
+        """执行契约失败后的兜底回复。"""
+        repo = self.state.active_repo
+        if repo:
+            return (
+                f"为了保证准确性，我需要先调用数据工具核查 `{repo}` 的最新事实。"
+                "请直接告诉我要核查的点（如创建时间、当前 star、近7天增长），我会立即执行查询。"
+            )
+        return "为了保证准确性，我需要先调用数据工具核查。请先提供仓库名（owner/repo），我会立即执行查询。"
+
+    def _remember_tool_observation(self, tool_name: str, tool_args: dict, result: dict) -> None:
+        """记录本轮 Tool 观测结果，供后续事实核查复用。"""
+        if not isinstance(result, dict) or result.get("error"):
+            return
+
+        repo = None
+        if isinstance(tool_args, dict):
+            repo = tool_args.get("repo")
+        if not repo:
+            repo = result.get("repo")
+
+        if isinstance(repo, str) and repo:
+            self.state.active_repo = repo
+
+        if tool_name == "check_repo_growth":
+            claim = {
+                "repo": result.get("repo") or repo,
+                "created_at": result.get("created_at"),
+                "current_star": result.get("current_star"),
+                "growth": result.get("growth"),
+                "time_window_days": result.get("time_window_days"),
+                "source_tool": tool_name,
+                "turn": self.state.current_user_turn,
+            }
+            if claim.get("repo"):
+                self.state.recent_verified_claims.append(claim)
+        elif tool_name == "get_db_info" and repo:
+            info = result.get("info") if isinstance(result.get("info"), dict) else {}
+            if info:
+                self.state.recent_verified_claims.append(
+                    {
+                        "repo": repo,
+                        "created_at": info.get("created_at"),
+                        "current_star": info.get("star"),
+                        "source_tool": tool_name,
+                        "turn": self.state.current_user_turn,
+                    }
+                )
+
+        if len(self.state.recent_verified_claims) > 20:
+            self.state.recent_verified_claims = self.state.recent_verified_claims[-20:]
 
     def _request_llm(
         self,
@@ -544,40 +661,49 @@ class HotProjectAgent:
         return None
 
     def _maybe_handle_confirmation_gate(self, user_message: str) -> tuple[str | None, bool]:
-        """所有 Tool 执行前先走确认门禁。返回 (拦截回复, 是否已确认执行)。"""
+        """轻量路由门禁：仅在关键歧义时澄清，其他情况直接执行。"""
         text = (user_message or "").strip()
         if not text:
             self.state.awaiting_confirmation = False
-            return "请直接告诉我你想看的 GitHub 热门项目需求，我会先把识别到的参数发给你确认。", False
-
-        confirmation_ack = False
-        if self.state.awaiting_confirmation:
-            confirmation_ack = self._is_confirmation_ack(text)
-            if not confirmation_ack and self._should_try_llm_confirmation_ack(text):
-                confirmation_ack = self._is_confirmation_ack_via_llm(text)
-
-        if self.state.awaiting_confirmation and confirmation_ack:
-            pending = self.state.pending_request
-            if pending is not None and pending.ambiguous_fields:
-                ambiguous_text = "；".join(pending.ambiguous_fields)
-                return f"还有待确认的点：{ambiguous_text}。请先直接说明你的真实意思，我再继续。", False
-            self.state.awaiting_confirmation = False
-            if pending is not None:
-                self.state.last_confirmed_request = self._resolve_pending_request(pending)
-                self.state.pending_request = None
-            return None, True
-
-        if not self.state.awaiting_confirmation and self._is_confirmation_ack(text):
-            self.state.awaiting_confirmation = False
-            return "请先直接描述要查询的 GitHub 热门项目需求，我会先把识别到的参数发给你确认。", False
+            return "请直接告诉我你想看的 GitHub 热门项目需求。", False
 
         if self._is_capability_or_greeting(text):
             self.state.awaiting_confirmation = False
             return self._scoped_capability_reply(), False
 
-        confirm_message = self._build_confirmation_message()
-        self.state.awaiting_confirmation = True
-        return confirm_message, False
+        if self.state.awaiting_confirmation and self._is_confirmation_ack(text):
+            pending = self.state.pending_request
+            if pending is None:
+                self.state.awaiting_confirmation = False
+                return "请直接描述要查询的 GitHub 热门项目需求。", False
+            if pending.ambiguous_fields:
+                return self._render_clarification_message(pending), False
+
+            self.state.awaiting_confirmation = False
+            resolved = self._resolve_pending_request(pending)
+            self.state.last_confirmed_request = resolved
+            self.state.pending_request = None
+            self._sync_active_repo_from_resolved_request(resolved)
+            return None, True
+
+        if not self.state.awaiting_confirmation and self._is_confirmation_ack(text):
+            self.state.awaiting_confirmation = False
+            return "请先直接描述要查询的 GitHub 热门项目需求。", False
+
+        pending = self._build_route_pending_request()
+        self.state.pending_request = pending
+        self.state.last_confirmed_request = None
+
+        if pending.ambiguous_fields or not pending.should_execute_now:
+            self.state.awaiting_confirmation = True
+            return self._render_clarification_message(pending), False
+
+        self.state.awaiting_confirmation = False
+        resolved = self._resolve_pending_request(pending)
+        self.state.last_confirmed_request = resolved
+        self.state.pending_request = None
+        self._sync_active_repo_from_resolved_request(resolved)
+        return None, True
 
     @staticmethod
     def _is_confirmation_ack(message: str) -> bool:
@@ -589,10 +715,6 @@ class HotProjectAgent:
         if len(normalized) > 16:
             return False
         if any(ch.isdigit() for ch in normalized):
-            return False
-        if HotProjectAgent._contains_confirmation_question_signal(normalized):
-            return False
-        if HotProjectAgent._looks_like_modification_reply(normalized):
             return False
 
         exact_keywords = {
@@ -623,81 +745,6 @@ class HotProjectAgent:
         return False
 
     @staticmethod
-    def _contains_confirmation_question_signal(text: str) -> bool:
-        return any(token in text for token in CONFIRMATION_QUESTION_MARKERS)
-
-    @staticmethod
-    def _looks_like_modification_reply(text: str) -> bool:
-        return any(marker in text for marker in CONFIRMATION_MODIFICATION_MARKERS)
-
-    def _should_try_llm_confirmation_ack(self, message: str) -> bool:
-        """是否触发确认词 LLM 语义兜底（混合门禁）。"""
-        pending = self.state.pending_request
-        if pending is None:
-            return False
-
-        text = (message or "").strip().lower()
-        if not text:
-            return False
-
-        if len(text) > 24:
-            return False
-
-        if any(ch.isdigit() for ch in text):
-            return False
-
-        if self._contains_confirmation_question_signal(text):
-            return False
-
-        # 出现修改/补充迹象时，不走确认兜底，直接进入重新确认流程。
-        if self._looks_like_modification_reply(text):
-            return False
-
-        return True
-
-    def _is_confirmation_ack_via_llm(self, message: str) -> bool:
-        """LLM 语义兜底：判断用户是否在确认执行。"""
-        pending = self.state.pending_request
-        if pending is None:
-            return False
-
-        payload = {
-            "pending_request": pending.to_dict(),
-            "user_reply": (message or "").strip(),
-        }
-        response = self._request_llm(
-            messages=[
-                {"role": "system", "content": CONFIRMATION_ACK_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            tools=None,
-            temperature=0,
-            max_tokens=256,
-            log_prefix="[Agent-AckJudge]",
-            enable_thinking=False,
-        )
-        if response is None:
-            return False
-
-        message_payload = response.get("choices", [{}])[0].get("message", {})
-        content = (message_payload.get("content") or "").strip()
-        parsed = self._extract_json_object(content)
-        if isinstance(parsed, dict):
-            for key in ("is_ack", "is_confirmation_ack"):
-                value = parsed.get(key)
-                if isinstance(value, bool):
-                    return value
-                if isinstance(value, str):
-                    normalized = value.strip().lower()
-                    if normalized in {"true", "yes", "1"}:
-                        return True
-                    if normalized in {"false", "no", "0"}:
-                        return False
-
-        normalized = content.lower()
-        return normalized in {"true", "yes"}
-
-    @staticmethod
     def _is_capability_or_greeting(message: str) -> bool:
         """识别问候或能力范围咨询，避免 LLM 生成泛化欢迎语。"""
         text = message.strip().lower()
@@ -721,11 +768,12 @@ class HotProjectAgent:
         """固定的域内欢迎语，避免能力边界漂移。"""
         return (
             "你好！我是 GitHub 热门项目助手，可以帮你查看综合热榜、新项目热榜、Trending、"
-            "单个仓库近期增长、历史数据和报告。直接告诉我你的需求，我会先把识别到的参数发给你确认。"
+            "单个仓库近期增长、历史数据和报告。直接告诉我你的需求，我会尽量直接执行；"
+            "只有关键歧义时才会向你澄清。"
         )
 
-    def _build_confirmation_message(self) -> str:
-        """调用确认解析器，生成并缓存结构化待确认请求。"""
+    def _build_route_pending_request(self) -> PendingRequest:
+        """调用路由解析器，生成结构化请求判定。"""
         payload_messages = [
             {"role": "system", "content": CONFIRMATION_PROMPT},
             {
@@ -739,24 +787,20 @@ class HotProjectAgent:
             tools=None,
             temperature=0.1,
             max_tokens=1024,
-            log_prefix="[Agent-Confirm]",
+            log_prefix="[Agent-Route]",
             enable_thinking=False,
         )
         fallback = self._default_confirmation_message()
         if response is None:
-            self.state.last_confirmed_request = None
-            self.state.pending_request = PendingRequest(
+            return PendingRequest(
                 confirmation_text_zh=fallback,
+                ambiguous_fields=["暂时无法完成语义路由，请重试或补充关键条件"],
                 source_turn_id=self.state.current_user_turn,
             )
-            return fallback
 
         message = response.get("choices", [{}])[0].get("message", {})
         content = (message.get("content") or "").strip()
-        pending = self._parse_pending_request_content(content)
-        self.state.last_confirmed_request = None
-        self.state.pending_request = pending
-        return pending.confirmation_text_zh
+        return self._parse_pending_request_content(content)
 
     def _build_parse_context_payload(self) -> dict[str, object]:
         recent_messages = [
@@ -769,14 +813,16 @@ class HotProjectAgent:
         return {
             "current_user_turn": self.state.current_user_turn,
             "recent_dialogue": recent_messages,
+            "active_repo": self.state.active_repo,
+            "recent_verified_claims": self.state.recent_verified_claims[-5:],
             "pending_request": self.state.pending_request.to_dict() if self.state.pending_request else None,
         }
 
     @staticmethod
     def _default_confirmation_message() -> str:
         return (
-            "收到！我会先按你刚才的 GitHub 热门项目需求整理参数。"
-            "确认请回复\"开始\"，或直接告诉我需要修改的地方。"
+            "我暂时无法稳定判断你的请求路由。"
+            "请直接补充关键条件（例如仓库名、时间窗口或榜单类型），我会继续执行。"
         )
 
     @staticmethod
@@ -787,8 +833,10 @@ class HotProjectAgent:
 
         lowered = stripped.lower()
         structured_keys = (
+            '"turn_kind"',
             '"intent_family"',
             '"intent_label_zh"',
+            '"target_repo"',
             '"specified_params"',
             '"ambiguous_fields"',
             '"confirmation_text_zh"',
@@ -812,9 +860,12 @@ class HotProjectAgent:
         if not isinstance(payload, dict):
             return PendingRequest(
                 confirmation_text_zh=fallback,
+                ambiguous_fields=["我还需要确认你的具体目标（如仓库名、榜单类型或时间范围）"],
+                should_execute_now=False,
                 source_turn_id=self.state.current_user_turn,
             )
 
+        turn_kind = self._normalize_turn_kind(payload.get("turn_kind"))
         intent_family = self._normalize_intent_family(payload.get("intent_family"))
         specified_params = payload.get("specified_params")
         if not isinstance(specified_params, dict):
@@ -822,20 +873,46 @@ class HotProjectAgent:
         ambiguous_fields = payload.get("ambiguous_fields")
         if not isinstance(ambiguous_fields, list):
             ambiguous_fields = []
+        normalized_ambiguous = [str(item) for item in ambiguous_fields if str(item).strip()]
+
+        raw_target_repo = payload.get("target_repo")
+        target_repo = ""
+        if isinstance(raw_target_repo, str) and raw_target_repo.strip():
+            target_repo = raw_target_repo.strip()
+        elif isinstance(specified_params.get("repo"), str):
+            target_repo = str(specified_params.get("repo") or "").strip()
+        elif turn_kind in {"fact_check", "request_modification", "clarification_answer", "execution_ack"}:
+            target_repo = self.state.active_repo or ""
+
+        should_execute_now_raw = payload.get("should_execute_now")
+        should_execute_now = should_execute_now_raw if isinstance(should_execute_now_raw, bool) else not normalized_ambiguous
+
+        must_call_tool_raw = payload.get("must_call_tool_before_reply")
+        must_call_tool_before_reply = bool(must_call_tool_raw)
+        if turn_kind == "fact_check":
+            must_call_tool_before_reply = True
 
         pending = PendingRequest(
+            turn_kind=turn_kind,
             intent_family=intent_family,
             intent_label_zh=str(payload.get("intent_label_zh") or INTENT_LABELS[intent_family]),
+            target_repo=target_repo,
             user_specified_params=specified_params,
-            ambiguous_fields=[str(item) for item in ambiguous_fields if str(item).strip()],
+            ambiguous_fields=normalized_ambiguous,
             report_requested=bool(payload.get("report_requested")),
+            should_execute_now=should_execute_now,
+            must_call_tool_before_reply=must_call_tool_before_reply,
             source_turn_id=self.state.current_user_turn,
         )
         raw_confirmation = str(payload.get("confirmation_text_zh") or "").strip()
         if raw_confirmation and not self._looks_like_structured_confirmation_text(raw_confirmation):
             pending.confirmation_text_zh = raw_confirmation
         else:
-            pending.confirmation_text_zh = self._render_pending_request_text(pending)
+            pending.confirmation_text_zh = (
+                self._render_clarification_message(pending)
+                if pending.ambiguous_fields
+                else self._render_pending_request_text(pending)
+            )
         return pending
 
     @staticmethod
@@ -862,6 +939,13 @@ class HotProjectAgent:
         normalized = INTENT_ALIASES.get(normalized, normalized)
         return normalized if normalized in INTENT_LABELS else "unknown"
 
+    @staticmethod
+    def _normalize_turn_kind(raw_turn_kind: object) -> str:
+        if not isinstance(raw_turn_kind, str) or not raw_turn_kind.strip():
+            return "unknown"
+        normalized = raw_turn_kind.strip().lower()
+        return normalized if normalized in TURN_KINDS else "unknown"
+
     def _render_pending_request_text(self, pending: PendingRequest) -> str:
         fragments = [pending.intent_label_zh]
         for key, value in pending.user_specified_params.items():
@@ -875,30 +959,52 @@ class HotProjectAgent:
             fragments.append("结果完成后生成报告")
 
         body = "，".join(fragment for fragment in fragments if fragment)
-        if pending.ambiguous_fields:
-            ambiguous_text = "；".join(pending.ambiguous_fields)
-            body = f"{body}。另外还需要确认：{ambiguous_text}"
         if not body:
             body = "你的 GitHub 热门项目需求"
-        return f"收到！我理解为：{body}。确认请回复\"开始\"，或直接告诉我需要修改的地方。"
+        return f"收到！我理解为：{body}。我会按这个方向继续执行；如果要改参数请直接告诉我。"
+
+    def _render_clarification_message(self, pending: PendingRequest) -> str:
+        text = (pending.confirmation_text_zh or "").strip()
+        if text and "确认请回复" not in text and "回复\"开始\"" not in text:
+            return text
+
+        if pending.ambiguous_fields:
+            ambiguous_text = "；".join(pending.ambiguous_fields)
+            return f"我还需要确认这些点：{ambiguous_text}。请直接补充，我会继续执行。"
+
+        return "我还需要补充关键条件后才能执行。请直接告诉我你希望的仓库、时间窗口或榜单类型。"
 
     def _resolve_pending_request(self, pending: PendingRequest) -> ResolvedRequest:
         defaults = self._default_params_for_intent(pending.intent_family)
         resolved_params = dict(defaults)
         resolved_params.update(pending.user_specified_params)
+        if pending.target_repo and "repo" not in resolved_params:
+            resolved_params["repo"] = pending.target_repo
         defaulted_params = {
             key: value for key, value in defaults.items()
             if key not in pending.user_specified_params
         }
         return ResolvedRequest(
+            turn_kind=pending.turn_kind,
             intent_family=pending.intent_family,
             intent_label_zh=pending.intent_label_zh,
+            target_repo=pending.target_repo,
             resolved_params=resolved_params,
             user_specified_params=dict(pending.user_specified_params),
             defaulted_params=defaulted_params,
             report_requested=pending.report_requested,
+            must_call_tool_before_reply=pending.must_call_tool_before_reply,
             confirmation_text_zh=pending.confirmation_text_zh,
         )
+
+    def _sync_active_repo_from_resolved_request(self, resolved: ResolvedRequest) -> None:
+        repo = resolved.target_repo
+        if not repo:
+            raw_repo = resolved.resolved_params.get("repo")
+            if isinstance(raw_repo, str) and raw_repo.strip():
+                repo = raw_repo.strip()
+        if repo:
+            self.state.active_repo = repo
 
     @staticmethod
     def _default_params_for_intent(intent_family: str) -> dict[str, object]:
@@ -940,6 +1046,9 @@ class HotProjectAgent:
         for key, value in resolved_request.resolved_params.items():
             merged.setdefault(key, value)
 
+        if resolved_request.target_repo and name in {"check_repo_growth", "describe_project", "get_db_info"}:
+            merged.setdefault("repo", resolved_request.target_repo)
+
         # 榜单型任务：fetch_trending 使用 trending_range="all"
         if resolved_request.requires_full_collection() and name == "fetch_trending":
             merged["trending_range"] = "all"
@@ -965,11 +1074,13 @@ class HotProjectAgent:
         persistence_policy = self._persistence_policy_for_request(mode=mode_text)
 
         logger.info(
-            "[Agent] 运行参数总览: turn=%s | intent=%s(%s) | report_requested=%s | persistence_policy=%s",
+            "[Agent] 运行参数总览: turn=%s | turn_kind=%s | intent=%s(%s) | report_requested=%s | must_call_tool=%s | persistence_policy=%s",
             self.state.current_user_turn,
+            resolved_request.turn_kind,
             resolved_request.intent_family,
             resolved_request.intent_label_zh,
             resolved_request.report_requested,
+            resolved_request.must_call_tool_before_reply,
             persistence_policy,
         )
         logger.info(

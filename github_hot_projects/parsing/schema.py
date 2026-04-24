@@ -33,7 +33,7 @@ TOOL_PARAM_SCHEMA: dict[str, dict] = {
         "new_project_days": {"type": "int", "min": 1, "default": None},
     },
     "check_repo_growth": {
-        "repo": {"type": "str", "required": True},
+        "repo": {"type": "str"},
         "time_window_days": {"type": "int", "min": 1, "default": TIME_WINDOW_DAYS},
     },
     "batch_check_growth": {
@@ -66,7 +66,7 @@ TOOL_PARAM_SCHEMA: dict[str, dict] = {
         },
     },
     "describe_project": {
-        "repo": {"type": "str", "required": True},
+        "repo": {"type": "str"},
     },
     "generate_report": {},
     "get_db_info": {
