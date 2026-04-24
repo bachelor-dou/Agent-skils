@@ -171,8 +171,7 @@ TOOL_SCHEMAS = [
             "name": "check_repo_growth",
             "description": (
                 "【增长数据】查询单个仓库的 star 增长趋势：当前 star 数、近期增长量和增长率。"
-                "仅适合回答「这个项目最近涨了多少 star」「增长趋势怎么样」等增长类问题。"
-                "不适合回答「这个项目是做什么的」「支持哪些功能」等功能了解类问题（应使用 describe_project）。"
+                "适合回答「这个项目最近涨了多少 star」「增长趋势怎么样」等增长类问题。"
                 f"默认增长窗口为近{TIME_WINDOW_DAYS}天。"
             ),
             "parameters": {
@@ -277,7 +276,6 @@ TOOL_SCHEMAS = [
             "description": (
                 "【项目介绍】获取单个项目的功能介绍和详细描述（基于 README 生成 200-400 字中文摘要）。"
                 "适合回答「这个项目是做什么的」「能不能用于某场景」「支持哪些功能/CLI/平台」等功能了解类问题。"
-                "当用户问项目功能、兼容性、使用方式、适用场景时，必须优先使用此工具而非 check_repo_growth。"
             ),
             "parameters": {
                 "type": "object",
