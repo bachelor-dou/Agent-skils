@@ -175,7 +175,7 @@ class TestDB:
                 "date": "2026-04-01",
                 "valid": True,
                 "projects": {
-                    "a/repo": {"star": 10, "desc": "old", "desc_level": "brief"},
+                    "a/repo": {"star": 10, "desc": "old"},
                 },
             }
             db_file.write_text(json.dumps(baseline), encoding="utf-8")
@@ -184,7 +184,7 @@ class TestDB:
                 "date": "2099-01-01",  # desc-only 保存不应覆盖
                 "valid": False,
                 "projects": {
-                    "a/repo": {"star": 9999, "desc": "new", "desc_level": "detailed"},
+                    "a/repo": {"star": 9999, "desc": "new"},
                 },
             }
 
@@ -196,7 +196,6 @@ class TestDB:
             assert saved["valid"] is True
             assert saved["projects"]["a/repo"]["star"] == 10
             assert saved["projects"]["a/repo"]["desc"] == "new"
-            assert saved["projects"]["a/repo"]["desc_level"] == "detailed"
 
     def test_save_db_desc_only_creates_minimal_record_for_new_repo(self, tmp_path):
         db_file = tmp_path / "desc_only_new_repo.json"
@@ -212,7 +211,6 @@ class TestDB:
                         "star": 123,
                         "forks": 7,
                         "desc": "brief intro",
-                        "desc_level": "brief",
                     }
                 }
             }
@@ -223,7 +221,6 @@ class TestDB:
             assert changed == 1
             assert saved["projects"]["new/repo"] == {
                 "desc": "brief intro",
-                "desc_level": "brief",
             }
 
     def test_load_db_corrupt_json(self, tmp_path):

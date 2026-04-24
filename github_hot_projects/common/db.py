@@ -174,9 +174,9 @@ def save_db(db: dict) -> None:
 
 
 def save_db_desc_only(db: dict) -> int:
-    """仅持久化 desc 相关字段，避免刷新快照基线字段。
+    """仅持久化 desc 字段，避免刷新快照基线字段。
 
-    该函数用于实时/轻量场景：只合并 projects 下的 `desc` 与 `desc_level`，
+    该函数用于实时/轻量场景：只合并 projects 下的 `desc`，
     不更新顶层 `date`/`valid`，从而避免影响增长差值窗口判断。
 
     Returns:
@@ -205,26 +205,17 @@ def save_db_desc_only(db: dict) -> int:
                     if not isinstance(info, dict):
                         continue
 
-                    payload = {}
-                    if "desc" in info:
-                        payload["desc"] = info.get("desc", "")
-                    if "desc_level" in info:
-                        payload["desc_level"] = info.get("desc_level", "")
-
-                    if not payload:
+                    desc = info.get("desc", "")
+                    if not desc:
                         continue
 
                     existing = disk_projects.get(name)
                     if isinstance(existing, dict):
-                        has_change = False
-                        for key, value in payload.items():
-                            if existing.get(key) != value:
-                                existing[key] = value
-                                has_change = True
-                        if has_change:
+                        if existing.get("desc") != desc:
+                            existing["desc"] = desc
                             changed_projects += 1
                     else:
-                        disk_projects[name] = dict(payload)
+                        disk_projects[name] = {"desc": desc}
                         changed_projects += 1
 
                 if changed_projects == 0:

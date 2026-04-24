@@ -129,9 +129,7 @@ def _ensure_project_record(
     """确保 DB 中存在仓库记录；仅在允许时刷新快照字段。"""
     if can_write_db:
         update_db_project(db_projects, full_name, current_star, repo_item)
-        project = db_projects.setdefault(full_name, {})
-        project.setdefault("desc_level", "")
-        return project
+        return db_projects.setdefault(full_name, {})
 
     readme_url = f"https://github.com/{full_name}/blob/HEAD/README.md"
     description = repo_item.get("description") or ""
@@ -146,7 +144,6 @@ def _ensure_project_record(
             "forks": forks,
             "created_at": created_at,
             "desc": "",
-            "desc_level": "",
             "short_desc": description[:500],
             "language": language,
             "topics": topics,
@@ -165,87 +162,7 @@ def _ensure_project_record(
         project["language"] = language
     if topics and not project.get("topics"):
         project["topics"] = topics
-    if "desc_level" not in project:
-        project["desc_level"] = ""
     return project
-
-
-def _write_candidate_brief_desc(
-    candidate_map: dict[str, dict],
-    raw_repos: dict[str, dict],
-    db_projects: dict[str, dict],
-    *,
-    can_write_db: bool,
-) -> int:
-    """为候选仓库补充 LLM 简述（brief）并写入 DB 的 desc 字段。"""
-    if not candidate_map:
-        return 0
-
-    pending_payload: list[dict] = []
-    pending_names: list[str] = []
-
-    for full_name, candidate in candidate_map.items():
-        info = raw_repos.get(full_name, {})
-        repo_item = info.get("repo_item", {})
-        current_star = candidate.get("star", info.get("star", 0))
-        project = _ensure_project_record(
-            db_projects,
-            full_name,
-            current_star,
-            repo_item,
-            can_write_db=can_write_db,
-        )
-
-        existing_desc = (project.get("desc") or "").strip()
-        if existing_desc:
-            continue
-
-        short_desc = (project.get("short_desc") or repo_item.get("description") or "").strip()
-        language = project.get("language") or repo_item.get("language") or ""
-        topics = project.get("topics") or repo_item.get("topics") or []
-
-        summary_parts: list[str] = []
-        if short_desc:
-            summary_parts.append(short_desc)
-        if language:
-            summary_parts.append(f"语言: {language}")
-        if topics:
-            summary_parts.append(f"标签: {', '.join(topics[:4])}")
-        if not summary_parts:
-            summary_parts.append("暂无公开描述信息。")
-
-        pending_names.append(full_name)
-        pending_payload.append(
-            {
-                "full_name": full_name,
-                "description": "；".join(summary_parts),
-            }
-        )
-
-    if not pending_payload:
-        return 0
-
-    written = 0
-    chunk_size = 40
-    for start in range(0, len(pending_payload), chunk_size):
-        chunk_payload = pending_payload[start:start + chunk_size]
-        chunk_names = pending_names[start:start + chunk_size]
-        condensed = batch_condense_descriptions(chunk_payload, max_chars=120)
-        for idx, full_name in enumerate(chunk_names):
-            desc = (condensed[idx] if idx < len(condensed) else "").strip()
-            if not desc:
-                continue
-            project = db_projects.get(full_name)
-            if not project:
-                continue
-            project["desc"] = desc
-            project["desc_level"] = "brief"
-            written += 1
-
-    if written:
-        logger.info(f"候选简述已写入 DB: {written} 个项目。")
-
-    return written
 
 
 # ══════════════════════════════════════════════════════════════
@@ -788,14 +705,7 @@ def tool_batch_check_growth(
     finally:
         pool.shutdown()
 
-    brief_desc_written = _write_candidate_brief_desc(
-        candidate_map,
-        raw_repos,
-        db_projects,
-        can_write_db=can_write_db,
-    )
-
-    db_updated = bool(can_write_db or brief_desc_written > 0)
+    db_updated = bool(can_write_db)
     effective_time_window = growth_ctx.get("effective_time_window_days", time_window_days)
 
     return {
@@ -809,7 +719,6 @@ def tool_batch_check_growth(
         "use_realtime_growth": use_realtime_growth,
         "db_updated": db_updated,
         "seeded_snapshot_count": seeded_count,
-        "brief_desc_written": brief_desc_written,
         "time_window_days": effective_time_window,
         "requested_time_window_days": time_window_days,
     }
@@ -895,17 +804,16 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
     owner, repo_name = parts
 
     existing = str(saved.get("desc", "") or "").strip()
-    desc_level = (saved.get("desc_level") or "").strip().lower()
 
-    # 只有 detailed desc 才能直接使用
-    if existing and desc_level == "detailed":
+    # 有 desc 直接使用
+    if existing:
         return {
             "repo": repo,
             "description": existing,
-            "source": "DB缓存(detailed)",
+            "source": "DB缓存",
         }
 
-    # brief desc 或无 desc，需要重新获取（但不写入 DB，因为这是其他通道）
+    # 无 desc，需要重新获取（但不写入 DB，因为这是其他通道）
     if token_mgr is None:
         html_url = f"https://github.com/{repo}"
         desc = call_llm_describe(repo, saved, html_url, detail_level="detailed")
@@ -917,13 +825,6 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
                 "source": "LLM生成",
                 "note": "描述已生成但未写入DB（其他通道只读不写）",
             }
-        if existing:
-            return {
-                "repo": repo,
-                "description": existing,
-                "source": "DB缓存(brief回退)",
-                "warning": "DB缓存为 brief desc，建议通过榜单任务重新生成 detailed desc。",
-            }
         return {
             "repo": repo,
             "description": "描述生成失败",
@@ -932,13 +833,6 @@ def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = 
 
     repo_item = fetch_repo_info(token_mgr, owner, repo_name, token_idx=0)
     if not repo_item:
-        if existing:
-            return {
-                "repo": repo,
-                "description": existing,
-                "source": "DB缓存(API失败回退)",
-                "warning": "实时 GitHub API 信息获取失败，回退为 DB 缓存（可能是 brief desc）。",
-            }
         return {
             "error": f"未找到仓库: {repo}（可能不存在或为私有仓库）",
             "hint": "请确认仓库名，或稍后重试。",

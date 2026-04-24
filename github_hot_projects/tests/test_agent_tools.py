@@ -31,7 +31,7 @@ class TestToolCheckRepoGrowth:
             "valid": True,
             "date": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d"),
             "projects": {
-                "org/repo": {"star": 4800, "desc": "已有详细描述", "desc_level": "detailed", "refreshed_at": refreshed_at},
+                "org/repo": {"star": 4800, "desc": "已有详细描述", "refreshed_at": refreshed_at},
             },
         }
 
@@ -121,7 +121,7 @@ class TestToolBatchCheckGrowth:
         ]
 
     def test_custom_window_generates_brief_desc_without_snapshot_refresh(self, mock_token_mgr):
-        """指定非默认窗口时使用实时计算，生成 brief 描述但不刷新 DB 快照。"""
+        """指定非默认窗口时使用实时计算，不刷新 DB 快照。"""
         from github_hot_projects.agent_tools import tool_batch_check_growth
 
         repos = self._repo_input()
@@ -136,21 +136,17 @@ class TestToolBatchCheckGrowth:
             return {}
 
         with patch("github_hot_projects.agent_tools._submit_growth_tasks", side_effect=fake_submit):
-            with patch("github_hot_projects.agent_tools.batch_condense_descriptions", return_value=["LLM简述"]):
-                with patch("github_hot_projects.agent_tools.update_db_project") as mock_update_db:
-                    result = tool_batch_check_growth(
-                        mock_token_mgr,
-                        repos,
-                        db,
-                        time_window_days=10,
-                    )
+            with patch("github_hot_projects.agent_tools.update_db_project") as mock_update_db:
+                result = tool_batch_check_growth(
+                    mock_token_mgr,
+                    repos,
+                    db,
+                    time_window_days=10,
+                )
 
         mock_update_db.assert_not_called()
         assert result["use_realtime_growth"] is True  # 指定窗口导致实时计算
-        assert result["brief_desc_written"] == 1
-        assert result["db_updated"] is True
-        assert db["projects"]["org/repo"]["desc"] == "LLM简述"
-        assert db["projects"]["org/repo"]["desc_level"] == "brief"
+        assert result["db_updated"] is False
 
     def test_force_refresh_seeds_snapshot_before_growth(self, mock_token_mgr):
         from github_hot_projects.agent_tools import tool_batch_check_growth
@@ -318,7 +314,7 @@ class TestToolDescribeProject:
         """describe_project 拉取实时 API 上下文并传给 LLM，但完全不写 DB（其他通道只读不写）。"""
         from github_hot_projects.agent_tools import tool_describe_project
 
-        db = {"projects": {"org/repo": {"star": 5000, "desc": "旧缓存", "desc_level": "brief"}}}
+        db = {"projects": {"org/repo": {"star": 5000}}}
 
         repo_item = {
             "description": "A framework for building LLM apps",
@@ -350,8 +346,7 @@ class TestToolDescribeProject:
         assert result["source"] == "LLM生成"
         assert "note" in result  # 包含"其他通道只读不写DB"的提示
         # 其他通道完全不写 DB（包括元数据）
-        assert db["projects"]["org/repo"]["desc"] == "旧缓存"
-        assert db["projects"]["org/repo"]["desc_level"] == "brief"
+        assert "desc" not in db["projects"]["org/repo"]
         assert "readme_sha" not in db["projects"]["org/repo"]
 
         llm_repo_info = mock_llm.call_args.args[1]
@@ -370,7 +365,7 @@ class TestToolDescribeProject:
             result = tool_describe_project("org/repo", db, token_mgr=mock_token_mgr)
 
         assert result["description"] == "已缓存描述"
-        assert result["source"] == "DB缓存(API失败回退)"
+        assert result["source"] == "DB缓存"
 
     def test_describe_api_failure_without_cache_returns_error(self, mock_token_mgr):
         """API 失败且无缓存时返回 error，避免凭空猜测。"""

@@ -340,13 +340,6 @@ def _normalize_markdown_blocks(text: str) -> list[str]:
     return blocks
 
 
-def _is_detailed_desc(text: str) -> bool:
-    """判断描述是否为完整详细版（四字段）。"""
-    if not text:
-        return False
-    return all(f"{title}：" in text or f"{title}:" in text for title in INTRO_SECTION_TITLES)
-
-
 def _render_stat_badge(kind: str, icon_svg: str, label: str, value: str) -> str:
     return (
         f'<div class="repo-stat repo-stat--{kind}">'
@@ -470,10 +463,7 @@ def step3_generate_report(
         saved = db_projects.get(full_name, {})
         existing_desc = saved.get("desc", "")
         html_url = f"https://github.com/{full_name}"
-        desc_level = (saved.get("desc_level") or "").strip().lower()
-        if existing_desc and (desc_level == "detailed" or _is_detailed_desc(existing_desc)):
-            if desc_level != "detailed":
-                saved["desc_level"] = "detailed"
+        if existing_desc:
             desc_results[full_name] = existing_desc
         else:
             need_llm.append((idx + 1, full_name, html_url, saved))
@@ -487,7 +477,6 @@ def step3_generate_report(
                 desc_results[full_name] = desc
                 if full_name in db_projects:
                     db_projects[full_name]["desc"] = desc
-                    db_projects[full_name]["desc_level"] = "detailed"
             else:
                 desc_results.setdefault(full_name, "")
 
