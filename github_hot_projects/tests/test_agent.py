@@ -275,6 +275,23 @@ class TestAgentStateMachine:
         assert agent.state.awaiting_confirmation is False
         mock_semantic.assert_called_once()
 
+    def test_confirmation_ack_via_llm_supports_is_ack_field(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+
+        agent = HotProjectAgent()
+        agent.state.pending_request = PendingRequest(
+            intent_family="comprehensive_ranking",
+            intent_label_zh="综合热榜",
+            source_turn_id=1,
+        )
+
+        with patch.object(
+            agent,
+            "_request_llm",
+            return_value={"choices": [{"message": {"content": '{"is_ack": true}'}}]},
+        ):
+            assert agent._is_confirmation_ack_via_llm("就按这个来") is True
+
     def test_confirmation_gate_skips_llm_fallback_for_modification_reply(self):
         from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
@@ -330,6 +347,26 @@ class TestAgentStateMachine:
         assert "前50名" in second_reply
         assert mock_confirm.call_count == 2
         assert agent.state.awaiting_confirmation is True
+
+    def test_confirmation_gate_reconfirms_when_reply_startswith_ack_but_has_modification(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+
+        agent = HotProjectAgent()
+        agent.state.awaiting_confirmation = True
+        agent.state.pending_request = PendingRequest(
+            intent_family="comprehensive_ranking",
+            intent_label_zh="综合热榜",
+            confirmation_text_zh="收到！我理解为：综合热榜。确认请回复“开始”，或直接告诉我需要修改的地方。",
+            source_turn_id=1,
+        )
+
+        with patch.object(agent, "_build_confirmation_message", return_value="重新确认") as mock_confirm:
+            intercept, confirmed = agent._maybe_handle_confirmation_gate("可以改成前50名")
+
+        assert intercept == "重新确认"
+        assert confirmed is False
+        assert agent.state.awaiting_confirmation is True
+        mock_confirm.assert_called_once()
 
     def test_chat_returns_scoped_capability_reply_for_greeting(self):
         from github_hot_projects.agent import HotProjectAgent
@@ -537,6 +574,27 @@ class TestAgentStateHelpers:
         assert agent.state.pending_request.user_specified_params == {"time_window_days": 10, "top_n": 20}
         assert agent.state.pending_request.report_requested is True
 
+    def test_parse_pending_request_ignores_structured_confirmation_text(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        content = json.dumps(
+            {
+                "intent_family": "keyword_ranking",
+                "intent_label_zh": "关键词热榜",
+                "specified_params": {"categories": ["llm"]},
+                "ambiguous_fields": [],
+                "confirmation_text_zh": '{"intent_family":"keyword_ranking"}',
+            },
+            ensure_ascii=False,
+        )
+
+        pending = agent._parse_pending_request_content(content)
+
+        assert pending.intent_family == "keyword_ranking"
+        assert "收到！我理解为：" in pending.confirmation_text_zh
+        assert "关键词热榜" in pending.confirmation_text_zh
+
     def test_call_llm_appends_confirmed_request_context(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
@@ -585,6 +643,26 @@ class TestAgentStateHelpers:
         assert "对话历史摘要" in (system_messages[0].get("content") or "")
         recent_contents = [msg.get("content") for msg in agent.state.conversation[-KEEP_RECENT_MESSAGES:]]
         assert any("助手回复" in (content or "") for content in recent_contents)
+
+    def test_compress_conversation_keeps_system_prompt_after_multiple_passes(self):
+        from github_hot_projects.agent import HotProjectAgent, MAX_CONVERSATION_MESSAGES
+
+        agent = HotProjectAgent()
+
+        with patch.object(agent, "_generate_summary_with_llm", return_value="summary"):
+            for idx in range(MAX_CONVERSATION_MESSAGES + 5):
+                agent.state.conversation.append({"role": "user", "content": f"u{idx}"})
+                agent.state.conversation.append({"role": "assistant", "content": f"a{idx}"})
+            agent._compress_conversation()
+
+            for idx in range(MAX_CONVERSATION_MESSAGES + 5):
+                agent.state.conversation.append({"role": "user", "content": f"u2-{idx}"})
+                agent.state.conversation.append({"role": "assistant", "content": f"a2-{idx}"})
+            agent._compress_conversation()
+
+        system_content = (agent.state.conversation[0].get("content") or "")
+        assert "你是GitHub热门项目发现助手" in system_content
+        assert "[对话历史摘要]" in system_content
 
 
 class TestValidateToolArgs:
@@ -677,6 +755,20 @@ class TestConfirmedRequestExecution:
 
         # 应该正常执行，不返回错误
         assert "candidates" in result
+
+    def test_keyword_ranking_suggestion_does_not_require_scan_or_trending(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="keyword_ranking",
+            intent_label_zh="关键词热榜",
+            resolved_params={"categories": ["llm"]},
+        )
+        agent.state.current_turn_tools = {"search_hot_projects"}
+
+        missing = agent._check_suggested_collection_tools("batch_check_growth")
+        assert missing == []
 
     def test_batch_check_growth_injects_confirmed_request_defaults(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest

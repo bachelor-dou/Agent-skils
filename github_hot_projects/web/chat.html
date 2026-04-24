@@ -94,7 +94,7 @@
         下面这些是当前可识别的常用参数，你可以直接把条件写进一句话里（不用写参数名）。
       </p>
       <p class="usage-help-note">
-        增长统计窗口和新项目创建窗口彼此独立，可同时指定；含"实时/当前/现在/最新/强制刷新"语义会触发实时刷新。实时刷新会全量更新 DB，非实时榜单只写描述字段，定时更新脚本会全量更新。
+        增长统计窗口和新项目创建窗口彼此独立，定时更新脚本会全量更新。
       </p>
       <div class="usage-help-grid">
         <article class="usage-help-item">
@@ -146,11 +146,6 @@
           <h3>多周期汇总</h3>
           <p>默认：关闭</p>
           <p>示例：把 daily、weekly、monthly 一起汇总</p>
-        </article>
-        <article class="usage-help-item">
-          <h3>实时刷新</h3>
-          <p>默认：关闭（按意图自动判断）</p>
-          <p>示例：实时刷新一下、按当前数据重算</p>
         </article>
       </div>
       <div class="usage-help-examples">
@@ -629,6 +624,102 @@
       return true;
     }
 
+    function buildIntentSummaryFromPayload(payload) {
+      if (!payload || typeof payload !== "object") {
+        return "";
+      }
+
+      const fragments = [];
+      const intentLabel = typeof payload.intent_label_zh === "string" ? payload.intent_label_zh.trim() : "";
+      if (intentLabel) {
+        fragments.push(intentLabel);
+      }
+
+      const params = payload.specified_params && typeof payload.specified_params === "object"
+        ? payload.specified_params
+        : null;
+
+      if (params) {
+        if (Array.isArray(params.categories) && params.categories.length > 0) {
+          fragments.push(`关注方向为${params.categories.join("、")}`);
+        }
+        if (Number.isFinite(params.time_window_days)) {
+          fragments.push(`统计近${params.time_window_days}天增长`);
+        }
+        if (Number.isFinite(params.new_project_days)) {
+          fragments.push(`只看近${params.new_project_days}天内创建的项目`);
+        }
+        if (Number.isFinite(params.top_n)) {
+          fragments.push(`返回前${params.top_n}名`);
+        }
+      }
+
+      if (payload.report_requested === true) {
+        fragments.push("结果完成后生成报告");
+      }
+
+      if (!fragments.length) {
+        return "";
+      }
+
+      return `收到！我理解为：${fragments.join("，")}。确认请回复"开始"，或直接告诉我需要修改的地方。`;
+    }
+
+    function normalizeAgentReplyText(rawPayload) {
+      const rawText = typeof rawPayload === "string"
+        ? rawPayload.trim()
+        : String(rawPayload == null ? "" : rawPayload).trim();
+
+      if (!rawText) {
+        return "服务端未返回内容";
+      }
+
+      let parsed = null;
+      try {
+        parsed = JSON.parse(rawText);
+      } catch (error) {
+        return rawText;
+      }
+
+      if (!parsed || typeof parsed !== "object") {
+        return rawText;
+      }
+
+      const nestedReply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
+      if (nestedReply) {
+        return normalizeAgentReplyText(nestedReply);
+      }
+
+      const confirmationText = typeof parsed.confirmation_text_zh === "string"
+        ? parsed.confirmation_text_zh.trim()
+        : "";
+      if (confirmationText) {
+        return confirmationText;
+      }
+
+      const messageText = typeof parsed.message === "string" ? parsed.message.trim() : "";
+      if (messageText) {
+        return messageText;
+      }
+
+      const contentText = typeof parsed.content === "string" ? parsed.content.trim() : "";
+      if (contentText) {
+        return contentText;
+      }
+
+      const errorText = typeof parsed.error === "string" ? parsed.error.trim() : "";
+      if (errorText) {
+        return `请求失败：${errorText}`;
+      }
+
+      const summaryText = buildIntentSummaryFromPayload(parsed);
+      if (summaryText) {
+        return summaryText;
+      }
+
+      return rawText;
+    }
+
     function addMessage(role, text, options = {}) {
       const item = document.createElement("article");
       item.className = `message ${role}`;
@@ -804,27 +895,12 @@
       socket.addEventListener("message", (event) => {
         if (currentSessionId !== sessionId) return;
         markSessionActive(currentSessionId);
-        if (resolveActiveRequest(event.data)) {
+        const normalizedText = normalizeAgentReplyText(event.data);
+        if (resolveActiveRequest(normalizedText)) {
           return;
         }
 
-        // 检测是否为JSON格式（服务端偶尔可能返回JSON而非文本）
-        let displayText = event.data;
-        try {
-          const parsed = JSON.parse(event.data);
-          // 如果JSON包含confirmation_text_zh或intent_label_zh，提取文本
-          if (parsed.confirmation_text_zh) {
-            displayText = parsed.confirmation_text_zh;
-          } else if (parsed.intent_label_zh && !parsed.resolved_params) {
-            // PendingRequest格式，生成简单确认文本
-            displayText = `收到！我理解为：${parsed.intent_label_zh}。确认请回复"开始"，或直接告诉我需要修改的地方。`;
-          } else if (parsed.intent_label_zh) {
-            // ResolvedRequest格式，不应该直接返回给用户，生成提示
-            displayText = `正在执行：${parsed.intent_label_zh}`;
-          }
-        } catch (e) {
-          // 不是JSON，正常处理
-        }
+        const displayText = normalizedText;
 
         addMessage("agent", "", { asHtml: true, typing: false });
         const msg = messagesEl.lastElementChild;
@@ -903,7 +979,7 @@
 
       const payload = await response.json();
       markSessionActive(sessionId);
-      return payload.reply || "服务端未返回内容";
+      return normalizeAgentReplyText(payload.reply || "");
     }
 
     async function loadReports() {
