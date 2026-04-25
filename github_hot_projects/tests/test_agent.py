@@ -86,8 +86,8 @@ class TestArgValidation:
         assert mock_rank.call_args.kwargs["top_n"] == 10
         assert mock_rank.call_args.kwargs["new_project_days"] == 20
 
-    def test_rank_candidates_coerces_invalid_values(self):
-        """无效参数应被纠正为默认值。"""
+    def test_rank_candidates_returns_retryable_error_for_invalid_values(self):
+        """LLM 显式传错参数时，应返回可重试错误而不是静默纠偏。"""
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -97,12 +97,16 @@ class TestArgValidation:
             "github_hot_projects.agent.tool_rank_candidates",
             return_value={"ranked_projects": [], "_ordered_tuples": [], "total_candidates": 1, "returned": 0, "mode": "comprehensive"},
         ) as mock_rank:
-            agent._execute_tool("rank_candidates", {"top_n": -1, "mode": "bad-mode"})
+            result = agent._execute_tool("rank_candidates", {"top_n": -1, "mode": "bad-mode"})
 
-        assert mock_rank.call_args.kwargs["top_n"] == 1  # clamped to min
-        assert mock_rank.call_args.kwargs["mode"] == "comprehensive"
+        assert result["error_code"] == "invalid_arguments"
+        assert result["retryable"] is True
+        invalid_fields = {item["param"] for item in result["invalid_arguments"]}
+        assert "top_n" in invalid_fields
+        assert "mode" in invalid_fields
+        mock_rank.assert_not_called()
 
-    def test_search_coerces_invalid_project_min_star(self):
+    def test_search_returns_retryable_error_for_invalid_project_min_star(self):
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -111,10 +115,14 @@ class TestArgValidation:
             "github_hot_projects.agent.tool_search_hot_projects",
             return_value={"repos": [], "total": 0, "_raw_repos": []},
         ) as mock_search:
-            agent._execute_tool("search_hot_projects", {"project_min_star": -5, "max_pages": 0})
+            result = agent._execute_tool("search_hot_projects", {"project_min_star": -5, "max_pages": 0})
 
-        assert mock_search.call_args.kwargs["project_min_star"] >= 1
-        assert mock_search.call_args.kwargs["max_pages"] >= 1
+        assert result["error_code"] == "invalid_arguments"
+        assert result["retryable"] is True
+        invalid_fields = {item["param"] for item in result["invalid_arguments"]}
+        assert "project_min_star" in invalid_fields
+        assert "max_pages" in invalid_fields
+        mock_search.assert_not_called()
 
     def test_fetch_trending_validates_trending_range(self):
         """fetch_trending 应接受 trending_range 参数。"""
@@ -330,6 +338,62 @@ class TestAgentStateMachine:
         assert pending.turn_kind == "fact_check"
         assert pending.must_call_tool_before_reply is True
         assert pending.target_repo == "org/repo"
+
+    def test_parse_pending_request_keeps_only_canonical_params(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        payload = json.dumps(
+            {
+                "turn_kind": "new_request",
+                "intent_family": "hot_new_ranking",
+                "intent_label_zh": "新项目热榜",
+                "specified_params": {
+                    "min_stars_gain": 500,
+                    "limit": 5,
+                    "new_project_days": 10,
+                },
+                "ambiguous_fields": [],
+                "should_execute_now": True,
+            },
+            ensure_ascii=False,
+        )
+
+        pending = agent._parse_pending_request_content(payload)
+
+        assert pending.user_specified_params == {"new_project_days": 10}
+        assert pending.should_execute_now is False
+        assert any("min_stars_gain" in item for item in pending.unresolved_constraints)
+        assert any("limit" in item for item in pending.unresolved_constraints)
+
+    def test_parse_pending_request_unresolved_constraints_block_execution(self):
+        from github_hot_projects.agent import HotProjectAgent
+
+        agent = HotProjectAgent()
+        payload = json.dumps(
+            {
+                "turn_kind": "new_request",
+                "intent_family": "comprehensive_ranking",
+                "intent_label_zh": "综合热榜",
+                "specified_params": {
+                    "foo_signal": 123,
+                    "time_window_days": 7,
+                },
+                "unresolved_constraints": ["用户提到热度系数，但未给计算口径"],
+                "ambiguous_fields": [],
+                "should_execute_now": True,
+            },
+            ensure_ascii=False,
+        )
+
+        pending = agent._parse_pending_request_content(payload)
+
+        assert pending.user_specified_params == {"time_window_days": 7}
+        assert pending.should_execute_now is False
+        assert "用户提到热度系数，但未给计算口径" in pending.unresolved_constraints
+        assert any("foo_signal" in item for item in pending.unresolved_constraints)
+        assert "我还需要你确认这些参数含义" in pending.confirmation_text_zh
+        assert "foo_signal" in pending.confirmation_text_zh
 
     def test_confirmation_gate_rebuilds_pending_when_user_modifies_request(self):
         from github_hot_projects.agent import HotProjectAgent, PendingRequest
@@ -738,6 +802,38 @@ class TestAgentStateHelpers:
         assert "search_hot_projects" in messages[0]["content"]
         assert "generate_report" in messages[0]["content"]
 
+    def test_select_tools_for_llm_filters_by_intent_when_confidence_high(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="repo_info",
+            intent_label_zh="单仓库综合查询",
+            route_confidence="high",
+        )
+
+        selected = agent._select_tools_for_llm()
+        names = {
+            schema.get("function", {}).get("name")
+            for schema in selected
+            if schema.get("function", {}).get("name")
+        }
+        assert names == {"describe_project", "check_repo_growth"}
+
+    def test_select_tools_for_llm_keeps_all_when_route_confidence_low(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+        from github_hot_projects.parsing.schema import TOOL_SCHEMAS
+
+        agent = HotProjectAgent()
+        agent.state.last_confirmed_request = ResolvedRequest(
+            intent_family="repo_info",
+            intent_label_zh="单仓库综合查询",
+            route_confidence="low",
+        )
+
+        selected = agent._select_tools_for_llm()
+        assert len(selected) == len(TOOL_SCHEMAS)
+
     def test_compress_conversation_preserves_recent_messages_and_adds_summary(self):
         from github_hot_projects.agent import HotProjectAgent, KEEP_RECENT_MESSAGES, MAX_CONVERSATION_MESSAGES
 
@@ -915,8 +1011,8 @@ class TestConfirmedRequestExecution:
         assert mock_batch.call_args.kwargs["new_project_days"] == 30
         assert mock_batch.call_args.kwargs["growth_threshold"] == 400
 
-    def test_log_execution_overview_prints_full_parameter_snapshot(self):
-        """日志应包含完整参数快照，hot_new 模式应为 desc_only 策略。"""
+    def test_log_execution_overview_prints_summary_snapshot(self):
+        """日志应包含单条参数总览，hot_new 模式应为 desc_only 策略。"""
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
         agent = HotProjectAgent()
@@ -943,8 +1039,6 @@ class TestConfirmedRequestExecution:
         )
         assert "运行参数总览" in merged_logs
         assert "desc_only" in merged_logs
-        assert "运行参数(user_specified)" in merged_logs
-        assert "运行参数(resolved)" in merged_logs
         assert '"time_window_days": 10' in merged_logs
 
     def test_log_execution_overview_shows_trending_range_all(self):

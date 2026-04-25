@@ -28,7 +28,6 @@ from .common.config import (
     LLM_API_URL,
     LLM_MODEL,
     MIN_STAR_FILTER,
-    SEARCH_KEYWORDS,
     STAR_RANGE_MIN,
     STAR_RANGE_MAX,
     TIME_WINDOW_DAYS,
@@ -51,64 +50,111 @@ from .agent_tools import (
 )
 from .common.db import load_db, save_db_desc_only
 from .common.token_manager import TokenManager
-from .parsing.arg_validator import validate_tool_args, log_validated_params
-from .parsing.prompt_schema import PROMPT_PARAMETER_SCHEMA_CONTEXT
-from .parsing.schema import TOOL_SCHEMAS
+from .parsing.arg_validator import (
+    validate_tool_args,
+    validate_tool_args_strict,
+    log_validated_params,
+)
+from .parsing.route_helpers import (
+    extract_json_object,
+    looks_like_structured_confirmation_text,
+    normalize_intent_family,
+    normalize_specified_params,
+    normalize_tool_names,
+    normalize_turn_kind,
+    ordered_tool_names,
+    sanitize_confirmation_fallback,
+)
+from .parsing.schema import TOOL_PARAM_SCHEMA, TOOL_SCHEMAS
 
 logger = logging.getLogger("discover_hot")
 
 # Agent 单轮最大 Tool 调用次数（防止无限循环）
 MAX_TOOL_CALLS_PER_TURN = 15
 
+ALL_TOOL_NAMES = [
+    schema.get("function", {}).get("name")
+    for schema in TOOL_SCHEMAS
+    if schema.get("function", {}).get("name")
+]
+TOOL_SCHEMA_NAME_SET = set(ALL_TOOL_NAMES)
+TOOL_SCHEMA_BY_NAME = {
+    schema["function"]["name"]: schema
+    for schema in TOOL_SCHEMAS
+    if schema.get("function", {}).get("name")
+}
+ALL_TOOL_PARAM_NAMES = {
+    param_name
+    for schema in TOOL_PARAM_SCHEMA.values()
+    for param_name in schema.keys()
+}
+CANONICAL_ROUTE_PARAM_KEYS = sorted(ALL_TOOL_PARAM_NAMES)
+CANONICAL_ROUTE_PARAM_KEYS_TEXT = ", ".join(CANONICAL_ROUTE_PARAM_KEYS)
+
 # ══════════════════════════════════════════════════════════════════════════════════════
 # 提示词（意图分类阶段）
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-CONFIRMATION_PROMPT = """你是 GitHub 热门项目助手的路由器。你只做结构化决策，不直接面向用户闲聊。
+CONFIRMATION_PROMPT = f"""你是 GitHub 热门项目助手的轻量路由器，只输出结构化 JSON。
 
-""" + PROMPT_PARAMETER_SCHEMA_CONTEXT + """
+目标：
+1) 识别用户意图（intent_family）
+2) 抽取用户明确参数（specified_params）
+3) 仅在关键歧义时返回 ambiguous_fields
+4) 给出 suggested_tools（优先建议，不是强制流程）
 
-意图类型（选择最匹配的一个）：
-- comprehensive_ranking：综合热榜（全量候选收集，三源合一）
-- hot_new_ranking：新项目热榜（全量收集+创建时间过滤）
-- keyword_ranking：关键词热榜（只搜索指定关键词/类别，不需scan/trending）
-- trending_only：查看Trending页面
-- repo_info：单个仓库综合查询（同时返回描述和增长，默认首选）
-- repo_growth：仅查询单个仓库增长趋势（用户明确说"只问增长/增长多少"）
-- repo_description：仅查询单个项目功能介绍（用户明确说"只问功能/做什么"）
-- db_info：数据库概览查询
+意图类型（选最匹配的一项）：
+- comprehensive_ranking：综合热榜
+- hot_new_ranking：新项目热榜（创建时间过滤）
+- keyword_ranking：关键词热榜
+- trending_only：查看 Trending
+- repo_info：单仓库综合查询（默认：描述+增长）
+- repo_growth：仅增长
+- repo_description：仅介绍
+- db_info：本地 DB 查询
+- freeform_answer：基于上下文的解释/比较/质疑回复（可不调用工具）
+- unknown：无法稳定归类
 
-turn_kind（选择最匹配的一个）：
-- new_request：全新请求
-- request_modification：在已有请求上补充或修改参数
-- clarification_answer：回答上轮澄清问题
-- execution_ack：仅表示“继续/开始/确认”
-- fact_check：质疑上轮结果并要求核查事实
-- capability_query：询问助手能做什么
-- greeting：问候
-- unknown：难以归类
+turn_kind（选最匹配的一项）：
+- new_request
+- request_modification
+- clarification_answer
+- execution_ack
+- fact_check
+- capability_query
+- greeting
+- unknown
 
-判定规则：
-- 只有关键歧义会影响工具选择或参数语义时，ambiguous_fields 才非空。
-- 对于 fact_check，默认 should_execute_now=true，must_call_tool_before_reply=true。
-- 如果可直接执行，should_execute_now=true，ambiguous_fields 为空。
-- clarification_text_zh 只在需要澄清时输出，不要出现“确认请回复开始”。
+参数语义最小规则：
+- “近N天热榜/增长”优先映射为 time_window_days（增长统计窗口）
+- “近N天内创建的新项目”映射为 new_project_days（创建时间窗口）
+- repo_info 默认是综合查询；仅当用户明确说“只看增长/只看介绍”时改为单一意图
+- specified_params 只能使用 canonical key，不允许自造参数名。
+- canonical key 列表：{CANONICAL_ROUTE_PARAM_KEYS_TEXT}
+- 对无法映射的参数表达，放入 unresolved_constraints，不要放进 specified_params。
+- 当 unresolved_constraints 非空时，必须给出 confirmation_text_zh（自然语言澄清问题）。
 
-输出JSON（必须严格按此格式，不要输出其他字段）：
-{
-    "turn_kind": "消息类型",
-  "intent_family": "意图类型",
-  "intent_label_zh": "中文任务名",
-    "target_repo": "owner/repo 或空字符串",
-  "specified_params": {"用户明确指定的参数": "值"},
-  "ambiguous_fields": ["需要澄清的点，无则为空"],
-    "report_requested": true,
-    "should_execute_now": true,
-    "must_call_tool_before_reply": false,
-    "confirmation_text_zh": "澄清问题文案（仅在 ambiguous_fields 非空时填写）"
-}
+输出 JSON（仅以下字段，不要额外字段）：
+{{
+        "turn_kind": "...",
+        "intent_family": "...",
+        "intent_label_zh": "...",
+        "target_repo": "owner/repo 或空字符串",
+        "specified_params": {{}},
+        "unresolved_constraints": [],
+        "ambiguous_fields": [],
+        "suggested_tools": ["tool_name"],
+        "route_confidence": "high|medium|low",
+        "report_requested": false,
+        "should_execute_now": true,
+        "must_call_tool_before_reply": false,
+        "confirmation_text_zh": "仅在需要澄清时填写自然语言"
+}}
 
-注意：confirmation_text_zh 必须是自然语言文本，不能是JSON或其他结构化格式。
+约束：
+- 如果 ambiguous_fields 为空，should_execute_now 通常应为 true
+- fact_check 默认 should_execute_now=true 且 must_call_tool_before_reply=true
+- confirmation_text_zh 不能是 JSON
 """
 
 TURN_KINDS = {
@@ -135,6 +181,7 @@ INTENT_LABELS = {
     "repo_growth": "单仓库增长",
     "repo_description": "项目介绍",
     "db_info": "数据库查询",
+    "freeform_answer": "自由回答",
     "unknown": "未确定请求",
 }
 
@@ -157,7 +204,8 @@ AVAILABLE_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "repo_growth": {"check_repo_growth"},
     "repo_description": {"describe_project"},
     "db_info": {"get_db_info"},
-    "unknown": set(),  # 空集，LLM可自主探索
+    "freeform_answer": set(ALL_TOOL_NAMES),
+    "unknown": set(ALL_TOOL_NAMES),
 }
 
 # 榜单型意图（需要候选收集→增长计算→排名的完整流程）
@@ -177,6 +225,7 @@ INTENT_ALIASES = {
     "trending": "trending_only",
     "describe_project": "repo_description",
     "check_repo_growth": "repo_growth",
+    "freeform": "freeform_answer",
 }
 
 # 参数显示（用于生成确认文本）
@@ -199,7 +248,10 @@ class PendingRequest:
     intent_label_zh: str = "未确定请求"
     target_repo: str = ""
     user_specified_params: dict[str, object] = field(default_factory=dict)
+    unresolved_constraints: list[str] = field(default_factory=list)
     ambiguous_fields: list[str] = field(default_factory=list)
+    suggested_tools: list[str] = field(default_factory=list)
+    route_confidence: str = "medium"
     confirmation_text_zh: str = ""
     report_requested: bool = False
     should_execute_now: bool = False
@@ -213,7 +265,10 @@ class PendingRequest:
             "intent_label_zh": self.intent_label_zh,
             "target_repo": self.target_repo,
             "specified_params": self.user_specified_params,
+            "unresolved_constraints": self.unresolved_constraints,
             "ambiguous_fields": self.ambiguous_fields,
+            "suggested_tools": self.suggested_tools,
+            "route_confidence": self.route_confidence,
             "report_requested": self.report_requested,
             "should_execute_now": self.should_execute_now,
             "must_call_tool_before_reply": self.must_call_tool_before_reply,
@@ -231,6 +286,8 @@ class ResolvedRequest:
     resolved_params: dict[str, object] = field(default_factory=dict)
     user_specified_params: dict[str, object] = field(default_factory=dict)
     defaulted_params: dict[str, object] = field(default_factory=dict)
+    suggested_tools: list[str] = field(default_factory=list)
+    route_confidence: str = "medium"
     report_requested: bool = False
     must_call_tool_before_reply: bool = False
     confirmation_text_zh: str = ""
@@ -247,6 +304,8 @@ class ResolvedRequest:
             "resolved_params": self.resolved_params,
             "user_specified_params": self.user_specified_params,
             "defaulted_params": self.defaulted_params,
+            "suggested_tools": self.suggested_tools,
+            "route_confidence": self.route_confidence,
             "report_requested": self.report_requested,
             "must_call_tool_before_reply": self.must_call_tool_before_reply,
             "confirmation_text_zh": self.confirmation_text_zh,
@@ -259,8 +318,10 @@ class ResolvedRequest:
             f"intent_family={self.intent_family}",
             f"intent_label_zh={self.intent_label_zh}",
             f"target_repo={self.target_repo or '未指定'}",
+            f"route_confidence={self.route_confidence}",
             f"must_call_tool_before_reply={self.must_call_tool_before_reply}",
             f"可用工具={sorted(AVAILABLE_TOOLS_BY_INTENT.get(self.intent_family, set()))}",
+            f"suggested_tools={self.suggested_tools}",
             f"resolved_params={json.dumps(self.resolved_params, ensure_ascii=False, sort_keys=True)}",
         ]
         return "\n".join(lines)
@@ -270,35 +331,18 @@ class ResolvedRequest:
 # ══════════════════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = f"""你是GitHub热门项目发现助手。根据用户需求自主调用提供的工具完成任务。
+你以 ReAct 方式工作：先理解问题，再决定是否调用工具，基于观察继续决策，最后给出结论。
 
-工具详情已通过API tools参数传递，请参考function定义中的description和parameters。
+规则：
+1. 涉及事实数据（star、增长、创建时间、Trending）时，不要编造，优先调用工具核查。
+2. 路由提示是“优先建议”，不是硬限制；如果证据不足或工具报错，可调整工具选择。
+3. 单仓库默认优先综合查询（describe_project + check_repo_growth）；用户明确“只看增长/只看介绍”时再单工具。
+4. time_window_days=增长统计窗口；new_project_days=创建时间窗口，两者可同时存在且互不覆盖。
+5. 工具返回参数错误时，先修正后重试一次；仍失败再向用户澄清。
+6. 用户做解释/比较/质疑追问时，可直接回答；必要时再做最小化取证。
 
-## 默认配置
-- 时间窗口：{TIME_WINDOW_DAYS}天
-- 增长阈值：{STAR_GROWTH_THRESHOLD} stars
-- 综合榜Top N：{HOT_PROJECT_COUNT}
-- 新项目榜Top N：{HOT_NEW_PROJECT_COUNT}
-- 新项目窗口：{NEW_PROJECT_DAYS}天
-- 搜索类别：{list(SEARCH_KEYWORDS.keys())}
-
-## 调用流程建议（根据意图自主选择）
-| 意图 | 推荐流程 | 说明 |
-|------|----------|------|
-| comprehensive_ranking | search→scan→trending→batch→rank→report | 三源合一，全量收集 |
-| hot_new_ranking | search→scan→trending→batch→rank→report | 同上，batch/rank阶段会按new_project_days过滤 |
-| keyword_ranking | search→batch→rank→report | 只搜索指定类别，不需要scan/trending |
-| trending_only | fetch_trending | 直接获取Trending页面 |
-| repo_info | describe_project + check_repo_growth | 单仓库综合查询（默认），同时返回描述和增长 |
-| repo_growth | check_repo_growth | 仅查询单仓库增长，用户明确说"只问增长" |
-| repo_description | describe_project | 仅查询单项目功能，用户明确说"只问功能" |
-| db_info | get_db_info | 查询本地DB状态 |
-
-## 核心规则
-1. **数据真实性**：必须基于GitHub API或Trending页面，不得编造数据
-2. **报告生成**：用户要求"报告"时，排名完成后必须调用generate_report
-3. **Trending参数**：未指定→weekly，指定"日榜/周榜/月榜"→daily/weekly/monthly，候选补充→all
-4. **参数传递**：用户指定的参数（time_window_days/new_project_days等）必须传递给对应工具
-5. **单仓库查询优先级**：默认选 repo_info（综合），只有用户明确说"只问增长/只问功能"才选单一意图
+默认值：time_window_days={TIME_WINDOW_DAYS}，growth_threshold={STAR_GROWTH_THRESHOLD}，
+综合榜top_n={HOT_PROJECT_COUNT}，新项目榜top_n={HOT_NEW_PROJECT_COUNT}，新项目窗口={NEW_PROJECT_DAYS}天。
 """
 
 
@@ -353,6 +397,7 @@ class HotProjectAgent:
     """
 
     def __init__(self) -> None:
+        """Initialize agent state and seed system prompt."""
         self.state = AgentState()
         # 初始化会话，加入 System Prompt
         self.state.conversation.append({
@@ -502,12 +547,19 @@ class HotProjectAgent:
     ) -> dict | None:
         """调用 LLM（带 Tool 定义）。"""
         messages = list(self.state.conversation)
+        selected_tools = self._select_tools_for_llm()
+        selected_tool_names = [
+            schema.get("function", {}).get("name")
+            for schema in selected_tools
+            if schema.get("function", {}).get("name")
+        ]
         if messages and messages[0].get("role") == "system":
             extra_sections = []
             if execution_confirmed:
                 extra_sections.append("[执行上下文] 当前请求已通过路由判定可执行。请直接执行对应 Tool，不要回到“确认请回复开始”。")
             if self.state.last_confirmed_request is not None:
                 extra_sections.append(self.state.last_confirmed_request.to_execution_context())
+            extra_sections.append(f"[本轮工具集] {selected_tool_names}")
             if contract_hint:
                 extra_sections.append(contract_hint)
             if extra_sections:
@@ -518,13 +570,39 @@ class HotProjectAgent:
 
         return self._request_llm(
             messages=messages,
-            tools=TOOL_SCHEMAS,
+            tools=selected_tools,
             temperature=0.3,
             max_tokens=16384,
             log_prefix="[Agent]",
             enable_thinking=False,
             thinking_budget=8192,
         )
+
+    def _select_tools_for_llm(self) -> list[dict]:
+        """根据路由结果动态裁剪可用工具，保留 ReAct 自主选择空间。"""
+        resolved = self.state.last_confirmed_request
+        if resolved is None:
+            return TOOL_SCHEMAS
+
+        if resolved.route_confidence == "low":
+            return TOOL_SCHEMAS
+
+        # 自由回答/未知意图默认开放全工具，保证可扩展性
+        if resolved.intent_family in {"freeform_answer", "unknown"}:
+            return TOOL_SCHEMAS
+
+        allowed = set(AVAILABLE_TOOLS_BY_INTENT.get(resolved.intent_family, set()))
+        if not allowed:
+            return TOOL_SCHEMAS
+
+        if resolved.suggested_tools:
+            allowed.update(name for name in resolved.suggested_tools if name in TOOL_SCHEMA_NAME_SET)
+
+        if resolved.turn_kind == "fact_check":
+            allowed.update({"check_repo_growth", "get_db_info", "describe_project", "fetch_trending"})
+
+        filtered = [TOOL_SCHEMA_BY_NAME[name] for name in ALL_TOOL_NAMES if name in allowed]
+        return filtered or TOOL_SCHEMAS
 
     def _violates_execution_contract(self, content: str) -> bool:
         """执行契约：必须先调 Tool 的轮次，禁止无取证直接回复。"""
@@ -807,6 +885,7 @@ class HotProjectAgent:
         return self._parse_pending_request_content(content)
 
     def _build_parse_context_payload(self) -> dict[str, object]:
+        """Build compact context payload for the route model."""
         recent_messages = [
             {"role": msg["role"], "content": msg.get("content") or ""}
             for msg in self.state.conversation[-8:]
@@ -824,43 +903,37 @@ class HotProjectAgent:
 
     @staticmethod
     def _default_confirmation_message() -> str:
+        """Fallback clarification message when route model output is invalid."""
         return (
             "我暂时无法稳定判断你的请求路由。"
             "请直接补充关键条件（例如仓库名、时间窗口或榜单类型），我会继续执行。"
         )
 
     @staticmethod
-    def _looks_like_structured_confirmation_text(text: str) -> bool:
-        stripped = (text or "").strip()
-        if not stripped:
-            return False
+    def _normalize_ambiguous_fields(raw_ambiguous: object) -> list[str]:
+        """Normalize ambiguous field list and keep insertion order."""
+        if not isinstance(raw_ambiguous, list):
+            return []
+        values = [str(item).strip() for item in raw_ambiguous if str(item).strip()]
+        return list(dict.fromkeys(values))
 
-        lowered = stripped.lower()
-        structured_keys = (
-            '"turn_kind"',
-            '"intent_family"',
-            '"intent_label_zh"',
-            '"target_repo"',
-            '"specified_params"',
-            '"ambiguous_fields"',
-            '"confirmation_text_zh"',
-        )
-        if any(key in lowered for key in structured_keys):
-            return True
-
-        return stripped.startswith("```") or (stripped.startswith("{") and stripped.endswith("}"))
-
-    def _sanitize_confirmation_fallback(self, content: str) -> str:
-        stripped = (content or "").strip()
-        if not stripped:
-            return self._default_confirmation_message()
-        if self._looks_like_structured_confirmation_text(stripped):
-            return self._default_confirmation_message()
-        return stripped
+    @staticmethod
+    def _collect_unresolved_constraints(raw_unresolved: object, dropped_keys: list[str]) -> list[str]:
+        """Collect unresolved constraints from router output and local drops."""
+        unresolved: list[str] = []
+        if isinstance(raw_unresolved, list):
+            unresolved.extend(
+                str(item).strip()
+                for item in raw_unresolved
+                if str(item).strip()
+            )
+        unresolved.extend(f"无法映射参数名: {key}" for key in dropped_keys)
+        return list(dict.fromkeys(unresolved))
 
     def _parse_pending_request_content(self, content: str) -> PendingRequest:
-        fallback = self._sanitize_confirmation_fallback(content)
-        payload = self._extract_json_object(content)
+        """Parse route model JSON content into a normalized PendingRequest."""
+        fallback = sanitize_confirmation_fallback(content, self._default_confirmation_message())
+        payload = extract_json_object(content)
         if not isinstance(payload, dict):
             return PendingRequest(
                 confirmation_text_zh=fallback,
@@ -869,15 +942,36 @@ class HotProjectAgent:
                 source_turn_id=self.state.current_user_turn,
             )
 
-        turn_kind = self._normalize_turn_kind(payload.get("turn_kind"))
-        intent_family = self._normalize_intent_family(payload.get("intent_family"))
-        specified_params = payload.get("specified_params")
-        if not isinstance(specified_params, dict):
-            specified_params = {}
-        ambiguous_fields = payload.get("ambiguous_fields")
-        if not isinstance(ambiguous_fields, list):
-            ambiguous_fields = []
-        normalized_ambiguous = [str(item) for item in ambiguous_fields if str(item).strip()]
+        turn_kind = normalize_turn_kind(payload.get("turn_kind"), turn_kinds=TURN_KINDS)
+        intent_family = normalize_intent_family(
+            payload.get("intent_family"),
+            intent_aliases=INTENT_ALIASES,
+            intent_labels=INTENT_LABELS,
+        )
+        specified_params, dropped_param_keys, param_notes = normalize_specified_params(
+            payload.get("specified_params"),
+            allowed_param_names=ALL_TOOL_PARAM_NAMES,
+        )
+        if param_notes:
+            logger.debug("[Agent-Route] 参数归一化: %s", " | ".join(param_notes))
+
+        unresolved_constraints = self._collect_unresolved_constraints(
+            payload.get("unresolved_constraints"),
+            dropped_param_keys,
+        )
+        normalized_ambiguous = self._normalize_ambiguous_fields(payload.get("ambiguous_fields"))
+
+        suggested_tools = normalize_tool_names(
+            payload.get("suggested_tools"),
+            allowed_tool_names=TOOL_SCHEMA_NAME_SET,
+        )
+
+        route_confidence_raw = payload.get("route_confidence")
+        route_confidence = "medium"
+        if isinstance(route_confidence_raw, str):
+            normalized_conf = route_confidence_raw.strip().lower()
+            if normalized_conf in {"high", "medium", "low"}:
+                route_confidence = normalized_conf
 
         raw_target_repo = payload.get("target_repo")
         target_repo = ""
@@ -889,7 +983,11 @@ class HotProjectAgent:
             target_repo = self.state.active_repo or ""
 
         should_execute_now_raw = payload.get("should_execute_now")
-        should_execute_now = should_execute_now_raw if isinstance(should_execute_now_raw, bool) else not normalized_ambiguous
+        has_unresolved = bool(unresolved_constraints)
+        if isinstance(should_execute_now_raw, bool):
+            should_execute_now = should_execute_now_raw and not normalized_ambiguous and not has_unresolved
+        else:
+            should_execute_now = not normalized_ambiguous and not has_unresolved
 
         must_call_tool_raw = payload.get("must_call_tool_before_reply")
         must_call_tool_before_reply = bool(must_call_tool_raw)
@@ -902,55 +1000,28 @@ class HotProjectAgent:
             intent_label_zh=str(payload.get("intent_label_zh") or INTENT_LABELS[intent_family]),
             target_repo=target_repo,
             user_specified_params=specified_params,
+            unresolved_constraints=unresolved_constraints,
             ambiguous_fields=normalized_ambiguous,
+            suggested_tools=suggested_tools,
+            route_confidence=route_confidence,
             report_requested=bool(payload.get("report_requested")),
             should_execute_now=should_execute_now,
             must_call_tool_before_reply=must_call_tool_before_reply,
             source_turn_id=self.state.current_user_turn,
         )
         raw_confirmation = str(payload.get("confirmation_text_zh") or "").strip()
-        if raw_confirmation and not self._looks_like_structured_confirmation_text(raw_confirmation):
+        if raw_confirmation and not looks_like_structured_confirmation_text(raw_confirmation):
             pending.confirmation_text_zh = raw_confirmation
         else:
             pending.confirmation_text_zh = (
                 self._render_clarification_message(pending)
-                if pending.ambiguous_fields
+                if pending.ambiguous_fields or pending.unresolved_constraints
                 else self._render_pending_request_text(pending)
             )
         return pending
 
-    @staticmethod
-    def _extract_json_object(content: str) -> dict | None:
-        text = (content or "").strip()
-        if not text:
-            return None
-        for candidate in (text, text[text.find("{"):] if "{" in text else ""):
-            if not candidate:
-                continue
-            try:
-                value, _ = json.JSONDecoder().raw_decode(candidate)
-            except ValueError:
-                continue
-            if isinstance(value, dict):
-                return value
-        return None
-
-    @staticmethod
-    def _normalize_intent_family(raw_intent: object) -> str:
-        if not isinstance(raw_intent, str) or not raw_intent.strip():
-            return "unknown"
-        normalized = raw_intent.strip().lower()
-        normalized = INTENT_ALIASES.get(normalized, normalized)
-        return normalized if normalized in INTENT_LABELS else "unknown"
-
-    @staticmethod
-    def _normalize_turn_kind(raw_turn_kind: object) -> str:
-        if not isinstance(raw_turn_kind, str) or not raw_turn_kind.strip():
-            return "unknown"
-        normalized = raw_turn_kind.strip().lower()
-        return normalized if normalized in TURN_KINDS else "unknown"
-
     def _render_pending_request_text(self, pending: PendingRequest) -> str:
+        """Render concise execution-ready confirmation text for the user."""
         fragments = [pending.intent_label_zh]
         for key, value in pending.user_specified_params.items():
             renderer = PARAM_DISPLAYERS.get(key)
@@ -968,9 +1039,27 @@ class HotProjectAgent:
         return f"收到！我理解为：{body}。我会按这个方向继续执行；如果要改参数请直接告诉我。"
 
     def _render_clarification_message(self, pending: PendingRequest) -> str:
+        """Render user-facing clarification text for unresolved or ambiguous constraints."""
         text = (pending.confirmation_text_zh or "").strip()
         if text and "确认请回复" not in text and "回复\"开始\"" not in text:
             return text
+
+        if pending.unresolved_constraints:
+            questions: list[str] = []
+            for item in pending.unresolved_constraints:
+                content = str(item).strip()
+                if not content:
+                    continue
+                if content.startswith("无法映射参数名:"):
+                    raw_name = content.split(":", 1)[1].strip()
+                    if raw_name:
+                        questions.append(f"参数“{raw_name}”对应哪个筛选条件")
+                        continue
+                questions.append(content)
+
+            if questions:
+                unresolved_text = "；".join(questions)
+                return f"我还需要你确认这些参数含义：{unresolved_text}。确认后我再继续执行。"
 
         if pending.ambiguous_fields:
             ambiguous_text = "；".join(pending.ambiguous_fields)
@@ -979,6 +1068,7 @@ class HotProjectAgent:
         return "我还需要补充关键条件后才能执行。请直接告诉我你希望的仓库、时间窗口或榜单类型。"
 
     def _resolve_pending_request(self, pending: PendingRequest) -> ResolvedRequest:
+        """Merge route slots with intent defaults and freeze execution request."""
         defaults = self._default_params_for_intent(pending.intent_family)
         resolved_params = dict(defaults)
         resolved_params.update(pending.user_specified_params)
@@ -988,6 +1078,17 @@ class HotProjectAgent:
             key: value for key, value in defaults.items()
             if key not in pending.user_specified_params
         }
+
+        suggested_tools = list(pending.suggested_tools)
+        if not suggested_tools:
+            intent_tools = AVAILABLE_TOOLS_BY_INTENT.get(pending.intent_family, set())
+            suggested_tools = ordered_tool_names(intent_tools, all_tool_names=ALL_TOOL_NAMES)
+
+        if pending.turn_kind == "fact_check":
+            suggested = set(suggested_tools)
+            suggested.update({"check_repo_growth", "get_db_info", "describe_project", "fetch_trending"})
+            suggested_tools = ordered_tool_names(suggested, all_tool_names=ALL_TOOL_NAMES)
+
         return ResolvedRequest(
             turn_kind=pending.turn_kind,
             intent_family=pending.intent_family,
@@ -996,12 +1097,15 @@ class HotProjectAgent:
             resolved_params=resolved_params,
             user_specified_params=dict(pending.user_specified_params),
             defaulted_params=defaulted_params,
+            suggested_tools=suggested_tools,
+            route_confidence=pending.route_confidence,
             report_requested=pending.report_requested,
             must_call_tool_before_reply=pending.must_call_tool_before_reply,
             confirmation_text_zh=pending.confirmation_text_zh,
         )
 
     def _sync_active_repo_from_resolved_request(self, resolved: ResolvedRequest) -> None:
+        """Sync active repo cache from resolved request context."""
         repo = resolved.target_repo
         if not repo:
             raw_repo = resolved.resolved_params.get("repo")
@@ -1012,6 +1116,7 @@ class HotProjectAgent:
 
     @staticmethod
     def _default_params_for_intent(intent_family: str) -> dict[str, object]:
+        """Return intent-level default slots used before tool execution."""
         if intent_family == "comprehensive_ranking":
             return {
                 "mode": "comprehensive",
@@ -1044,6 +1149,7 @@ class HotProjectAgent:
         return {}
 
     def _merge_request_defaults_into_tool_args(self, name: str, args: dict) -> dict:
+        """Merge resolved request defaults into current tool args deterministically."""
         merged = dict(args)
         resolved_request = self.state.last_confirmed_request
         if resolved_request is None:
@@ -1066,7 +1172,7 @@ class HotProjectAgent:
         return merged
 
     def _log_execution_overview(self) -> None:
-        """在执行开始时打印本轮完整参数快照，便于排查。"""
+        """在执行开始时打印单条执行参数总览。"""
         resolved_request = self.state.last_confirmed_request
         if resolved_request is None:
             logger.info(
@@ -1080,21 +1186,13 @@ class HotProjectAgent:
         persistence_policy = self._persistence_policy_for_request(mode=mode_text)
 
         logger.info(
-            "[Agent] 运行参数总览: turn=%s | turn_kind=%s | intent=%s(%s) | report_requested=%s | must_call_tool=%s | persistence_policy=%s",
+            "[Agent] 运行参数总览: turn=%s | turn_kind=%s | intent=%s(%s) | route_confidence=%s | persistence_policy=%s | params=%s",
             self.state.current_user_turn,
             resolved_request.turn_kind,
             resolved_request.intent_family,
             resolved_request.intent_label_zh,
-            resolved_request.report_requested,
-            resolved_request.must_call_tool_before_reply,
+            resolved_request.route_confidence,
             persistence_policy,
-        )
-        logger.info(
-            "[Agent] 运行参数(user_specified): %s",
-            json.dumps(resolved_request.user_specified_params, ensure_ascii=False, sort_keys=True, default=str),
-        )
-        logger.info(
-            "[Agent] 运行参数(resolved): %s",
             json.dumps(resolved_request.resolved_params, ensure_ascii=False, sort_keys=True, default=str),
         )
 
@@ -1136,10 +1234,23 @@ class HotProjectAgent:
     def _execute_tool(self, name: str, args: dict) -> dict:
         """路由并执行 Tool 调用。
 
-        参数校验由 validate_tool_args 统一处理（类型/边界校验），
-        不做语义纠偏，信任 LLM 的参数判断。
+        参数校验分两层：
+        1) 严格校验（仅针对 LLM 显式传入参数）：出错直接返回可重试错误
+        2) 宽松校验（系统默认值注入 + 边界裁剪）
         """
         state = self.state
+
+        _, strict_errors = validate_tool_args_strict(name, args)
+        if strict_errors:
+            logger.warning("[Agent] Tool %s 参数严格校验失败: %s", name, strict_errors)
+            return {
+                "error": "Tool 参数校验失败，请根据 invalid_arguments 修正后重试。",
+                "error_code": "invalid_arguments",
+                "tool_name": name,
+                "invalid_arguments": strict_errors,
+                "retryable": True,
+            }
+
         prepared_args = self._merge_request_defaults_into_tool_args(name, args)
         validated = validate_tool_args(name, prepared_args)
         log_validated_params(name, args, prepared_args, validated)

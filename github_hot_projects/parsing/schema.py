@@ -95,7 +95,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "【批量搜索】按关键词类别从 GitHub 批量搜索仓库，用于构建热榜候选池。"
                 "可指定搜索类别（如AI-Agent、AI-RAG等），返回满足 star 过滤条件的仓库列表。"
-                "仅搜索收集，不计算增长。不适合查询单个特定项目。"
+                "仅搜索收集，不计算增长。适合作为榜单候选阶段，不适合查询单个特定项目。"
             ),
             "parameters": {
                 "type": "object",
@@ -137,7 +137,8 @@ TOOL_SCHEMAS = [
             "name": "scan_star_range",
             "description": (
                 "【批量扫描】按 star 数量范围扫描 GitHub 仓库，补充关键词搜索未覆盖的热门仓库。"
-                "与 search_hot_projects 配合使用。不适合查询单个特定项目。"
+                "与 search_hot_projects 配合使用，用于提升候选覆盖。"
+                "不适合作为最终榜单结果，也不适合查询单个项目。"
             ),
             "parameters": {
                 "type": "object",
@@ -197,7 +198,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "【批量增长筛选】对 search_hot_projects/scan_star_range 收集的候选仓库批量计算 star 增长，"
                 "筛选满足阈值的候选。通常在搜索/扫描之后、排序之前调用。"
-                "不适合查询单个项目。"
+                "该工具依赖已有候选集，不适合查询单个项目。"
                 "支持 time_window_days（自定义增长统计窗口）、new_project_days（按创建时间前置过滤）等参数。"
             ),
             "parameters": {
@@ -234,7 +235,8 @@ TOOL_SCHEMAS = [
             "name": "rank_candidates",
             "description": (
                 "【排序出榜】对 batch_check_growth 筛选后的候选仓库评分排序，输出 Top N 榜单。"
-                "comprehensive=综合排名；hot_new=新项目专榜。通常在 batch_check_growth 之后调用。"
+                "comprehensive=综合排名；hot_new=新项目专榜。"
+                "该工具依赖 batch_check_growth 输出候选，通常在其后调用。"
             ),
             "parameters": {
                 "type": "object",
@@ -276,6 +278,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "【项目介绍】获取单个项目的功能介绍和详细描述（基于 README 生成 200-400 字中文摘要）。"
                 "适合回答「这个项目是做什么的」「能不能用于某场景」「支持哪些功能/CLI/平台」等功能了解类问题。"
+                "在单仓库综合查询场景中，通常与 check_repo_growth 组合调用。"
             ),
             "parameters": {
                 "type": "object",
@@ -296,6 +299,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "【报告生成】为 rank_candidates 输出的 Top N 项目生成完整 Markdown 报告，保存到 report 目录。"
                 "仅在完成搜索→增长→排序全流程后调用。"
+                "该工具是产出阶段，不用于数据查询。"
             ),
             "parameters": {
                 "type": "object",
