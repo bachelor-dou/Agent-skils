@@ -97,7 +97,7 @@ class TestReport:
                     top_projects,
                     db,
                     mode="hot_new",
-                    new_project_days=30,
+                    days_since_created=30,
                 )
 
         assert "_hot_new_30d.md" in path
@@ -135,7 +135,7 @@ class TestReport:
                     top_projects,
                     db,
                     mode="comprehensive",
-                    time_window_days=10,
+                    growth_calc_days=10,
                 )
 
         assert path.endswith("_10d.md")

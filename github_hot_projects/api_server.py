@@ -808,8 +808,17 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 
     def _chat_with_lock(message: str) -> str:
         agent = get_agent(session_id)
-        with _tool_execution_lock:
+        logger.info("WebSocket 尝试获取执行锁: session=%s", session_id)
+        acquired = _tool_execution_lock.acquire(timeout=90)
+        if not acquired:
+            logger.warning("WebSocket 获取执行锁超时: session=%s", session_id)
+            return "系统繁忙，请稍后重试。"
+        logger.info("WebSocket 已获取执行锁: session=%s", session_id)
+        try:
             return agent.chat(message)
+        finally:
+            _tool_execution_lock.release()
+            logger.info("WebSocket 已释放执行锁: session=%s", session_id)
 
     try:
         while True:

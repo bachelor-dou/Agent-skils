@@ -90,7 +90,7 @@ summary = summarizer.summarize(result)         # 可选 LLM 调用
 | repo | 指定单仓库 | 看一下 owner/repo | 单仓库查询时使用 |
 | categories | 主题类别 | AI Agent、数据库、云原生 | 支持多类别 |
 | top_n | 返回数量 | 前 10、前 20、前 50 | 按模式取默认值 |
-| time_window_days | 增长统计窗口 | 近 7 天、近 14 天 | 默认 7 |
+| growth_calc_days | 增长统计窗口 | 近 7 天、近 14 天 | 默认 7 |
 | creation_window_days | 新项目创建窗口 | 近 30 天新项目 | hot_new 模式核心参数 |
 | growth_threshold | 最低增长阈值 | 增长至少 300 | 默认使用配置值 |
 | project_min_star | 候选项目最低总 star | 只看总 star 超过 1000 的项目 | 默认使用配置值 |
@@ -159,7 +159,7 @@ class ResolvedIntent:
     repo: str | None
     categories: list[str] | None
     top_n: int | None
-    time_window_days: int
+    growth_calc_days: int
     creation_window_days: int | None
     growth_threshold: int
     project_min_star: int
@@ -226,7 +226,7 @@ class ExecutionResult:
 
 关于 PlanStep.args 的参数来源约定：
 - `args` 中仅存放该步骤需要覆盖的特殊参数（如 `include_all_periods: true`）。
-- 通用参数（如 `star_min`、`growth_threshold`、`time_window_days`）由执行器从 `resolved_intent` 自动填入。
+- 通用参数（如 `star_min`、`growth_threshold`、`growth_calc_days`）由执行器从 `resolved_intent` 自动填入。
 - 执行器合并逻辑：`final_args = {从 resolved_intent 映射的通用参数} | step.args`，step.args 优先。
 
 说明：
@@ -257,7 +257,7 @@ API 建议增加的中间态返回格式：
 {
   "status": "needs_confirmation",
   "session_id": "xxx",
-  "reason": "time_window_days 与 creation_window_days 存在歧义",
+  "reason": "growth_calc_days 与 creation_window_days 存在歧义",
   "questions": [
     {
       "field": "creation_window_days",
@@ -321,7 +321,7 @@ FIELD_SCHEMA = {
             "trending_only": 25,
         },
     },
-    "time_window_days": {
+    "growth_calc_days": {
         "type": "int",
         "min": 1,
         "default": 7,
@@ -384,7 +384,7 @@ FIELD_SCHEMA = {
 WORKFLOW_SKELETONS = {
     "comprehensive_rank": {
         "steps": [
-            "search_hot_projects",
+            "search_by_keywords",
             "scan_star_range",
             "fetch_trending",
             "batch_check_growth",
@@ -394,7 +394,7 @@ WORKFLOW_SKELETONS = {
     },
     "hot_new_rank": {
         "steps": [
-            "search_hot_projects",
+            "search_by_keywords",
             "scan_star_range",
             "fetch_trending",
             "batch_check_growth",
@@ -418,7 +418,7 @@ WORKFLOW_SKELETONS = {
 ```
 
 说明：
-- `comprehensive_rank` 和 `hot_new_rank` 步骤相同，区别在执行器传参时 hot_new 会附加 `new_project_days`。
+- `comprehensive_rank` 和 `hot_new_rank` 步骤相同，区别在执行器传参时 hot_new 会附加 `days_since_created`。
 - 当 `report_requested == true` 时，planner 将 `generate_report` 从 optional 提到 steps 末尾。
 - 不再设置 `rank_then_report` 等复合骨架，避免骨架膨胀。
 
@@ -457,26 +457,26 @@ WORKFLOW_SKELETONS = {
 ```python
 # 每个 tool 定义自己需要从 ResolvedIntent 取哪些字段
 TOOL_PARAM_MAPPING = {
-    "search_hot_projects": {
+    "search_by_keywords": {
         "project_min_star": "project_min_star",
-        "new_project_days": "creation_window_days",
+        "days_since_created": "creation_window_days",
         "categories": "categories",
     },
     "scan_star_range": {
         "min_star": "star_min",
         "max_star": "star_max",
-        "new_project_days": "creation_window_days",
+        "days_since_created": "creation_window_days",
     },
     "batch_check_growth": {
         "growth_threshold": "growth_threshold",
-        "time_window_days": "time_window_days",
-        "new_project_days": "creation_window_days",
+        "growth_calc_days": "growth_calc_days",
+        "days_since_created": "creation_window_days",
         "force_refresh": "force_refresh",
     },
     "rank_candidates": {
         "mode": "workflow_mode",     # comprehensive → comprehensive, hot_new → hot_new
         "top_n": "top_n",
-        "new_project_days": "creation_window_days",
+        "days_since_created": "creation_window_days",
     },
     # ...
 }
@@ -623,7 +623,7 @@ class PlanExecutor:
   "repo": null,
   "categories": null,
   "top_n": 10,
-  "time_window_days": 7,
+  "growth_calc_days": 7,
   "creation_window_days": 20,
   "growth_threshold": 800,
   "project_min_star": 1000,
@@ -642,7 +642,7 @@ class PlanExecutor:
 {
   "skeleton": "hot_new_rank",
   "steps": [
-    {"step_id": "s1", "tool_name": "search_hot_projects", "args": {}},
+    {"step_id": "s1", "tool_name": "search_by_keywords", "args": {}},
     {"step_id": "s2", "tool_name": "scan_star_range", "args": {}},
     {"step_id": "s3", "tool_name": "fetch_trending", "args": {"include_all_periods": true}},
     {"step_id": "s4", "tool_name": "batch_check_growth", "args": {}},
@@ -651,7 +651,7 @@ class PlanExecutor:
 }
 ```
 
-说明：steps 中的 args 只存覆盖参数。`new_project_days`、`top_n`、`time_window_days` 等通用参数由执行器从 `resolved_intent` 自动映射（参见 5.4 TOOL_PARAM_MAPPING）。
+说明：steps 中的 args 只存覆盖参数。`days_since_created`、`top_n`、`growth_calc_days` 等通用参数由执行器从 `resolved_intent` 自动映射（参见 5.4 TOOL_PARAM_MAPPING）。
 
 ---
 

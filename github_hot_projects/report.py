@@ -25,10 +25,10 @@ from datetime import datetime, timedelta, timezone
 
 from .common.config import (
     MIN_STAR_FILTER,
-    NEW_PROJECT_DAYS,
+    DAYS_SINCE_CREATED,
     REPORT_DIR,
     STAR_GROWTH_THRESHOLD,
-    TIME_WINDOW_DAYS,
+    GROWTH_CALC_DAYS,
 )
 from .common.llm import call_llm_describe
 
@@ -260,21 +260,23 @@ def step3_generate_report(
     top_projects: list[tuple[str, dict]],
     db: dict,
     mode: str = "comprehensive",
-    new_project_days: int | None = None,
-    time_window_days: int = TIME_WINDOW_DAYS,
+    days_since_created: int | None = None,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
+    growth_threshold: int = STAR_GROWTH_THRESHOLD,
+    min_star: int = MIN_STAR_FILTER,
 ) -> str:
     """为 Top N 项目生成 LLM 描述并输出 Markdown 报告。"""
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
-    if mode == "comprehensive" and time_window_days != TIME_WINDOW_DAYS:
-        suffix = f"{suffix}_{time_window_days}d" if suffix else f"_{time_window_days}d"
-        title_prefix = f"{title_prefix}（近{time_window_days}天增长）"
-    if mode == "hot_new" and new_project_days is not None:
-        suffix = f"{suffix}_{new_project_days}d"
-        title_prefix = f"{title_prefix}（近{new_project_days}天）"
-    if mode == "hot_new" and time_window_days != TIME_WINDOW_DAYS:
-        suffix = f"{suffix}_win{time_window_days}d"
+    if mode == "comprehensive" and growth_calc_days != GROWTH_CALC_DAYS:
+        suffix = f"{suffix}_{growth_calc_days}d" if suffix else f"_{growth_calc_days}d"
+        title_prefix = f"{title_prefix}（近{growth_calc_days}天增长）"
+    if mode == "hot_new" and days_since_created is not None:
+        suffix = f"{suffix}_{days_since_created}d"
+        title_prefix = f"{title_prefix}（近{days_since_created}天）"
+    if mode == "hot_new" and growth_calc_days != GROWTH_CALC_DAYS:
+        suffix = f"{suffix}_win{growth_calc_days}d"
     report_path = os.path.join(REPORT_DIR, f"{today}{suffix}.md")
     db_projects = db.get("projects", {})
 
@@ -302,13 +304,13 @@ def step3_generate_report(
             else:
                 desc_results.setdefault(full_name, "")
 
-    hot_new_window = new_project_days if new_project_days is not None else NEW_PROJECT_DAYS
+    hot_new_window = days_since_created if days_since_created is not None else DAYS_SINCE_CREATED
     lines: list[str] = [f"# {title_prefix} — {today}\n"]
     summary_parts = [
         f"共 {len(top_projects)} 个项目",
-        f"增长统计窗口: {time_window_days} 天",
-        f"增长阈值: >={STAR_GROWTH_THRESHOLD} stars",
-        f"最低 star: >={MIN_STAR_FILTER}",
+        f"增长统计窗口: {growth_calc_days} 天",
+        f"增长阈值: >={growth_threshold} stars",
+        f"最低 star: >={min_star}",
         f"报告生成: {today}",
     ]
     if mode == "hot_new":
@@ -338,7 +340,7 @@ def step3_generate_report(
         if language:
             lines.append(f"- 主语言: {language}")
         lines.append(f"- 总 Star: {_format_number(star)}")
-        lines.append(f"- 近{time_window_days}天增长: +{_format_number(growth)}")
+        lines.append(f"- 近{growth_calc_days}天增长: +{_format_number(growth)}")
         if topics:
             lines.append(f"- 主题标签: {', '.join(topics)}")
         lines.append("")

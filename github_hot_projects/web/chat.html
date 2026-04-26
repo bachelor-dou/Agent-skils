@@ -664,11 +664,11 @@
         if (Array.isArray(params.categories) && params.categories.length > 0) {
           fragments.push(`关注方向为${params.categories.join("、")}`);
         }
-        if (Number.isFinite(params.time_window_days)) {
-          fragments.push(`统计近${params.time_window_days}天增长`);
+        if (Number.isFinite(params.growth_calc_days)) {
+          fragments.push(`统计近${params.growth_calc_days}天增长`);
         }
-        if (Number.isFinite(params.new_project_days)) {
-          fragments.push(`只看近${params.new_project_days}天内创建的项目`);
+        if (Number.isFinite(params.days_since_created)) {
+          fragments.push(`只看近${params.days_since_created}天内创建的项目`);
         }
         if (Number.isFinite(params.top_n)) {
           fragments.push(`返回前${params.top_n}名`);

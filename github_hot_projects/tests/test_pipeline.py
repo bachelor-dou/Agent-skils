@@ -15,7 +15,7 @@ class TestDiscoveryPipeline:
         }
 
         with patch(
-            "github_hot_projects.scheduled_update.tool_search_hot_projects",
+            "github_hot_projects.scheduled_update.tool_search_by_keywords",
             return_value={"repos": [], "total": 1, "_raw_repos": [raw_repo]},
         ), patch(
             "github_hot_projects.scheduled_update.tool_scan_star_range",

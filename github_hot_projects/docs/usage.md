@@ -81,7 +81,7 @@ nohup python -m github_hot_projects >> github_hot_projects/logs/server.log 2>&1 
 # 排名 & Trending
 排个名看看                          → comprehensive 综合排名
 最近有什么新冒出来的爆款？          → hot_new 新项目排名
-近一个月新项目前20                  → hot_new + new_project_days=30
+近一个月新项目前20                  → hot_new + days_since_created=30
 看看 GitHub Trending 上有什么       → weekly trending
 看看月度趋势                        → monthly trending
 

@@ -66,7 +66,6 @@ class TestKeywordSearchTask:
                     category="AI-Agent",
                     keyword_idx=1,
                     total_keywords=1,
-                    max_pages=1,
                     _raw_repos=raw_repos,
                     _token_mgr=mock_token_mgr,
                 )
@@ -83,7 +82,6 @@ class TestKeywordSearchTask:
             category="Test",
             keyword_idx=1,
             total_keywords=1,
-            max_pages=1,
             _raw_repos=raw_repos,
             _token_mgr=mock_token_mgr,
         )
@@ -256,8 +254,8 @@ class TestCalcGrowthTask:
             "use_realtime_growth": False,
             "can_write_db": False,
             "window_specified": False,
-            "time_window_days": 7,
-            "new_project_days": None,
+            "growth_calc_days": 7,
+            "days_since_created": None,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
@@ -271,7 +269,7 @@ class TestCalcGrowthTask:
 
         assert len(pool.submitted) == 0
         assert checkpoint["org/repo"]["growth"] == 800
-        assert growth_ctx["effective_time_window_days"] == growth_ctx["time_window_days"]
+        assert growth_ctx["effective_growth_calc_days"] == growth_ctx["growth_calc_days"]
 
     def test_submit_growth_tasks_comprehensive_specified_window_mismatch_falls_back(self, mock_token_mgr):
         from github_hot_projects.tasks.task import _submit_growth_tasks, CalcGrowthTask
@@ -315,8 +313,8 @@ class TestCalcGrowthTask:
             "use_realtime_growth": True,
             "can_write_db": False,
             "window_specified": True,
-            "time_window_days": 7,
-            "new_project_days": None,
+            "growth_calc_days": 7,
+            "days_since_created": None,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
@@ -374,8 +372,8 @@ class TestCalcGrowthTask:
             "use_realtime_growth": True,  # 新项目榜始终实时
             "can_write_db": False,
             "window_specified": True,
-            "time_window_days": 7,
-            "new_project_days": 45,
+            "growth_calc_days": 7,
+            "days_since_created": 45,
             "is_hot_new": True,  # 新项目榜标记
             "use_checkpoint": False,  # 实时模式不使用 checkpoint
             "unresolved_count": [0],

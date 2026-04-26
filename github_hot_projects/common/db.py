@@ -31,7 +31,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH, TIME_WINDOW_DAYS
+from .config import DATA_EXPIRE_DAYS, DB_FILE_PATH, GROWTH_CALC_DAYS
 
 logger = logging.getLogger("discover_hot")
 
@@ -309,18 +309,18 @@ def set_growth_cache(*_args, **_kwargs) -> None:
 
 def is_db_diff_eligible(
     db: dict,
-    time_window_days: int = TIME_WINDOW_DAYS,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
 ) -> bool:
     """严格判断 DB 是否满足差值法前提（新项目榜 / 单查 使用）。
 
     同时满足以下三项才返回 True：
     1. db["valid"] — DB 未过期
-    2. time_window_days < DATA_EXPIRE_DAYS — 窗口在有效期内
-    3. DB 年龄 ≥ time_window_days − 1 — 差值接近请求窗口
+    2. growth_calc_days < DATA_EXPIRE_DAYS — 窗口在有效期内
+    3. DB 年龄 ≥ growth_calc_days − 1 — 差值接近请求窗口
     """
     if not db.get("valid", False):
         return False
-    if time_window_days >= DATA_EXPIRE_DAYS:
+    if growth_calc_days >= DATA_EXPIRE_DAYS:
         return False
     db_date_str = db.get("date", "")
     if not db_date_str:
@@ -328,19 +328,19 @@ def is_db_diff_eligible(
     try:
         db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         db_age_days = (_utc_now() - db_date).total_seconds() / 86400
-        return db_age_days >= (time_window_days - 1)
+        return db_age_days >= (growth_calc_days - 1)
     except ValueError:
         return False
 
 
 def is_project_diff_eligible(
     project: dict,
-    time_window_days: int = TIME_WINDOW_DAYS,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
 ) -> bool:
     """严格判断单个仓库是否满足差值法条件（新项目榜 / 单查 使用）。
 
     同时满足：
-    1. refreshed_at 距今 ≥ time_window_days − 1（足够旧）
+    1. refreshed_at 距今 ≥ growth_calc_days − 1（足够旧）
     2. refreshed_at 距今 ≤ DATA_EXPIRE_DAYS（不超过有效期）
     """
     refreshed_at = project.get("refreshed_at", "")
@@ -351,7 +351,7 @@ def is_project_diff_eligible(
             tzinfo=timezone.utc
         )
         age_days = (_utc_now() - refresh_dt).total_seconds() / 86400
-        return (time_window_days - 1) <= age_days <= DATA_EXPIRE_DAYS
+        return (growth_calc_days - 1) <= age_days <= DATA_EXPIRE_DAYS
     except ValueError:
         return False
 

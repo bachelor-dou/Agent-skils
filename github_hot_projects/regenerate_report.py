@@ -45,7 +45,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 if __package__:
-    from .common.config import DEFAULT_SCORE_MODE, HOT_PROJECT_COUNT, STAR_GROWTH_THRESHOLD, TIME_WINDOW_DAYS
+    from .common.config import DEFAULT_SCORE_MODE, HOT_PROJECT_COUNT, STAR_GROWTH_THRESHOLD, GROWTH_CALC_DAYS
     from .common.db import load_db, save_db_desc_only
     from .common.llm import call_llm_describe
     from .ranking import step2_rank_and_select
@@ -61,7 +61,7 @@ else:
     DEFAULT_SCORE_MODE = common_config.DEFAULT_SCORE_MODE
     HOT_PROJECT_COUNT = common_config.HOT_PROJECT_COUNT
     STAR_GROWTH_THRESHOLD = common_config.STAR_GROWTH_THRESHOLD
-    TIME_WINDOW_DAYS = common_config.TIME_WINDOW_DAYS
+    GROWTH_CALC_DAYS = common_config.GROWTH_CALC_DAYS
     load_db = common_db.load_db
     save_db_desc_only = common_db.save_db_desc_only
     call_llm_describe = common_llm.call_llm_describe
@@ -72,7 +72,7 @@ logger = logging.getLogger("regenerate_report")
 
 _PIPELINE_START_RE = re.compile(
     r"\[Pipeline\] 启动: mode=(?P<mode>[^,]+), top_n=(?P<top_n>\d+), "
-    r"new_project_days=(?P<new_project_days>[^,]+), time_window_days=(?P<time_window_days>\d+), "
+    r"days_since_created=(?P<days_since_created>[^,]+), growth_calc_days=(?P<growth_calc_days>\d+), "
     r"growth_threshold=(?P<growth_threshold>\d+)"
 )
 _PIPELINE_RANK_RE = re.compile(
@@ -98,9 +98,9 @@ class RecoveryContext:
     rank_idx: int
     mode: str
     top_n: int
-    time_window_days: int
+    growth_calc_days: int
     growth_threshold: int
-    new_project_days: int | None
+    days_since_created: int | None
     report_date: str
 
 
@@ -142,17 +142,17 @@ def _build_recovery_context(lines: list[str]) -> RecoveryContext:
 
     mode = DEFAULT_SCORE_MODE
     top_n = HOT_PROJECT_COUNT
-    time_window_days = TIME_WINDOW_DAYS
+    growth_calc_days = GROWTH_CALC_DAYS
     growth_threshold = STAR_GROWTH_THRESHOLD
-    new_project_days: int | None = None
+    days_since_created: int | None = None
 
     rank_line = lines[rank_idx]
     if "Tool 生效参数: rank_candidates" in rank_line:
         rank_params = _parse_pipe_params(rank_line)
         mode = rank_params.get("mode", mode) or mode
         top_n = int(rank_params.get("top_n", str(top_n)))
-        time_window_days = int(rank_params.get("growth_window_days", str(time_window_days)))
-        new_project_days = _parse_optional_int(rank_params.get("creation_window_days"))
+        growth_calc_days = int(rank_params.get("growth_window_days", str(growth_calc_days)))
+        days_since_created = _parse_optional_int(rank_params.get("creation_window_days"))
     else:
         match = _PIPELINE_RANK_RE.search(rank_line)
         if match:
@@ -170,25 +170,25 @@ def _build_recovery_context(lines: list[str]) -> RecoveryContext:
     if "Tool 生效参数: batch_check_growth" in start_line:
         batch_params = _parse_pipe_params(start_line)
         growth_threshold = int(batch_params.get("growth_threshold", str(growth_threshold)))
-        time_window_days = int(batch_params.get("growth_window_days", str(time_window_days)))
-        new_project_days = _parse_optional_int(batch_params.get("creation_window_days"))
+        growth_calc_days = int(batch_params.get("growth_window_days", str(growth_calc_days)))
+        days_since_created = _parse_optional_int(batch_params.get("creation_window_days"))
     else:
         match = _PIPELINE_START_RE.search(start_line)
         if match:
             mode = match.group("mode").strip() or mode
             top_n = int(match.group("top_n"))
-            time_window_days = int(match.group("time_window_days"))
+            growth_calc_days = int(match.group("growth_calc_days"))
             growth_threshold = int(match.group("growth_threshold"))
-            new_project_days = _parse_optional_int(match.group("new_project_days"))
+            days_since_created = _parse_optional_int(match.group("days_since_created"))
 
     return RecoveryContext(
         start_idx=start_idx,
         rank_idx=rank_idx,
         mode=mode,
         top_n=top_n,
-        time_window_days=time_window_days,
+        growth_calc_days=growth_calc_days,
         growth_threshold=growth_threshold,
-        new_project_days=new_project_days,
+        days_since_created=days_since_created,
         report_date=rank_line[:10],
     )
 
@@ -269,9 +269,9 @@ def recover_report_from_log(
     *,
     top_n: int | None = None,
     mode: str | None = None,
-    time_window_days: int | None = None,
+    growth_calc_days: int | None = None,
     growth_threshold: int | None = None,
-    new_project_days: int | None = None,
+    days_since_created: int | None = None,
 ) -> dict:
     path = Path(log_path)
     if not path.exists():
@@ -283,12 +283,12 @@ def recover_report_from_log(
         context.top_n = top_n
     if mode is not None:
         context.mode = mode
-    if time_window_days is not None:
-        context.time_window_days = time_window_days
+    if growth_calc_days is not None:
+        context.growth_calc_days = growth_calc_days
     if growth_threshold is not None:
         context.growth_threshold = growth_threshold
-    if new_project_days is not None:
-        context.new_project_days = new_project_days
+    if days_since_created is not None:
+        context.days_since_created = days_since_created
 
     db = load_db()
     candidates = _recover_candidates(lines, context, db)
@@ -299,8 +299,8 @@ def recover_report_from_log(
         candidates,
         mode=context.mode,
         db=db,
-        new_project_days=context.new_project_days,
-        prefiltered_new_project_days=context.new_project_days if context.mode == "hot_new" else None,
+        days_since_created=context.days_since_created,
+        prefiltered_days_since_created=context.days_since_created if context.mode == "hot_new" else None,
     )
     top_projects = sorted_all[: context.top_n]
     if not top_projects:
@@ -325,8 +325,8 @@ def recover_report_from_log(
             top_projects,
             db,
             mode=context.mode,
-            new_project_days=context.new_project_days if context.mode == "hot_new" else None,
-            time_window_days=context.time_window_days,
+            days_since_created=context.days_since_created if context.mode == "hot_new" else None,
+            growth_calc_days=context.growth_calc_days,
         )
 
     if not report_path:
@@ -339,7 +339,7 @@ def recover_report_from_log(
         "mode": context.mode,
         "top_n": len(top_projects),
         "candidates_count": len(candidates),
-        "time_window_days": context.time_window_days,
+        "growth_calc_days": context.growth_calc_days,
         "growth_threshold": context.growth_threshold,
     }
 
@@ -367,16 +367,16 @@ def main() -> None:
         args.log,
         top_n=args.top_n,
         mode=args.mode,
-        time_window_days=args.time_window_days,
+        growth_calc_days=args.growth_calc_days,
         growth_threshold=args.growth_threshold,
-        new_project_days=args.new_project_days,
+        days_since_created=args.days_since_created,
     )
     print(f"报告已生成: {result['report_path']}")
     print(
         "恢复摘要: "
         f"date={result['report_date']}, mode={result['mode']}, "
         f"ranked={result['top_n']}, candidates={result['candidates_count']}, "
-        f"window={result['time_window_days']}d"
+        f"window={result['growth_calc_days']}d"
     )
 
 

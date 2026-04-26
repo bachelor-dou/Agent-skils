@@ -83,11 +83,11 @@ class TestToolCheckRepoGrowth:
 
         with patch("github_hot_projects.agent_tools.fetch_repo_info", return_value=self._make_repo_item()):
             with patch("github_hot_projects.agent_tools.estimate_star_growth_binary", return_value=650):
-                result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=None, time_window_days=10)
+                result = tool_check_repo_growth(mock_token_mgr, "org/repo", db=None, growth_calc_days=10)
 
         assert result["growth"] == 650
         assert "10天窗口" in result["method"]
-        assert result["time_window_days"] == 10
+        assert result["growth_calc_days"] == 10
 
     def test_invalid_repo_format(self, mock_token_mgr):
         """非 owner/repo 格式应返回 error。"""
@@ -141,7 +141,7 @@ class TestToolBatchCheckGrowth:
                     mock_token_mgr,
                     repos,
                     db,
-                    time_window_days=10,
+                    growth_calc_days=10,
                 )
 
         mock_update_db.assert_not_called()
@@ -183,8 +183,8 @@ class TestToolRankCandidates:
         from github_hot_projects.agent_tools import tool_rank_candidates
         result = tool_rank_candidates(
             sample_candidates, mode="hot_new",
-            new_project_days=45,
-            prefiltered_new_project_days=45,
+            days_since_created=45,
+            prefiltered_days_since_created=45,
         )
         assert result["mode"] == "hot_new"
 

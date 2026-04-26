@@ -11,35 +11,34 @@ from ..common.config import (
     STAR_RANGE_MIN,
     STAR_RANGE_MAX,
     STAR_GROWTH_THRESHOLD,
-    TIME_WINDOW_DAYS,
+    GROWTH_CALC_DAYS,
     HOT_PROJECT_COUNT,
     HOT_NEW_PROJECT_COUNT,
-    NEW_PROJECT_DAYS,
+    DAYS_SINCE_CREATED,
     SEARCH_KEYWORDS,
 )
 
 # 运行时参数 schema：供 validate_tool_args 使用。
 # 职责：定义每个 tool 的参数类型、边界和默认值。
 TOOL_PARAM_SCHEMA: dict[str, dict] = {
-    "search_hot_projects": {
+    "search_by_keywords": {
         "categories": {"type": "list_str", "default": None},
         "project_min_star": {"type": "int", "min": 1, "default": MIN_STAR_FILTER},
-        "max_pages": {"type": "int", "min": 1, "max": 10, "default": 3},
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "scan_star_range": {
         "min_star": {"type": "int", "min": 1, "default": STAR_RANGE_MIN},
         "max_star": {"type": "int", "min": 1, "default": STAR_RANGE_MAX},
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "check_repo_growth": {
         "repo": {"type": "str"},
-        "time_window_days": {"type": "int", "min": 1, "default": TIME_WINDOW_DAYS},
+        "growth_calc_days": {"type": "int", "min": 1, "default": GROWTH_CALC_DAYS},
     },
     "batch_check_growth": {
         "growth_threshold": {"type": "int", "min": 0, "default": STAR_GROWTH_THRESHOLD},
-        "time_window_days": {"type": "int", "min": 1, "default": TIME_WINDOW_DAYS},
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "growth_calc_days": {"type": "int", "min": 1, "default": GROWTH_CALC_DAYS},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "rank_candidates": {
         "mode": {
@@ -56,12 +55,12 @@ TOOL_PARAM_SCHEMA: dict[str, dict] = {
                 "hot_new": HOT_NEW_PROJECT_COUNT,
             },
         },
-        "new_project_days": {
+        "days_since_created": {
             "type": "int",
             "min": 1,
             "default_by_mode": {
                 "comprehensive": None,
-                "hot_new": NEW_PROJECT_DAYS,
+                "hot_new": DAYS_SINCE_CREATED,
             },
         },
     },
@@ -91,7 +90,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_hot_projects",
+            "name": "search_by_keywords",
             "description": (
                 "【批量搜索】按关键词类别从 GitHub 批量搜索仓库，用于构建热榜候选池。"
                 "可指定搜索类别（如AI-Agent、AI-RAG等），返回满足 star 过滤条件的仓库列表。"
@@ -113,17 +112,12 @@ TOOL_SCHEMAS = [
                         "description": f"关键词搜索项目最低 star 过滤线，默认{MIN_STAR_FILTER}",
                         "default": MIN_STAR_FILTER,
                     },
-                    "max_pages": {
-                        "type": "integer",
-                        "description": "每个关键词搜索最大页数，默认3",
-                        "default": 3,
-                    },
-                    "new_project_days": {
+                    "days_since_created": {
                         "type": "integer",
                         "description": (
                             "新项目创建时间窗口（天）。指定后只搜索创建时间在该天数以内的仓库（GitHub API created:>=date）。"
                             "例如用户说'近20天内新创建的项目'则传 20。"
-                            "与 time_window_days（增长统计窗口）是完全独立的参数。"
+                            "与 growth_calc_days（增长统计窗口）是完全独立的参数。"
                             "如果用户意图不涉及新项目过滤，不要传此参数。"
                         ),
                     },
@@ -137,7 +131,7 @@ TOOL_SCHEMAS = [
             "name": "scan_star_range",
             "description": (
                 "【批量扫描】按 star 数量范围扫描 GitHub 仓库，补充关键词搜索未覆盖的热门仓库。"
-                "与 search_hot_projects 配合使用，用于提升候选覆盖。"
+                "与 search_by_keywords 配合使用，用于提升候选覆盖。"
                 "不适合作为最终榜单结果，也不适合查询单个项目。"
             ),
             "parameters": {
@@ -153,12 +147,12 @@ TOOL_SCHEMAS = [
                         "description": f"最高星数，默认{STAR_RANGE_MAX}",
                         "default": STAR_RANGE_MAX,
                     },
-                    "new_project_days": {
+                    "days_since_created": {
                         "type": "integer",
                         "description": (
                             "新项目创建时间窗口（天）。指定后只扫描创建时间在该天数以内的仓库。"
                             "例如用户说'近20天内新创建的项目'则传 20。"
-                            "与 time_window_days（增长统计窗口）完全独立。"
+                            "与 growth_calc_days（增长统计窗口）完全独立。"
                             "如果用户意图不涉及新项目过滤，不要传此参数。"
                         ),
                     },
@@ -173,7 +167,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "【增长数据】查询单个仓库的 star 增长趋势：当前 star 数、近期增长量和增长率。"
                 "适合回答「这个项目最近涨了多少 star」「增长趋势怎么样」等增长类问题。"
-                f"默认增长窗口为近{TIME_WINDOW_DAYS}天。"
+                f"默认增长窗口为近{GROWTH_CALC_DAYS}天。"
             ),
             "parameters": {
                 "type": "object",
@@ -182,7 +176,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "仓库全名，格式为 owner/repo，如 vllm-project/vllm",
                     },
-                    "time_window_days": {
+                    "growth_calc_days": {
                         "type": "integer",
                         "description": "增长统计窗口（天）。如用户说近10天/近30天，则传对应值；默认不传时使用系统默认窗口。",
                     },
@@ -196,10 +190,10 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "batch_check_growth",
             "description": (
-                "【批量增长筛选】对 search_hot_projects/scan_star_range 收集的候选仓库批量计算 star 增长，"
+                "【批量增长筛选】对 search_by_keywords/scan_star_range 收集的候选仓库批量计算 star 增长，"
                 "筛选满足阈值的候选。通常在搜索/扫描之后、排序之前调用。"
                 "该工具依赖已有候选集，不适合查询单个项目。"
-                "支持 time_window_days（自定义增长统计窗口）、new_project_days（按创建时间前置过滤）等参数。"
+                "支持 growth_calc_days（自定义增长统计窗口）、days_since_created（按创建时间前置过滤）等参数。"
             ),
             "parameters": {
                 "type": "object",
@@ -209,20 +203,20 @@ TOOL_SCHEMAS = [
                         "description": f"增长阈值，默认{STAR_GROWTH_THRESHOLD}",
                         "default": STAR_GROWTH_THRESHOLD,
                     },
-                    "new_project_days": {
+                    "days_since_created": {
                         "type": "integer",
                         "description": (
                             "新项目创建时间窗口（天）。指定后先按创建时间过滤，只对N天内创建的项目计算增长。"
                             "例如用户说'近20天内新创建的项目'则传 20。"
-                            "与 time_window_days 完全独立：new_project_days 过滤创建时间，time_window_days 决定增长统计区间。"
+                            "与 growth_calc_days 完全独立：days_since_created 过滤创建时间，growth_calc_days 决定增长统计区间。"
                             "两者可同时指定。如果用户未提及新项目/新创建，不要传此参数。"
                         ),
                     },
-                    "time_window_days": {
+                    "growth_calc_days": {
                         "type": "integer",
                         "description": (
                             "增长统计窗口（天）。计算最近N天的star增长量。"
-                            "例如用户说'近10天热榜'则传 10。与 new_project_days（创建时间过滤）完全独立。"
+                            "例如用户说'近10天热榜'则传 10。与 days_since_created（创建时间过滤）完全独立。"
                         ),
                     },
                 },
@@ -258,11 +252,11 @@ TOOL_SCHEMAS = [
                         ),
                         "default": "comprehensive",
                     },
-                    "new_project_days": {
+                    "days_since_created": {
                         "type": "integer",
                         "description": (
                             "新项目创建时间窗口（天）。hot_new 模式下用于筛选创建时间在N天以内的项目。"
-                            f"默认{NEW_PROJECT_DAYS}天。"
+                            f"默认{DAYS_SINCE_CREATED}天。"
                             "例如用户说'近20天内新创建项目的榜单'则传 20。"
                             "用户明确提到天数时必须传入用户指定的值，不要用默认值覆盖。"
                         ),

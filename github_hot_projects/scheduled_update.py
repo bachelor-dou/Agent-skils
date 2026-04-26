@@ -43,7 +43,7 @@ from github_hot_projects.common.config import (
     HOT_NEW_PROJECT_COUNT,
     LOG_DIR,
     STAR_GROWTH_THRESHOLD,
-    TIME_WINDOW_DAYS,
+    GROWTH_CALC_DAYS,
 )
 from github_hot_projects.common.db import load_db, save_db
 from github_hot_projects.common.token_manager import TokenManager
@@ -53,7 +53,7 @@ from github_hot_projects.agent_tools import (
     tool_generate_report,
     tool_rank_candidates,
     tool_scan_star_range,
-    tool_search_hot_projects,
+    tool_search_by_keywords,
     trending_repo_to_search_repo,
 )
 
@@ -101,8 +101,8 @@ class DiscoveryPipeline:
         self,
         mode: str = "comprehensive",
         top_n: int | None = None,
-        new_project_days: int | None = None,
-        time_window_days: int = TIME_WINDOW_DAYS,
+        days_since_created: int | None = None,
+        growth_calc_days: int = GROWTH_CALC_DAYS,
         growth_threshold: int = STAR_GROWTH_THRESHOLD,
         force_refresh: bool = False,
     ) -> dict:
@@ -110,12 +110,12 @@ class DiscoveryPipeline:
             top_n = HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT
 
         logger.info(
-            "[Pipeline] 启动: mode=%s, top_n=%s, new_project_days=%s, "
-            "time_window_days=%s, growth_threshold=%s, 数据源=search+scan+trending 三源合一",
-            mode, top_n, new_project_days, time_window_days, growth_threshold,
+            "[Pipeline] 启动: mode=%s, top_n=%s, days_since_created=%s, "
+            "growth_calc_days=%s, growth_threshold=%s, 数据源=search+scan+trending 三源合一",
+            mode, top_n, days_since_created, growth_calc_days, growth_threshold,
         )
 
-        all_repos, seen = self._collect_repos(new_project_days)
+        all_repos, seen = self._collect_repos(days_since_created)
         if not all_repos:
             logger.error("[Pipeline] 搜索阶段未获取到任何仓库，终止。")
             return {"error": "搜索阶段无结果", "report_path": ""}
@@ -126,8 +126,8 @@ class DiscoveryPipeline:
             all_repos,
             self.db,
             growth_threshold=growth_threshold,
-            new_project_days=new_project_days,
-            time_window_days=time_window_days,
+            days_since_created=days_since_created,
+            growth_calc_days=growth_calc_days,
             force_refresh=force_refresh,
         )
         candidates = growth_result.get("candidates", {})
@@ -149,7 +149,7 @@ class DiscoveryPipeline:
             top_n=top_n,
             mode=mode,
             db=self.db,
-            new_project_days=new_project_days,
+            days_since_created=days_since_created,
         )
         top_projects = rank_result.pop("_ordered_tuples", [])
         logger.info("[Pipeline] 排名完成: %d 个项目", len(top_projects))
@@ -163,8 +163,8 @@ class DiscoveryPipeline:
             top_projects,
             self.db,
             mode=mode,
-            new_project_days=new_project_days if mode == "hot_new" else None,
-            time_window_days=time_window_days,
+            days_since_created=days_since_created if mode == "hot_new" else None,
+            growth_calc_days=growth_calc_days,
         )
         save_db(self.db)
 
@@ -180,14 +180,14 @@ class DiscoveryPipeline:
             "mode": mode,
         }
 
-    def _collect_repos(self, new_project_days: int | None = None) -> tuple[list[dict], set[str]]:
+    def _collect_repos(self, days_since_created: int | None = None) -> tuple[list[dict], set[str]]:
         seen: set[str] = set()
         all_repos: list[dict] = []
 
         logger.info("[Pipeline] Step 1a: 关键词搜索（全类别）")
-        search_result = tool_search_hot_projects(
+        search_result = tool_search_by_keywords(
             self.token_mgr,
-            new_project_days=new_project_days,
+            days_since_created=days_since_created,
         )
         raw_repos = search_result.pop("_raw_repos", [])
         all_repos.extend(raw_repos)
@@ -198,7 +198,7 @@ class DiscoveryPipeline:
         scan_result = tool_scan_star_range(
             self.token_mgr,
             seen_repos=seen,
-            new_project_days=new_project_days,
+            days_since_created=days_since_created,
         )
         scan_repos = scan_result.pop("_raw_repos", [])
         for repo in scan_repos:

@@ -16,7 +16,7 @@
      • 当 rate > 0.5，启用 √(0.5/rate) 折扣，避免低基数项目虞高
      • 同分时按 star 降序排列
   2. hot_new（新项目专榜）
-     • 仅保留创建时间 <= new_project_days 的仓库
+     • 仅保留创建时间 <= days_since_created 的仓库
      • 如果候选池已在 batch_check_growth 阶段按相同窗口预筛，直接按增长量降序
      • 否则从 DB 补充 created_at 后再筛选
 """
@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 from .common.config import (
     DEFAULT_SCORE_MODE,
-    NEW_PROJECT_DAYS,
+    DAYS_SINCE_CREATED,
 )
 
 logger = logging.getLogger("discover_hot")
@@ -60,8 +60,8 @@ def step2_rank_and_select(
     candidate_map: dict[str, dict],
     mode: str = DEFAULT_SCORE_MODE,
     db: dict | None = None,
-    new_project_days: int | None = None,
-    prefiltered_new_project_days: int | None = None,
+    days_since_created: int | None = None,
+    prefiltered_days_since_created: int | None = None,
 ) -> list[tuple[str, dict]]:
     """
     评分排序 + 截取 Top N。
@@ -73,7 +73,7 @@ def step2_rank_and_select(
     Returns:
         [(full_name, {"growth": int, "star": int, ...}), ...] 按 score 降序，返回全部排序结果。
     """
-    _new_days = new_project_days if new_project_days is not None else NEW_PROJECT_DAYS
+    _days_created = days_since_created if days_since_created is not None else DAYS_SINCE_CREATED
 
     def _calc_score(item: dict) -> float:
         g = item["growth"]
@@ -104,19 +104,19 @@ def step2_rank_and_select(
                 created_at[:10], "%Y-%m-%d"
             ).replace(tzinfo=timezone.utc)
             days_since = (datetime.now(timezone.utc) - created_date).days
-            return days_since <= _new_days
+            return days_since <= _days_created
         except (ValueError, TypeError):
             return False
 
     if mode == "hot_new":
-        if prefiltered_new_project_days == _new_days:
+        if prefiltered_days_since_created == _days_created:
             sorted_candidates = sorted(
                 candidate_map.items(),
                 key=lambda x: x[1]["growth"],
                 reverse=True,
             )
             logger.info(
-                f"Step 2 (hot_new): 候选池已前置筛选(<={_new_days}天)，"
+                f"Step 2 (hot_new): 候选池已前置筛选(<={_days_created}天)，"
                 f"直接按增长量排序 {len(candidate_map)} 个。"
             )
         else:
@@ -131,7 +131,7 @@ def step2_rank_and_select(
                 reverse=True,
             )
             logger.info(
-                f"Step 2 (hot_new): 兜底按新项目窗口(<={_new_days}天)过滤后，"
+                f"Step 2 (hot_new): 兜底按新项目窗口(<={_days_created}天)过滤后，"
                 f"保留 {len(new_projects)} 个。"
             )
     else:

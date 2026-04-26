@@ -68,8 +68,8 @@ class TestRanking:
         result = step2_rank_and_select(
             sample_candidates,
             mode="hot_new",
-            new_project_days=45,
-            prefiltered_new_project_days=45,
+            days_since_created=45,
+            prefiltered_days_since_created=45,
         )
         # 预筛选模式下全部候选都保留，按 growth 降序
         assert len(result) == 4
@@ -86,7 +86,7 @@ class TestRanking:
             "old/repo": {"growth": 2000, "star": 50000, "created_at": old_str},
         }
         result = step2_rank_and_select(
-            candidates, mode="hot_new", new_project_days=45,
+            candidates, mode="hot_new", days_since_created=45,
         )
         # 只保留新项目
         assert len(result) == 1
@@ -99,7 +99,7 @@ class TestRanking:
             "test-org/test-repo": {"growth": 800, "star": 5000},  # 无 created_at
         }
         result = step2_rank_and_select(
-            candidates, mode="hot_new", db=sample_db, new_project_days=60,
+            candidates, mode="hot_new", db=sample_db, days_since_created=60,
         )
         # DB 中 created_at="2026-03-01"，距今约 45 天
         assert len(result) == 1

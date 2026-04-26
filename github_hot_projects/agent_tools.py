@@ -8,7 +8,7 @@ Agent Tool 定义（执行层 · 工具中枢）
     agent.py / scheduled_update.py → 【agent_tools.py】→ ranking.py / report.py / growth_estimator.py / ...
 
 Tool 列表：
-  1. search_hot_projects    — 按关键词类别搜索热门仓库
+  1. search_by_keywords    — 按关键词类别搜索热门仓库
   2. scan_star_range        — 按 star 范围扫描仓库
   3. check_repo_growth      — 查询单个仓库实时详情及近期增长
   4. batch_check_growth     — 批量计算仓库增长并筛选候选
@@ -35,13 +35,14 @@ from .common.config import (
     HOT_PROJECT_COUNT,
     HOT_NEW_PROJECT_COUNT,
     MIN_STAR_FILTER,
-    NEW_PROJECT_DAYS,
+    DAYS_SINCE_CREATED,
     SEARCH_KEYWORDS,
+    SEARCH_MAX_PAGES,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
     STAR_RANGE_MAX,
     STAR_RANGE_MIN,
-    TIME_WINDOW_DAYS,
+    GROWTH_CALC_DAYS,
 )
 from .common.db import save_db, update_db_project
 from .common.github_api import (
@@ -170,12 +171,11 @@ def _ensure_project_record(
 # ══════════════════════════════════════════════════════════════
 
 
-def tool_search_hot_projects(
+def tool_search_by_keywords(
     token_mgr: TokenManager,
     categories: list[str] | None = None,
     project_min_star: int = MIN_STAR_FILTER,
-    max_pages: int = 3,
-    new_project_days: int | None = None,
+    days_since_created: int | None = None,
     *,
     min_stars: int | None = None,
 ) -> dict:
@@ -188,8 +188,7 @@ def tool_search_hot_projects(
         token_mgr:        TokenManager 实例
         categories:       搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
         project_min_star: 关键词搜索项目最低 star 过滤线
-        max_pages:        每个关键词搜索的最大页数
-        new_project_days: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
+        days_since_created: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
 
     Returns:
         {"repos": [{"full_name": ..., "star": ..., "description": ...}, ...],
@@ -201,18 +200,16 @@ def tool_search_hot_projects(
         project_min_star = min_stars
 
     validated = validate_tool_args(
-        "search_hot_projects",
+        "search_by_keywords",
         {
             "categories": categories,
             "project_min_star": project_min_star,
-            "max_pages": max_pages,
-            "new_project_days": new_project_days,
+            "days_since_created": days_since_created,
         },
     )
     categories = validated.get("categories")
     project_min_star = validated.get("project_min_star", MIN_STAR_FILTER)
-    max_pages = validated.get("max_pages", 3)
-    new_project_days = validated.get("new_project_days")
+    days_since_created = validated.get("days_since_created")
 
     if categories:
         keywords_dict = {k: v for k, v in SEARCH_KEYWORDS.items() if k in categories}
@@ -224,8 +221,8 @@ def tool_search_hot_projects(
 
     # 新项目模式：计算创建时间截止日期
     created_after = ""
-    if new_project_days is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=new_project_days)
+    if days_since_created is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_since_created)
         created_after = cutoff.strftime("%Y-%m-%d")
 
     raw_repos: dict[str, dict] = {}
@@ -245,7 +242,6 @@ def tool_search_hot_projects(
                     category=category,
                     keyword_idx=keyword_idx,
                     total_keywords=total_keywords,
-                    max_pages=max_pages,
                     created_after=created_after,
                     project_min_star_override=project_min_star,
                     _raw_repos=raw_repos,
@@ -285,7 +281,7 @@ def tool_scan_star_range(
     min_star: int = STAR_RANGE_MIN,
     max_star: int = STAR_RANGE_MAX,
     seen_repos: set[str] | None = None,
-    new_project_days: int | None = None,
+    days_since_created: int | None = None,
 ) -> dict:
     """
     Tool 2: 按 star 范围扫描仓库（并行）。
@@ -300,7 +296,7 @@ def tool_scan_star_range(
         min_star:         最低星数
         max_star:         最高星数
         seen_repos:       已扫描过的仓库集合（用于去重）
-        new_project_days: 新项目判定窗口（天），指定后在查询条件中加入 created:>=date 过滤项目
+        days_since_created: 新项目判定窗口（天），指定后在查询条件中加入 created:>=date 过滤项目
     """
     from datetime import timedelta
 
@@ -309,14 +305,14 @@ def tool_scan_star_range(
         {
             "min_star": min_star,
             "max_star": max_star,
-            "new_project_days": new_project_days,
+            "days_since_created": days_since_created,
         },
     )
     min_star, max_star = _normalize_star_range(
         validated.get("min_star", STAR_RANGE_MIN),
         validated.get("max_star", STAR_RANGE_MAX),
     )
-    new_project_days = validated.get("new_project_days")
+    days_since_created = validated.get("days_since_created")
 
     if seen_repos is None:
         seen_repos = set()
@@ -325,8 +321,8 @@ def tool_scan_star_range(
     created_after = ""
     extra_query = ""
     min_star_filter = min_star
-    if new_project_days is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=new_project_days)
+    if days_since_created is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_since_created)
         created_after = cutoff.strftime("%Y-%m-%d")
         extra_query = f"created:>={created_after}"
 
@@ -433,7 +429,7 @@ def tool_check_repo_growth(
     token_mgr: TokenManager,
     repo: str,
     db: dict | None = None,
-    time_window_days: int = TIME_WINDOW_DAYS,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
 ) -> dict:
     """
     Tool 3: 查询单个仓库近期 star 增长，实时获取项目详情并生成 LLM 描述。
@@ -444,17 +440,17 @@ def tool_check_repo_growth(
     Args:
         repo: "owner/repo" 格式
         db:   DB 字典（可选，仅用于读取描述缓存）
-        time_window_days: 增长统计窗口（天）
+        growth_calc_days: 增长统计窗口（天）
     """
     validated = validate_tool_args(
         "check_repo_growth",
         {
             "repo": repo,
-            "time_window_days": time_window_days,
+            "growth_calc_days": growth_calc_days,
         },
     )
     repo = validated.get("repo", repo)
-    time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
+    growth_calc_days = validated.get("growth_calc_days", GROWTH_CALC_DAYS)
 
     parts = repo.split("/", 1)
     if len(parts) != 2:
@@ -478,10 +474,10 @@ def tool_check_repo_growth(
         repo_name,
         current_star,
         token_idx=0,
-        time_window_days=time_window_days,
+        growth_calc_days=growth_calc_days,
     )
-    if time_window_days != TIME_WINDOW_DAYS:
-        method = f"自定义{time_window_days}天窗口，二分法/采样外推"
+    if growth_calc_days != GROWTH_CALC_DAYS:
+        method = f"自定义{growth_calc_days}天窗口，二分法/采样外推"
     else:
         method = "二分法/采样外推"
 
@@ -512,7 +508,7 @@ def tool_check_repo_growth(
         "current_star": current_star,
         "growth": growth_value,
         "growth_status": growth_status,
-        "time_window_days": time_window_days,
+        "growth_calc_days": growth_calc_days,
         "method": method,
         "meets_threshold": meets_threshold,
         "warning": growth_warning,
@@ -529,8 +525,8 @@ def tool_batch_check_growth(
     repos: list[dict],
     db: dict,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
-    new_project_days: int | None = None,
-    time_window_days: int = TIME_WINDOW_DAYS,
+    days_since_created: int | None = None,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
     force_refresh: bool = False,
     window_specified: bool = True,
 ) -> dict:
@@ -538,7 +534,7 @@ def tool_batch_check_growth(
     Tool 4: 批量计算仓库增长并筛选候选。
 
     使用 TokenWorkerPool + CalcGrowthTask 并行计算。
-    当 new_project_days 指定时，先按创建时间筛选新项目，只对新项目计算增长。
+    当 days_since_created 指定时，先按创建时间筛选新项目，只对新项目计算增长。
 
     增长计算策略：
     - 综合榜：未指定窗口用DB年龄窗口+DB差值；指定窗口匹配DB用差值；不匹配用实时
@@ -553,10 +549,10 @@ def tool_batch_check_growth(
         repos:            仓库列表（含 full_name, star, _raw）
         db:               DB 字典
         growth_threshold: 增长阈值
-        new_project_days: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
-        time_window_days: 增长统计窗口（天）
+        days_since_created: 新项目判定窗口（天），None 则不做创建时间筛选（全量计算）
+        growth_calc_days: 增长统计窗口（天）
         force_refresh:    定时脚本传入 True 以刷新DB快照；Agent 始终传入 False
-        window_specified: 调用方是否显式指定了 time_window_days
+        window_specified: 调用方是否显式指定了 growth_calc_days
     """
     from datetime import timedelta
 
@@ -564,22 +560,22 @@ def tool_batch_check_growth(
         "batch_check_growth",
         {
             "growth_threshold": growth_threshold,
-            "new_project_days": new_project_days,
-            "time_window_days": time_window_days,
+            "days_since_created": days_since_created,
+            "growth_calc_days": growth_calc_days,
         },
     )
     growth_threshold = validated.get("growth_threshold", STAR_GROWTH_THRESHOLD)
-    new_project_days = validated.get("new_project_days")
-    time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
+    days_since_created = validated.get("days_since_created")
+    growth_calc_days = validated.get("growth_calc_days", GROWTH_CALC_DAYS)
     # force_refresh 不在 schema 中，由定时脚本内部传递，跳过验证
     window_specified = bool(window_specified)
 
     # 新项目榜始终实时计算；综合榜根据窗口匹配决定
-    is_hot_new = new_project_days is not None
+    is_hot_new = days_since_created is not None
     if is_hot_new:
         use_realtime_growth = True  # 新项目榜：始终实时
     else:
-        use_realtime_growth = force_refresh or (window_specified and time_window_days != TIME_WINDOW_DAYS)
+        use_realtime_growth = force_refresh or (window_specified and growth_calc_days != GROWTH_CALC_DAYS)
 
     # DB写入权限：只有用户说"强制刷新"才允许写
     can_write_db = force_refresh
@@ -646,8 +642,8 @@ def tool_batch_check_growth(
 
     # ── 新项目前置筛选：仅保留创建时间在窗口内的仓库 ──
     skipped_count = 0
-    if new_project_days is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=new_project_days)
+    if days_since_created is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_since_created)
         filtered: dict[str, dict] = {}
         for fn, info in raw_repos.items():
             created_at = info.get("created_at", "")
@@ -665,7 +661,7 @@ def tool_batch_check_growth(
             except (ValueError, TypeError):
                 skipped_count += 1
         logger.info(
-            f"新项目前置筛选(<={new_project_days}天): "
+            f"新项目前置筛选(<={days_since_created}天): "
             f"原 {len(raw_repos)} 个 → 保留 {len(filtered)} 个, "
             f"跳过 {skipped_count} 个"
         )
@@ -685,7 +681,7 @@ def tool_batch_check_growth(
             "use_realtime_growth": use_realtime_growth,
             "can_write_db": can_write_db,
             "window_specified": window_specified,
-            "time_window_days": time_window_days,
+            "growth_calc_days": growth_calc_days,
             "is_hot_new": is_hot_new,
             "use_checkpoint": (not use_realtime_growth) and window_specified,
             "unresolved_count": [0],
@@ -706,7 +702,7 @@ def tool_batch_check_growth(
         pool.shutdown()
 
     db_updated = bool(can_write_db)
-    effective_time_window = growth_ctx.get("effective_time_window_days", time_window_days)
+    effective_time_window = growth_ctx.get("effective_growth_calc_days", growth_calc_days)
 
     return {
         "candidates": candidate_map,
@@ -719,8 +715,8 @@ def tool_batch_check_growth(
         "use_realtime_growth": use_realtime_growth,
         "db_updated": db_updated,
         "seeded_snapshot_count": seeded_count,
-        "time_window_days": effective_time_window,
-        "requested_time_window_days": time_window_days,
+        "growth_calc_days": effective_time_window,
+        "requested_growth_calc_days": growth_calc_days,
     }
 
 
@@ -729,8 +725,8 @@ def tool_rank_candidates(
     top_n: int | None = None,
     mode: str = DEFAULT_SCORE_MODE,
     db: dict | None = None,
-    new_project_days: int | None = None,
-    prefiltered_new_project_days: int | None = None,
+    days_since_created: int | None = None,
+    prefiltered_days_since_created: int | None = None,
 ) -> dict:
     """
     Tool 5: 对候选列表评分排序。
@@ -739,17 +735,17 @@ def tool_rank_candidates(
         candidates:       {full_name: {"growth": int, "star": int, "stars_today": int(可选)}}
         top_n:            取前 N 个
         mode:             评分模式 ("comprehensive" | "hot_new")
-        new_project_days: hot_new 模式下新项目判定窗口（天），None 则使用默认值
-        prefiltered_new_project_days:
+        days_since_created: hot_new 模式下新项目判定窗口（天），None 则使用默认值
+        prefiltered_days_since_created:
                           候选池在 batch_check_growth 阶段已按该窗口预筛；
-                          与 new_project_days 一致时，排名阶段可直接按增长排序
+                          与 days_since_created 一致时，排名阶段可直接按增长排序
     """
     validated = validate_tool_args(
         "rank_candidates",
         {
             "mode": mode,
             "top_n": top_n,
-            "new_project_days": new_project_days,
+            "days_since_created": days_since_created,
         },
     )
     mode = validated.get("mode", DEFAULT_SCORE_MODE)
@@ -757,13 +753,13 @@ def tool_rank_candidates(
         "top_n",
         HOT_NEW_PROJECT_COUNT if mode == "hot_new" else HOT_PROJECT_COUNT,
     )
-    new_project_days = validated.get("new_project_days")
-    prefiltered_new_project_days = _coerce_internal_optional_positive_int(prefiltered_new_project_days)
+    days_since_created = validated.get("days_since_created")
+    prefiltered_days_since_created = _coerce_internal_optional_positive_int(prefiltered_days_since_created)
 
     top = step2_rank_and_select(
         candidates, mode=mode, db=db,
-        new_project_days=new_project_days,
-        prefiltered_new_project_days=prefiltered_new_project_days,
+        days_since_created=days_since_created,
+        prefiltered_days_since_created=prefiltered_days_since_created,
     )[:top_n]
 
     # 注意: DB 保存逻辑在 agent.py 中统一处理，此处不直接调用 save_db
@@ -933,8 +929,10 @@ def tool_generate_report(
     top_projects: list[tuple[str, dict]],
     db: dict,
     mode: str = "comprehensive",
-    new_project_days: int | None = None,
-    time_window_days: int = TIME_WINDOW_DAYS,
+    days_since_created: int | None = None,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
+    growth_threshold: int = STAR_GROWTH_THRESHOLD,
+    min_star: int = MIN_STAR_FILTER,
 ) -> dict:
     """
     Tool 7: 生成完整 Markdown 报告。
@@ -945,8 +943,10 @@ def tool_generate_report(
         top_projects,
         db,
         mode=mode,
-        new_project_days=new_project_days,
-        time_window_days=time_window_days,
+        days_since_created=days_since_created,
+        growth_calc_days=growth_calc_days,
+        growth_threshold=growth_threshold,
+        min_star=min_star,
     )
     return {"report_path": report_path, "project_count": len(top_projects)}
 

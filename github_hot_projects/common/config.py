@@ -58,9 +58,10 @@ STAR_GROWTH_THRESHOLD: int = 800       # 窗口期 star 增长阈值
 MIN_STAR_FILTER: int = 1000            # 关键词搜索项目最低 star 过滤线
 HOT_PROJECT_COUNT: int = 100           # 综合热门项目默认输出数量（上限，有几个出几个）
 HOT_NEW_PROJECT_COUNT: int = 20        # 新项目榜默认输出数量（未指定 top_n 时使用）
-TIME_WINDOW_DAYS: int = 7              # 时间窗口（天）
-NEW_PROJECT_DAYS: int = 45             # 新项目判定窗口（创建时间距今 <= 45 天视为新项目）
-DATA_EXPIRE_DAYS: int = TIME_WINDOW_DAYS + 1  # DB 数据过期判定天数（必须 > TIME_WINDOW_DAYS）
+GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
+DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
+DATA_EXPIRE_DAYS: int = GROWTH_CALC_DAYS + 1  # DB 数据过期判定天数（必须 > GROWTH_CALC_DAYS）
+SEARCH_MAX_PAGES: int = 3              # 每个关键词搜索的最大页数（硬编码，不暴露给用户）
 
 # ──────────────────────────────────────────────────────────────
 # Star 范围扫描（补充关键词搜索未覆盖的热门仓库）
@@ -71,7 +72,7 @@ STAR_RANGE_MAX: int = 45000            # Star 范围扫描上界
 # ──────────────────────────────────────────────────────────────
 # 评分模式
 #   comprehensive — 综合排名（增长量 + 增长率，新项目平滑折扣）
-#   hot_new       — 新项目专榜（仅创建时间 <= NEW_PROJECT_DAYS 天的新项目，按增长量排序）
+#   hot_new       — 新项目专榜（仅创建时间 <= DAYS_SINCE_CREATED 天的新项目，按增长量排序）
 # ──────────────────────────────────────────────────────────────
 DEFAULT_SCORE_MODE: str = "comprehensive"
 

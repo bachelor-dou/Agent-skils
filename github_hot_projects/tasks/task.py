@@ -24,9 +24,10 @@ from datetime import datetime, timezone
 from ..common.config import (
     CHECKPOINT_FILE_PATH,
     MIN_STAR_FILTER,
+    SEARCH_MAX_PAGES,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
-    TIME_WINDOW_DAYS,
+    GROWTH_CALC_DAYS,
 )
 from ..common.db import (
     update_db_project,
@@ -144,7 +145,6 @@ class KeywordSearchTask(Task):
     category: str = ""
     keyword_idx: int = 0
     total_keywords: int = 0
-    max_pages: int = 3
     created_after: str = ""
     project_min_star_override: int = 0
     _raw_repos: dict = field(default=None, repr=False)
@@ -161,7 +161,7 @@ class KeywordSearchTask(Task):
         if self.created_after:
             query = f"{query} created:>={self.created_after}"
 
-        for page in range(1, self.max_pages + 1):
+        for page in range(1, SEARCH_MAX_PAGES + 1):
             items = search_github_repos(
                 self._token_mgr, query, token_idx, page=page, worker_idx=token_idx
             )
@@ -312,13 +312,13 @@ class CalcGrowthTask(Task):
         logger.info(
             f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
         )
-        time_window_days = TIME_WINDOW_DAYS
+        growth_calc_days = GROWTH_CALC_DAYS
         if self._ctx is not None:
-            time_window_days = self._ctx.get("time_window_days", TIME_WINDOW_DAYS)
+            growth_calc_days = self._ctx.get("growth_calc_days", GROWTH_CALC_DAYS)
         growth = estimate_star_growth_binary(
             self._token_mgr, owner, repo_name, self.current_star,
             token_idx=token_idx,
-            time_window_days=time_window_days,
+            growth_calc_days=growth_calc_days,
         )
         if growth >= 0 and growth > self.current_star:
             growth = self.current_star
@@ -444,7 +444,7 @@ def _submit_growth_tasks(
     checkpoint_dirty = False
     db_count = 0
 
-    time_window = growth_ctx.get("time_window_days", TIME_WINDOW_DAYS)
+    time_window = growth_ctx.get("growth_calc_days", GROWTH_CALC_DAYS)
     window_specified = bool(growth_ctx.get("window_specified", True))
     is_hot_new = bool(growth_ctx.get("is_hot_new", False))
     db_age = get_db_age_days(db)
@@ -453,10 +453,10 @@ def _submit_growth_tasks(
     if not is_hot_new and not window_specified:
         if db_age is not None and db_age > 0:
             time_window = db_age
-            growth_ctx["time_window_days"] = time_window
+            growth_ctx["growth_calc_days"] = time_window
             logger.info(f"综合榜未指定窗口：本轮自动采用 DB 年龄窗口 {time_window} 天。")
 
-    growth_ctx["effective_time_window_days"] = time_window
+    growth_ctx["effective_growth_calc_days"] = time_window
 
     # 判断能否走 DB 差值
     if is_hot_new:

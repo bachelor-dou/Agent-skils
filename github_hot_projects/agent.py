@@ -30,14 +30,14 @@ from .common.config import (
     MIN_STAR_FILTER,
     STAR_RANGE_MIN,
     STAR_RANGE_MAX,
-    TIME_WINDOW_DAYS,
+    GROWTH_CALC_DAYS,
     STAR_GROWTH_THRESHOLD,
     HOT_PROJECT_COUNT,
     HOT_NEW_PROJECT_COUNT,
-    NEW_PROJECT_DAYS,
+    DAYS_SINCE_CREATED,
 )
 from .agent_tools import (
-    tool_search_hot_projects,
+    tool_search_by_keywords,
     tool_scan_star_range,
     tool_check_repo_growth,
     tool_batch_check_growth,
@@ -48,7 +48,7 @@ from .agent_tools import (
     tool_fetch_trending,
     trending_repo_to_search_repo,
 )
-from .common.db import load_db, save_db_desc_only
+from .common.db import load_db, save_db_desc_only, get_db_age_days
 from .common.token_manager import TokenManager
 from .parsing.arg_validator import (
     validate_tool_args,
@@ -72,6 +72,9 @@ logger = logging.getLogger("discover_hot")
 # Agent 单轮最大 Tool 调用次数（防止无限循环）
 MAX_TOOL_CALLS_PER_TURN = 15
 
+# ──────────────────────────────────────────────────────────────
+# 工具名称索引：从 TOOL_SCHEMAS 提取，用于快速查找/校验工具名
+# ──────────────────────────────────────────────────────────────
 ALL_TOOL_NAMES = [
     schema.get("function", {}).get("name")
     for schema in TOOL_SCHEMAS
@@ -83,6 +86,11 @@ TOOL_SCHEMA_BY_NAME = {
     for schema in TOOL_SCHEMAS
     if schema.get("function", {}).get("name")
 }
+
+# ──────────────────────────────────────────────────────────────
+# 参数键索引：从 TOOL_PARAM_SCHEMA 提取全部参数名，
+# 排序后拼接成文本，嵌入到路由提示词中告知 LLM 允许的参数键
+# ──────────────────────────────────────────────────────────────
 ALL_TOOL_PARAM_NAMES = {
     param_name
     for schema in TOOL_PARAM_SCHEMA.values()
@@ -95,40 +103,40 @@ CANONICAL_ROUTE_PARAM_KEYS_TEXT = ", ".join(CANONICAL_ROUTE_PARAM_KEYS)
 # 提示词（意图分类阶段）
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-CONFIRMATION_PROMPT = f"""你是 GitHub 热门项目助手的轻量路由器，只输出结构化 JSON。
+CONFIRMATION_PROMPT = f"""你是 GitHub 热门项目助手的轻量路由器，任务是准确识别用户输入的意图，并只输出结构化 JSON。
 
 目标：
 1) 识别用户意图（intent_family）
-2) 抽取用户明确参数（specified_params）
-3) 仅在关键歧义时返回 ambiguous_fields
+2) 抽取用户指定的明确参数（specified_params）
+3) 存在关键歧义时返回 ambiguous_fields,
 4) 给出 suggested_tools（优先建议，不是强制流程）
 
 意图类型（选最匹配的一项）：
-- comprehensive_ranking：综合热榜
-- hot_new_ranking：新项目热榜（创建时间过滤）
-- keyword_ranking：关键词热榜
+- hot_new_ranking：新项目的热榜查询（创建时间过滤）
+- comprehensive_ranking：综合热榜查询
+- keyword_ranking：按关键词的热榜查询
 - trending_only：查看 Trending
 - repo_info：单仓库综合查询（默认：描述+增长）
 - repo_growth：仅增长
-- repo_description：仅介绍
+- repo_description：仅介绍仓库
 - db_info：本地 DB 查询
 - freeform_answer：基于上下文的解释/比较/质疑回复（可不调用工具）
 - unknown：无法稳定归类
 
-turn_kind（选最匹配的一项）：
-- new_request
-- request_modification
-- clarification_answer
-- execution_ack
-- fact_check
-- capability_query
-- greeting
-- unknown
+turn_kind（消息类型，选以下最匹配的一项）：
+- new_request：全新的独立请求，与上一轮无直接关联（如首次查询、换话题）
+- request_modification：对上一轮请求的参数调整（如"改成 top 10"、"换个关键词"）
+- clarification_answer：用户回答上一轮的澄清问题（如"综合榜"、"7天窗口")
+- execution_ack：用户确认执行（如"开始"、"是的"、"确认执行")
+- fact_check：针对具体事实的核查请求（如"langchain 近7天增长多少")
+- capability_query：询问助手能力范围（如"你能做什么"、"支持哪些查询")
+- greeting：问候或寒暄（如"你好"、"在吗")
+- unknown：无法稳定归类
 
 参数语义最小规则：
-- “近N天热榜/增长”优先映射为 time_window_days（增长统计窗口）
-- “近N天内创建的新项目”映射为 new_project_days（创建时间窗口）
-- repo_info 默认是综合查询；仅当用户明确说“只看增长/只看介绍”时改为单一意图
+- “近N天热榜/增长”优先映射为 growth_calc_days（增长统计窗口）
+- “近N天内创建的新项目”映射为 days_since_created（创建时间窗口）
+- repo_info 默认是综合查询；仅当用户明确说”只看增长/只看介绍”时改为单一意图
 - specified_params 只能使用 canonical key，不允许自造参数名。
 - canonical key 列表：{CANONICAL_ROUTE_PARAM_KEYS_TEXT}
 - 对无法映射的参数表达，放入 unresolved_constraints，不要放进 specified_params。
@@ -136,13 +144,13 @@ turn_kind（选最匹配的一项）：
 
 输出 JSON（仅以下字段，不要额外字段）：
 {{
-        "turn_kind": "...",
-        "intent_family": "...",
-        "intent_label_zh": "...",
-        "target_repo": "owner/repo 或空字符串",
-        "specified_params": {{}},
-        "unresolved_constraints": [],
-        "ambiguous_fields": [],
+        “turn_kind”: “...”,
+        “intent_family”: “...”,
+        “intent_label_zh”: “...”,
+        “target_repo”: “owner/repo 或空字符串”,
+        “specified_params”: {{}},
+        “unresolved_constraints”: [],
+        “ambiguous_fields”: [],
         "suggested_tools": ["tool_name"],
         "route_confidence": "high|medium|low",
         "report_requested": false,
@@ -152,11 +160,18 @@ turn_kind（选最匹配的一项）：
 }}
 
 约束：
-- 如果 ambiguous_fields 为空，should_execute_now 通常应为 true
+- 如果 ambiguous_fields 为空，should_execute_now 应为 true
 - fact_check 默认 should_execute_now=true 且 must_call_tool_before_reply=true
 - confirmation_text_zh 不能是 JSON
+- route_confidence 判断规则：
+  - high：用户意图清晰，参数完整，无歧义
+  - medium：能理解意图但部分参数不确定（默认值）
+  - low：无法稳定理解用户输入，意图模糊或超出能力范围，需要用户重述
 """
 
+# ──────────────────────────────────────────────────────────────
+# 对话轮次类型白名单（用于规范化路由输出的 turn_kind）
+# ──────────────────────────────────────────────────────────────
 TURN_KINDS = {
         "new_request",
         "request_modification",
@@ -172,6 +187,7 @@ TURN_KINDS = {
 # 意图类型 + 工具映射（混合架构核心）
 # ══════════════════════════════════════════════════════════════════════════════════════
 
+# 意图中文标签（用于用户确认文本和日志输出）
 INTENT_LABELS = {
     "comprehensive_ranking": "综合热榜",
     "hot_new_ranking": "新项目热榜",
@@ -185,19 +201,19 @@ INTENT_LABELS = {
     "unknown": "未确定请求",
 }
 
-# 意图 → 可用工具范围（LLM在此范围内自主选择）
+# 意图 → 可用工具范围（LLM在此范围内自主选择，用于裁剪 tools 参数）
 AVAILABLE_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "comprehensive_ranking": {
-        "search_hot_projects", "scan_star_range", "fetch_trending",
+        "search_by_keywords", "scan_star_range", "fetch_trending",
         "batch_check_growth", "rank_candidates", "generate_report",
     },
     "hot_new_ranking": {
-        "search_hot_projects", "scan_star_range", "fetch_trending",
+        "search_by_keywords", "scan_star_range", "fetch_trending",
         "batch_check_growth", "rank_candidates", "generate_report",
     },
     "keyword_ranking": {
-        "search_hot_projects",                 # 只需要关键词搜索
-        "batch_check_growth", "rank_candidates", "generate_report",
+        "search_by_keywords",                 # 只需要关键词搜索
+        "batch_check_growth", "rank_candidates",
     },
     "trending_only": {"fetch_trending"},
     "repo_info": {"describe_project", "check_repo_growth"},  # 单仓库综合查询，同时调用两个工具
@@ -208,16 +224,17 @@ AVAILABLE_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "unknown": set(ALL_TOOL_NAMES),
 }
 
-# 榜单型意图（需要候选收集→增长计算→排名的完整流程）
+# 榜单型意图集合：需要完整候选收集→增长计算→排名流程的意图类型
 RANKING_INTENTS = {"comprehensive_ranking", "hot_new_ranking", "keyword_ranking"}
 
-# 建议的候选收集工具（仅作提示，不强制阻断）
+# 建议的候选收集工具（仅作日志提示，不强制阻断执行）
 SUGGESTED_COLLECTION_TOOLS_BY_INTENT: dict[str, set[str]] = {
-    "comprehensive_ranking": {"search_hot_projects", "scan_star_range", "fetch_trending"},
-    "hot_new_ranking": {"search_hot_projects", "scan_star_range", "fetch_trending"},
-    "keyword_ranking": {"search_hot_projects"},
+    "comprehensive_ranking": {"search_by_keywords", "scan_star_range", "fetch_trending"},
+    "hot_new_ranking": {"search_by_keywords", "scan_star_range", "fetch_trending"},
+    "keyword_ranking": {"search_by_keywords"},
 }
 
+# 意图别名映射：将简写/常见写法映射到标准意图名
 INTENT_ALIASES = {
     "comprehensive": "comprehensive_ranking",
     "hot_new": "hot_new_ranking",
@@ -228,12 +245,12 @@ INTENT_ALIASES = {
     "freeform": "freeform_answer",
 }
 
-# 参数显示（用于生成确认文本）
+# 参数渲染器：将参数键值转换为用户可见的确认文本片段
 PARAM_DISPLAYERS = {
     "categories": lambda v: f"关注方向为{'、'.join(v)}" if isinstance(v, list) and v else None,
     "project_min_star": lambda v: f"关键词搜索最低star为{v}",
-    "time_window_days": lambda v: f"统计近{v}天的增长",
-    "new_project_days": lambda v: f"只看近{v}天内创建的项目",
+    "growth_calc_days": lambda v: f"统计近{v}天的增长",
+    "days_since_created": lambda v: f"只看近{v}天内创建的项目",
     "growth_threshold": lambda v: f"增长门槛为{v}",
     "top_n": lambda v: f"返回前{v}名",
     "trending_range": lambda v: f"Trending范围:{v}",
@@ -241,24 +258,77 @@ PARAM_DISPLAYERS = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════
+# 路由状态模型：两阶段分离架构的数据载体
+# ══════════════════════════════════════════════════════════════════════════════════════
+#
+# ┌─────────────────────────────────────────────────────────────────────────────────┐
+# │                        路由阶段 → 执行阶段 数据流                                │
+# │                                                                                 │
+# │  用户消息                                                                       │
+# │      │                                                                          │
+# │      ▼                                                                          │
+# │  _build_route_pending_request()                                                 │
+# │      │ 调用路由 LLM                                                             │
+# │      ▼                                                                          │
+# │  ┌─────────────────────┐         ┌──────────────────────┐                       │
+# │  │   PendingRequest    │ ──────► │   ResolvedRequest    │                       │
+# │  │   (待确认状态)       │ 确认后  │   (已冻结参数)       │                       │
+# │  │                     │         │                      │                       │
+# │  │ - intent_family     │         │ - resolved_params    │                       │
+# │  │ - user_params       │         │   (用户+默认合并)    │                       │
+# │  │ - ambiguous_fields  │         │ - suggested_tools    │                       │
+# │  │ - should_execute_now│         │                      │                       │
+# │  └─────────────────────┘         └──────────────────────┘                       │
+# │                                          │                                      │
+# │                                          ▼                                      │
+# │                                    Tool 执行阶段                                │
+# │                                    (参数注入 + 工具调用)                         │
+# └─────────────────────────────────────────────────────────────────────────────────┘
+#
+# PendingRequest：路由 LLM 的原始输出，可能包含歧义
+# ResolvedRequest：参数已合并冻结，准备执行
+#
+# ══════════════════════════════════════════════════════════════════════════════════════
+
 @dataclass
 class PendingRequest:
-    turn_kind: str = "unknown"
-    intent_family: str = "unknown"
-    intent_label_zh: str = "未确定请求"
-    target_repo: str = ""
-    user_specified_params: dict[str, object] = field(default_factory=dict)
-    unresolved_constraints: list[str] = field(default_factory=list)
-    ambiguous_fields: list[str] = field(default_factory=list)
-    suggested_tools: list[str] = field(default_factory=list)
-    route_confidence: str = "medium"
-    confirmation_text_zh: str = ""
-    report_requested: bool = False
-    should_execute_now: bool = False
-    must_call_tool_before_reply: bool = False
-    source_turn_id: int = 0
+    """
+    待确认请求：路由解析阶段的中间状态
+
+    生命周期：
+      1. 路由 LLM 解析用户消息 → 输出 PendingRequest
+      2. 若有歧义（ambiguous_fields 非空）→ 等待用户澄清
+      3. 用户确认后 → 转换为 ResolvedRequest（参数冻结）
+
+    核心字段：
+      - turn_kind: 轮次类型（new_request/follow_up/fact_check/...）
+      - intent_family: 意图类型（comprehensive_ranking/keyword_ranking/...）
+      - user_specified_params: 用户明确指定的参数
+      - ambiguous_fields: 有歧义需要澄清的字段
+      - should_execute_now: 是否可以直接执行（无歧义时为 True）
+
+    注意：
+      - 参数未合并默认值，只存储用户原始指定
+      - 状态可变，等待用户澄清或确认
+    """
+    turn_kind: str = "unknown"  # 轮次类型：new_query/follow_up/fact_check/clarification
+    intent_family: str = "unknown"  # 意图：comprehensive_ranking/keyword_ranking/repo_analysis 等
+    intent_label_zh: str = "未确定请求"  # 意图的中文显示名称，用于生成确认文本
+    target_repo: str = ""  # 目标仓库，如 "facebook/react"
+    user_specified_params: dict[str, object] = field(default_factory=dict)  # 用户明确指定的参数（growth_calc_days/language 等）
+    unresolved_constraints: list[str] = field(default_factory=list)  # 无法解析的约束，如 "无法映射参数名: xyz"
+    ambiguous_fields: list[str] = field(default_factory=list)  # 存在歧义的字段，需要用户澄清
+    suggested_tools: list[str] = field(default_factory=list)  # 路由建议调用的工具列表
+    route_confidence: str = "medium"  # 路由置信度：high/medium/low
+    confirmation_text_zh: str = ""  # 向用户展示的确认/澄清文本
+    report_requested: bool = False  # 用户是否请求生成报告
+    should_execute_now: bool = False  # 是否可以立即执行（无歧义时为 True）
+    must_call_tool_before_reply: bool = False  # 是否必须在回复前调用工具获取数据
+    source_turn_id: int = 0  # 来源轮次 ID，用于追踪请求来源
 
     def to_dict(self) -> dict[str, object]:
+        """转换为字典格式，用于日志输出和上下文传递。"""
         return {
             "turn_kind": self.turn_kind,
             "intent_family": self.intent_family,
@@ -279,6 +349,25 @@ class PendingRequest:
 
 @dataclass
 class ResolvedRequest:
+    """
+    已确认请求：路由解析完成后的冻结执行参数
+
+    生命周期：
+      1. PendingRequest 用户确认后 → 调用 _resolve_pending_request()
+      2. 合并用户参数 + 意图默认参数 → ResolvedRequest
+      3. 注入到执行阶段（_call_llm 的 system prompt）
+
+    核心字段：
+      - resolved_params: 最终执行参数（用户参数 + 默认参数）
+      - user_specified_params: 用户原始指定（用于区分参数来源）
+      - defaulted_params: 默认填充的参数（用于区分参数来源）
+      - suggested_tools: 建议调用的工具列表
+
+    特点：
+      - 参数已冻结，不再变化
+      - 无歧义，可直接执行
+      - 用于驱动 Tool 执行阶段的参数注入
+    """
     turn_kind: str = "unknown"
     intent_family: str = "unknown"
     intent_label_zh: str = "未确定请求"
@@ -293,9 +382,11 @@ class ResolvedRequest:
     confirmation_text_zh: str = ""
 
     def requires_full_collection(self) -> bool:
+        """判断是否为榜单型意图，需要完整的候选收集流程。"""
         return self.intent_family in RANKING_INTENTS
 
     def to_dict(self) -> dict[str, object]:
+        """转换为字典格式，用于日志输出和上下文传递。"""
         return {
             "turn_kind": self.turn_kind,
             "intent_family": self.intent_family,
@@ -312,6 +403,7 @@ class ResolvedRequest:
         }
 
     def to_execution_context(self) -> str:
+        """生成执行上下文文本，注入到 system prompt 中指导 LLM 执行。"""
         lines = [
             "[已确认请求]",
             f"turn_kind={self.turn_kind}",
@@ -330,57 +422,71 @@ class ResolvedRequest:
 # SYSTEM_PROMPT（LLM自主决策阶段 - 工具详情已通过API tools参数传递）
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = f"""你是GitHub热门项目发现助手。根据用户需求自主调用提供的工具完成任务。
+SYSTEM_PROMPT = f"""你是GitHub热门项目发现助手。根据用户需求自主调用提供的工具来完成任务。
 你以 ReAct 方式工作：先理解问题，再决定是否调用工具，基于观察继续决策，最后给出结论。
 
 规则：
 1. 涉及事实数据（star、增长、创建时间、Trending）时，不要编造，优先调用工具核查。
 2. 路由提示是“优先建议”，不是硬限制；如果证据不足或工具报错，可调整工具选择。
 3. 单仓库默认优先综合查询（describe_project + check_repo_growth）；用户明确“只看增长/只看介绍”时再单工具。
-4. time_window_days=增长统计窗口；new_project_days=创建时间窗口，两者可同时存在且互不覆盖。
+4. growth_calc_days=增长统计窗口；days_since_created=创建时间窗口，两者可同时存在且互不覆盖。
 5. 工具返回参数错误时，先修正后重试一次；仍失败再向用户澄清。
 6. 用户做解释/比较/质疑追问时，可直接回答；必要时再做最小化取证。
 
-默认值：time_window_days={TIME_WINDOW_DAYS}，growth_threshold={STAR_GROWTH_THRESHOLD}，
-综合榜top_n={HOT_PROJECT_COUNT}，新项目榜top_n={HOT_NEW_PROJECT_COUNT}，新项目窗口={NEW_PROJECT_DAYS}天。
 """
 
 
 @dataclass
 class AgentState:
-    """Agent 运行时状态，在整个会话期间保持。"""
+    """
+    Agent 运行时状态，在整个会话期间保持。
+
+    包含三类数据：
+      - 基础设施：Token 管理器、DB、对话历史
+      - 流程缓存：搜索结果、候选列表、排序结果（供多个 Tool 间共享）
+      - 路由状态：确认门控、已解析请求、活跃仓库等
+    """
+    # ─── 基础设施 ───
     token_mgr: TokenManager = field(default_factory=TokenManager)
     db: dict = field(default_factory=dict)
     conversation: list[dict] = field(default_factory=list)
-    # 缓存：搜索结果、候选列表，供多个 Tool 间共享
-    last_search_repos: list[dict] = field(default_factory=list)
-    last_candidates: dict[str, dict] = field(default_factory=dict)
-    last_candidate_new_project_days: int | None = None
-    last_ranked: list[tuple[str, dict]] = field(default_factory=list)
-    last_mode: str = "comprehensive"
-    last_time_window_days: int = TIME_WINDOW_DAYS
-    seen_repos: set[str] = field(default_factory=set)
-    current_user_turn: int = 0
-    discovery_turn_id: int | None = None
-    awaiting_confirmation: bool = False
-    pending_request: PendingRequest | None = None
-    last_confirmed_request: ResolvedRequest | None = None
-    current_turn_tools: set[str] = field(default_factory=set)
-    current_turn_tool_call_count: int = 0
-    current_turn_requires_tool_call: bool = False
-    active_repo: str | None = None
-    recent_verified_claims: list[dict[str, object]] = field(default_factory=list)
-    # 对话记忆：历史摘要
-    conversation_summary: str = ""  # 早期对话的摘要（压缩后保留）
+
+    # ─── 流程缓存：榜单构建各阶段的中间结果 ───
+    last_search_repos: list[dict] = field(default_factory=list)  # 搜索阶段收集的仓库
+    last_candidates: dict[str, dict] = field(default_factory=dict)  # 增长筛选后的候选
+    last_candidate_days_since_created: int | None = None  # 增长筛选时使用的新项目窗口
+    last_ranked: list[tuple[str, dict]] = field(default_factory=list)  # 排序后的 Top N
+    last_mode: str = "comprehensive"  # 当前榜单模式
+    last_growth_calc_days: int = GROWTH_CALC_DAYS  # 当前增长统计窗口
+    last_growth_threshold: int = STAR_GROWTH_THRESHOLD  # 当前增长阈值
+    last_min_star: int = MIN_STAR_FILTER  # 当前最低 star 过滤值
+    seen_repos: set[str] = field(default_factory=set)  # 已扫描仓库（用于去重）
+
+    # ─── 路由状态：确认门控和请求追踪 ───
+    current_user_turn: int = 0  # 当前用户轮次计数
+    discovery_turn_id: int | None = None  # 当前榜单构建轮次（用于重置缓存）
+    awaiting_confirmation: bool = False  # 是否等待用户确认
+    pending_request: PendingRequest | None = None  # 待确认请求
+    last_confirmed_request: ResolvedRequest | None = None  # 已确认请求
+    current_turn_tools: set[str] = field(default_factory=set)  # 本轮已调用的工具
+    current_turn_tool_call_count: int = 0  # 本轮 Tool 调用计数
+    current_turn_requires_tool_call: bool = False  # 本轮是否必须先调用 Tool
+    active_repo: str | None = None  # 当前活跃仓库（用于追问上下文）
+    recent_verified_claims: list[dict[str, object]] = field(default_factory=list)  # 近期核查的事实
+
+    # ─── 对话记忆 ───
+    conversation_summary: str = ""  # 早期对话的语义摘要（压缩后保留）
 
     def __post_init__(self):
+        """初始化后自动加载 DB（若未提供）。"""
         if not self.db:
             self.db = load_db()
 
-# 对话历史最大消息数（超过后触发压缩）
-MAX_CONVERSATION_MESSAGES = 40
-# 压缩后保留最近的消息数
-KEEP_RECENT_MESSAGES = 10
+# ──────────────────────────────────────────────────────────────
+# 对话历史压缩参数：超过上限时触发 LLM 摘要压缩
+# ──────────────────────────────────────────────────────────────
+MAX_CONVERSATION_MESSAGES = 40  # 触发压缩的消息数上限
+KEEP_RECENT_MESSAGES = 10  # 压缩后保留的最近消息数
 
 
 class HotProjectAgent:
@@ -397,7 +503,7 @@ class HotProjectAgent:
     """
 
     def __init__(self) -> None:
-        """Initialize agent state and seed system prompt."""
+        """初始化 Agent 状态并注入系统提示词。"""
         self.state = AgentState()
         # 初始化会话，加入 System Prompt
         self.state.conversation.append({
@@ -584,9 +690,6 @@ class HotProjectAgent:
         if resolved is None:
             return TOOL_SCHEMAS
 
-        if resolved.route_confidence == "low":
-            return TOOL_SCHEMAS
-
         # 自由回答/未知意图默认开放全工具，保证可扩展性
         if resolved.intent_family in {"freeform_answer", "unknown"}:
             return TOOL_SCHEMAS
@@ -642,7 +745,7 @@ class HotProjectAgent:
                 "created_at": result.get("created_at"),
                 "current_star": result.get("current_star"),
                 "growth": result.get("growth"),
-                "time_window_days": result.get("time_window_days"),
+                "growth_calc_days": result.get("growth_calc_days"),
                 "source_tool": tool_name,
                 "turn": self.state.current_user_turn,
             }
@@ -695,6 +798,7 @@ class HotProjectAgent:
 
         for attempt in range(3):
             try:
+                logger.info("%s 开始 LLM 调用: model=%s, attempt=%d", log_prefix, LLM_MODEL, attempt + 1)
                 resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=300)
                 if resp.status_code == 200:
                     try:
@@ -742,54 +846,130 @@ class HotProjectAgent:
 
         return None
 
+# ══════════════════════════════════════════════════════════════════════════════════════
+    # 路由门禁：两阶段分离架构的核心入口
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    #
+    # 设计思想：
+    #   路由阶段（本函数）→ 只做意图识别 + 参数抽取，不执行工具
+    #   执行阶段（_call_llm）→ LLM 自主调用工具完成任务
+    #
+    # 返回值：(reply, confirmed)
+    #   - reply ≠ None    → 拦截，返回澄清/确认文本给用户
+    #   - reply = None    → 放行，进入执行阶段
+    #   - confirmed = True → 已确认可执行，注入路由结果到执行阶段
+    #
+    # 状态流转：
+    #   awaiting_confirmation = True  → 等待用户澄清/确认
+    #   pending_request            → 待确认的请求（路由解析结果）
+    #   last_confirmed_request     → 已确认的请求（参数已冻结，准备执行）
+    #
+    # ══════════════════════════════════════════════════════════════════════════════════════
+
     def _maybe_handle_confirmation_gate(self, user_message: str) -> tuple[str | None, bool]:
-        """轻量路由门禁：仅在关键歧义时澄清，其他情况直接执行。"""
+        """
+        路由门禁：意图识别 + 参数抽取 + 确认门控
+
+        流程决策树：
+        ┌────────────────────────────────────────────────────────────────────────────┐
+        │ 1. 消息为空 → 返回提示                                                       │
+        │                                                                            │
+        │ 2. awaiting_confirmation=True 且用户回复确认词（"是"/"开始"等）              │
+        │    ├─ pending_request 不存在 → 返回提示（状态异常）                          │
+        │    ├─ ambiguous_fields 非空 → 继续返回澄清文本（用户没解决歧义）              │
+        │    └─ 无歧义 → 转为 ResolvedRequest，放行执行                               │
+        │                                                                            │
+        │ 3. awaiting_confirmation=False 且用户回复确认词 → 返回提示（无待确认请求）   │
+        │                                                                            │
+        │ 4. 其他情况（新消息或澄清内容）                                              │
+        │    ├─ 调用路由 LLM 解析 → PendingRequest                                   │
+        │    ├─ ambiguous_fields 非空 → awaiting=True，返回澄清文本                  │
+        │    └─ 无歧义 → 转为 ResolvedRequest，放行执行                               │
+        └────────────────────────────────────────────────────────────────────────────┘
+        """
         text = (user_message or "").strip()
+
+        # ── 分支1：空消息处理 ───────────────────────────────────────────────────────────
         if not text:
             self.state.awaiting_confirmation = False
             return "请直接告诉我你想看的 GitHub 热门项目需求。", False
 
-        if self._is_capability_or_greeting(text):
-            self.state.awaiting_confirmation = False
-            return self._scoped_capability_reply(), False
-
+        # ── 分支2：用户在"等待确认"状态下回复了确认词 ───────────────────────────────────
+        #    场景：上一轮路由发现有歧义，返回了澄清文本，awaiting=True
+        #    用户这一轮回复"是"/"开始"/"确认"等确认词
         if self.state.awaiting_confirmation and self._is_confirmation_ack(text):
             pending = self.state.pending_request
+
+            # 子分支2a：pending_request 不存在（状态异常，可能是会话重置）
             if pending is None:
                 self.state.awaiting_confirmation = False
                 return "请直接描述要查询的 GitHub 热门项目需求。", False
+
+            # 子分支2b：ambiguous_fields 非空 → 用户只回复了确认词，但没解决歧义
+            #           继续返回澄清文本，引导用户补充具体信息
+            #           例如：系统问"榜单类型是综合榜还是新项目榜？"，用户只回复"开始"
             if pending.ambiguous_fields:
                 return self._render_clarification_message(pending), False
 
+            # 子分支2c：无歧义 → 用户确认执行
+            #           将 PendingRequest 转为 ResolvedRequest（参数冻结）
+            #           清空等待状态，放行进入执行阶段
             self.state.awaiting_confirmation = False
             resolved = self._resolve_pending_request(pending)
             self.state.last_confirmed_request = resolved
             self.state.pending_request = None
             self._sync_active_repo_from_resolved_request(resolved)
-            return None, True
+            return None, True  # 放行，进入执行阶段
 
+        # ── 分支3：用户回复确认词，但当前不在"等待确认"状态 ──────────────────────────────
+        #    场景：用户误回复"开始"，但上一轮并没有待确认的请求
         if not self.state.awaiting_confirmation and self._is_confirmation_ack(text):
             self.state.awaiting_confirmation = False
-            return "请先直接描述要查询的 GitHub 热门项目需求。", False
+            return "请先直接描述要查询的 GitHub 烳门项目需求。", False
 
+        # ── 分支4：新消息或澄清内容 → 调用路由 LLM 解析 ────────────────────────────────
+        #    这是核心路由流程：调用 CONFIRMATION_PROMPT 让 LLM 识别意图和抽取参数
         pending = self._build_route_pending_request()
         self.state.pending_request = pending
         self.state.last_confirmed_request = None
 
-        if pending.ambiguous_fields or not pending.should_execute_now:
+        # 子分支4a：有歧义、路由判定不可立即执行、或置信度低 → 拦截，等待用户澄清
+        if pending.ambiguous_fields or not pending.should_execute_now or pending.route_confidence == "low":
             self.state.awaiting_confirmation = True
             return self._render_clarification_message(pending), False
 
+        # 子分支4b：无歧义，可直接执行 → 转为 ResolvedRequest，放行
         self.state.awaiting_confirmation = False
         resolved = self._resolve_pending_request(pending)
         self.state.last_confirmed_request = resolved
         self.state.pending_request = None
         self._sync_active_repo_from_resolved_request(resolved)
-        return None, True
+        return None, True  # 放行，进入执行阶段
+
+    # ────────────────────────────────────────────────────────────────────────────────────
+    # 确认词识别：判断用户消息是否为"确认执行"意图
+    # ────────────────────────────────────────────────────────────────────────────────────
+    #
+    # 设计原则：
+    #   1. 短文本（≤16字符）→ 更可能是确认词
+    #   2. 无数字 → 避误判"top 20"、"30天内"等为确认词
+    #   3. 精确匹配 + 可扩展后缀 → 支持"开始"/"开始吧"/"开始呀"等变体
+    #
+    # ────────────────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _is_confirmation_ack(message: str) -> bool:
-        """判断用户是否在确认执行。"""
+        """
+        判断用户消息是否为"确认执行"意图
+
+        匹配规则：
+          - 精确匹配：是、是的、开始、确认、执行、继续、好的、好、可以、行、没问题、ok、okay、yes
+          - 后缀扩展：支持语气词后缀（吧/呀/啊/哈/啦/了），如"开始吧"、"好的呀"
+
+        过滤规则：
+          - 长度 > 16 → 不匹配（避免误判正常查询）
+          - 包含数字 → 不匹配（避免误判"top 20"、"30天"等）
+        """
         normalized = message.strip().lower().rstrip("。！？!?")
         if not normalized:
             return False
@@ -823,39 +1003,40 @@ class HotProjectAgent:
         for kw in expandable_keywords:
             if any(normalized == f"{kw}{suffix}" for suffix in suffixes):
                 return True
-
         return False
 
-    @staticmethod
-    def _is_capability_or_greeting(message: str) -> bool:
-        """识别问候或能力范围咨询，避免 LLM 生成泛化欢迎语。"""
-        text = message.strip().lower()
-        if not text:
-            return False
 
-        scope_keywords = ("github", "热榜", "热门", "trending", "增长", "仓库", "项目", "报告", "新项目")
-        capability_keywords = ("你能做什么", "你会什么", "帮助", "help", "支持什么", "有哪些功能")
-        greeting_keywords = ("你好", "您好", "hello", "hi", "在吗", "嗨")
-
-        if any(keyword in text for keyword in capability_keywords):
-            return True
-
-        if any(text == keyword or text.startswith(f"{keyword}") for keyword in greeting_keywords):
-            return not any(keyword in text for keyword in scope_keywords)
-
-        return False
-
-    @staticmethod
-    def _scoped_capability_reply() -> str:
-        """固定的域内欢迎语，避免能力边界漂移。"""
-        return (
-            "你好！我是 GitHub 热门项目助手，可以帮你查看综合热榜、新项目热榜、Trending、"
-            "单个仓库近期增长、历史数据和报告。直接告诉我你的需求，我会尽量直接执行；"
-            "只有关键歧义时才会向你澄清。"
-        )
+    # ────────────────────────────────────────────────────────────────────────────────────
+    # 路由 LLM 调用：意图识别 + 参数抽取的核心流程
+    # ────────────────────────────────────────────────────────────────────────────────────
+    #
+    # 输入：
+    #   - CONFIRMATION_PROMPT（路由 prompt，定义意图类型和参数规则）
+    #   - 上下文数据包（对话历史、活跃仓库、已验证事实等）
+    #
+    # 输出：
+    #   - PendingRequest（结构化请求，包含意图、参数、歧义字段等）
+    #
+    # 特点：
+    #   - 不传工具定义（tools=None），只做意图识别，不执行工具
+    #   - 低温度（temperature=0.1），稳定输出结构化 JSON
+    #   - 短输出（max_tokens=1024），节省 token
+    #
+    # ────────────────────────────────────────────────────────────────────────────────────
 
     def _build_route_pending_request(self) -> PendingRequest:
-        """调用路由解析器，生成结构化请求判定。"""
+        """
+        调用路由 LLM，解析用户意图和参数
+
+        流程：
+          1. 构建 payload：CONFIRMATION_PROMPT + 上下文数据包
+          2. 调用 LLM（不传工具定义，只做意图识别）
+          3. 解析输出 JSON → PendingRequest
+
+        失败处理：
+          - LLM 调用失败 → 返回默认 PendingRequest（ambiguous_fields 非空）
+          - JSON 解析失败 → 返回默认 PendingRequest
+        """
         payload_messages = [
             {"role": "system", "content": CONFIRMATION_PROMPT},
             {
@@ -870,13 +1051,13 @@ class HotProjectAgent:
             temperature=0.1,
             max_tokens=1024,
             log_prefix="[Agent-Route]",
-            enable_thinking=False,
+            enable_thinking=True,
         )
         fallback = self._default_confirmation_message()
         if response is None:
             return PendingRequest(
                 confirmation_text_zh=fallback,
-                ambiguous_fields=["暂时无法完成语义路由，请重试或补充关键条件"],
+                ambiguous_fields=["暂时无法完成语义，请重试或补充关键条件"],
                 source_turn_id=self.state.current_user_turn,
             )
 
@@ -885,14 +1066,30 @@ class HotProjectAgent:
         return self._parse_pending_request_content(content)
 
     def _build_parse_context_payload(self) -> dict[str, object]:
-        """Build compact context payload for the route model."""
+        """
+        构建路由解析所需的紧凑上下文数据包
+
+        包含内容：
+          - current_user_turn: 当前用户轮次计数
+          - recent_dialogue: 最近 8 条对话（user/assistant 角色）
+          - active_repo: 当前活跃仓库（用于追问上下文）
+          - recent_verified_claims: 近期核查的事实（用于 fact_check 场景）
+          - pending_request: 上轮待确认请求（用于 clarification_answer 场景）
+
+        不包含：
+          - last_confirmed_request: 不传递，避免干扰路由 LLM 的输出格式
+            （last_confirmed_request 仅在执行阶段注入到 system prompt）
+
+        目的：
+          - 提供足够上下文让路由 LLM 判断轮次类型和意图
+          - 避免传递过多信息导致 token 浪费或输出干扰
+        """
         recent_messages = [
             {"role": msg["role"], "content": msg.get("content") or ""}
             for msg in self.state.conversation[-8:]
             if msg.get("role") in {"user", "assistant"}
         ]
-        # 注意：不传递 last_confirmed_request，避免干扰 LLM 输出格式
-        # last_confirmed_request 仅在执行阶段注入到 system prompt
+
         return {
             "current_user_turn": self.state.current_user_turn,
             "recent_dialogue": recent_messages,
@@ -903,15 +1100,15 @@ class HotProjectAgent:
 
     @staticmethod
     def _default_confirmation_message() -> str:
-        """Fallback clarification message when route model output is invalid."""
+        """路由解析失败时的兜底澄清消息。"""
         return (
-            "我暂时无法稳定判断你的请求路由。"
+            "我暂时无法稳定判断你的请求。"
             "请直接补充关键条件（例如仓库名、时间窗口或榜单类型），我会继续执行。"
         )
 
     @staticmethod
     def _normalize_ambiguous_fields(raw_ambiguous: object) -> list[str]:
-        """Normalize ambiguous field list and keep insertion order."""
+        """规范化歧义字段列表，保持插入顺序并去重。"""
         if not isinstance(raw_ambiguous, list):
             return []
         values = [str(item).strip() for item in raw_ambiguous if str(item).strip()]
@@ -919,7 +1116,7 @@ class HotProjectAgent:
 
     @staticmethod
     def _collect_unresolved_constraints(raw_unresolved: object, dropped_keys: list[str]) -> list[str]:
-        """Collect unresolved constraints from router output and local drops."""
+        """收集路由输出中的未解析约束和本地丢弃的参数键。"""
         unresolved: list[str] = []
         if isinstance(raw_unresolved, list):
             unresolved.extend(
@@ -931,9 +1128,32 @@ class HotProjectAgent:
         return list(dict.fromkeys(unresolved))
 
     def _parse_pending_request_content(self, content: str) -> PendingRequest:
-        """Parse route model JSON content into a normalized PendingRequest."""
+        """
+        解析路由 LLM 输出的 JSON，生成规范化的 PendingRequest
+
+        处理流程：
+          1. 提取 JSON 对象（extract_json_object）
+          2. 归一化各字段（turn_kind、intent_family、specified_params 等）
+          3. 收集未解析约束和歧义字段
+          4. 计算 should_execute_now（无歧义且无未解析约束时为 True）
+          5. 生成确认/澄清文本（confirmation_text_zh）
+
+        字段归一化：
+          - turn_kind: 映射到 TURN_KINDS 白名单
+          - intent_family: 映射到 INTENT_LABELS + INTENT_ALIASES
+          - specified_params: 过滤非法参数名，只保留 ALL_TOOL_PARAM_NAMES
+          - suggested_tools: 过滤非法工具名，只保留 TOOL_SCHEMA_NAME_SET
+
+        失败处理：
+          - JSON 提取失败 → 返回默认 PendingRequest（ambiguous_fields 非空）
+        """
+        # 生成兜底澄清文本（用于 JSON 解析失败时）
         fallback = sanitize_confirmation_fallback(content, self._default_confirmation_message())
+
+        # 从 LLM 输出中提取 JSON 对象
         payload = extract_json_object(content)
+
+        # JSON 提取失败 → 返回默认 PendingRequest，标记歧义并拦截
         if not isinstance(payload, dict):
             return PendingRequest(
                 confirmation_text_zh=fallback,
@@ -942,12 +1162,19 @@ class HotProjectAgent:
                 source_turn_id=self.state.current_user_turn,
             )
 
+        # ── 字段归一化：将 LLM 输出映射到系统标准值 ──
+
+        # turn_kind: 映射到白名单，非法值归为 "unknown"
         turn_kind = normalize_turn_kind(payload.get("turn_kind"), turn_kinds=TURN_KINDS)
+
+        # intent_family: 别名映射 + 白名单校验，非法值归为 "unknown"
         intent_family = normalize_intent_family(
             payload.get("intent_family"),
             intent_aliases=INTENT_ALIASES,
             intent_labels=INTENT_LABELS,
         )
+
+        # specified_params: 过滤非法参数名，只保留合法键；dropped_param_keys 记录被丢弃的键
         specified_params, dropped_param_keys, param_notes = normalize_specified_params(
             payload.get("specified_params"),
             allowed_param_names=ALL_TOOL_PARAM_NAMES,
@@ -955,17 +1182,22 @@ class HotProjectAgent:
         if param_notes:
             logger.debug("[Agent-Route] 参数归一化: %s", " | ".join(param_notes))
 
+        # 收集未解析约束（LLM 标记的 + 本地丢弃的参数键）
         unresolved_constraints = self._collect_unresolved_constraints(
             payload.get("unresolved_constraints"),
             dropped_param_keys,
         )
+
+        # 规范化歧义字段列表（去重保序）
         normalized_ambiguous = self._normalize_ambiguous_fields(payload.get("ambiguous_fields"))
 
+        # suggested_tools: 过滤非法工具名，只保留白名单内的
         suggested_tools = normalize_tool_names(
             payload.get("suggested_tools"),
             allowed_tool_names=TOOL_SCHEMA_NAME_SET,
         )
 
+        # ── 置信度解析：默认 medium，只接受 high/medium/low ──
         route_confidence_raw = payload.get("route_confidence")
         route_confidence = "medium"
         if isinstance(route_confidence_raw, str):
@@ -973,6 +1205,10 @@ class HotProjectAgent:
             if normalized_conf in {"high", "medium", "low"}:
                 route_confidence = normalized_conf
 
+        # ── 目标仓库推断：多来源优先级 ──
+        # 1. LLM 显式指定的 target_repo
+        # 2. specified_params 中的 repo 参数
+        # 3.追问类 turn_kind 时复用 active_repo
         raw_target_repo = payload.get("target_repo")
         target_repo = ""
         if isinstance(raw_target_repo, str) and raw_target_repo.strip():
@@ -982,6 +1218,8 @@ class HotProjectAgent:
         elif turn_kind in {"fact_check", "request_modification", "clarification_answer", "execution_ack"}:
             target_repo = self.state.active_repo or ""
 
+        # ── 是否可立即执行判断 ──
+        # 条件：LLM 说可以 + 无歧义字段 + 无未解析约束
         should_execute_now_raw = payload.get("should_execute_now")
         has_unresolved = bool(unresolved_constraints)
         if isinstance(should_execute_now_raw, bool):
@@ -989,11 +1227,14 @@ class HotProjectAgent:
         else:
             should_execute_now = not normalized_ambiguous and not has_unresolved
 
+        # ── 是否必须先调工具 ──
+        # fact_check 类型强制要求 must_call_tool_before_reply=true
         must_call_tool_raw = payload.get("must_call_tool_before_reply")
         must_call_tool_before_reply = bool(must_call_tool_raw)
         if turn_kind == "fact_check":
             must_call_tool_before_reply = True
 
+        # ── 构建 PendingRequest 对象 ──
         pending = PendingRequest(
             turn_kind=turn_kind,
             intent_family=intent_family,
@@ -1009,6 +1250,10 @@ class HotProjectAgent:
             must_call_tool_before_reply=must_call_tool_before_reply,
             source_turn_id=self.state.current_user_turn,
         )
+
+        # ── 确认/澄清文本生成 ──
+        # 优先用 LLM 提供的 confirmation_text_zh（非结构化时）
+        # 否则根据歧义/未解析情况自动生成
         raw_confirmation = str(payload.get("confirmation_text_zh") or "").strip()
         if raw_confirmation and not looks_like_structured_confirmation_text(raw_confirmation):
             pending.confirmation_text_zh = raw_confirmation
@@ -1021,7 +1266,7 @@ class HotProjectAgent:
         return pending
 
     def _render_pending_request_text(self, pending: PendingRequest) -> str:
-        """Render concise execution-ready confirmation text for the user."""
+        """生成简洁的执行确认文本供用户确认。"""
         fragments = [pending.intent_label_zh]
         for key, value in pending.user_specified_params.items():
             renderer = PARAM_DISPLAYERS.get(key)
@@ -1038,11 +1283,40 @@ class HotProjectAgent:
             body = "你的 GitHub 热门项目需求"
         return f"收到！我理解为：{body}。我会按这个方向继续执行；如果要改参数请直接告诉我。"
 
+    # ────────────────────────────────────────────────────────────────────────────────────
+    # 澄清文本生成：当路由发现歧义时，生成引导用户补充信息的文本
+    # ────────────────────────────────────────────────────────────────────────────────────
+
     def _render_clarification_message(self, pending: PendingRequest) -> str:
-        """Render user-facing clarification text for unresolved or ambiguous constraints."""
-        text = (pending.confirmation_text_zh or "").strip()
-        if text and "确认请回复" not in text and "回复\"开始\"" not in text:
-            return text
+        """
+        生成用户可见的澄清文本
+
+        触发场景：
+          - route_confidence == "low" → LLM对理解不确定，引导用户重述
+          - unresolved_constraints 非空 → 有无法解析的约束（如未知参数名）
+          - ambiguous_fields 非空 → 有歧义字段需要用户澄清
+
+        输出格式：
+          - 置信度低："我不太确定你的需求，请重新描述一下。我可以帮你..."
+          - 有 unresolved_constraints："我还需要你确认这些参数含义：xxx。确认后我再继续执行。"
+          - 有 ambiguous_fields："我还需要确认这些点：xxx。请直接补充，我会继续执行。"
+          - 无具体问题："我还需要补充关键条件后才能执行。请直接告诉我..."
+
+        目的：
+          - 引导用户提供具体信息解决歧义
+          - 保持对话自然流畅，不中断用户体验
+        """
+
+        # 置信度低：无法稳定理解用户意图，返回功能介绍引导重述
+        if pending.route_confidence == "low":
+            return (
+                "我不太确定你的需求，请重新描述一下。\n"
+                "我可以帮你：\n"
+                "- 查询热门项目榜单（综合榜、新项目榜、关键词榜、Trending）\n"
+                "- 查看单个仓库的详情和增长数据\n"
+                "- 核查项目的具体增长数值\n"
+                "- 按增长时间窗口、关键词等条件筛选"
+            )
 
         if pending.unresolved_constraints:
             questions: list[str] = []
@@ -1067,13 +1341,62 @@ class HotProjectAgent:
 
         return "我还需要补充关键条件后才能执行。请直接告诉我你希望的仓库、时间窗口或榜单类型。"
 
+
+    # ────────────────────────────────────────────────────────────────────────────────────
+    # Pending → Resolved 转换：参数合并与冻结
+    # ────────────────────────────────────────────────────────────────────────────────────
+    #
+    # PendingRequest（路由输出）→ 用户意图 + 用户指定参数（可能有歧义）
+    # ResolvedRequest（执行输入）→ 合并后的完整参数（用户 + 默认值），无歧义
+    #
+    # 合并规则：
+    #   1. 意图默认参数（_default_params_for_intent）作为基础
+    #   2. 用户指定参数（user_specified_params）覆盖默认值
+    #   3. target_repo 自动注入到 repo 参数
+    #   4. 榜单型任务计算实际 growth_calc_days（根据 DB 年龄或默认值）
+    #
+    # ────────────────────────────────────────────────────────────────────────────────────
+
     def _resolve_pending_request(self, pending: PendingRequest) -> ResolvedRequest:
-        """Merge route slots with intent defaults and freeze execution request."""
+        """
+        将 PendingRequest 转换为 ResolvedRequest
+
+        参数合并顺序：
+          1. defaults = _default_params_for_intent(intent_family) → 意图默认参数
+          2. resolved_params = defaults → 初始化
+          3. resolved_params.update(user_specified_params) → 用户参数覆盖默认值
+          4. resolved_params["repo"] = target_repo → 目标仓库注入
+
+        榜单型任务特殊处理：
+          - 用户未指定 growth_calc_days → 使用 DB 年龄（若有效）或默认值
+          - 确保确认文本与实际执行一致
+
+        工具列表确定：
+          - suggested_tools 优先使用路由建议
+          - 无建议时使用 AVAILABLE_TOOLS_BY_INTENT[intent_family]
+          - fact_check 场景补充核查工具
+
+        返回：
+          ResolvedRequest（参数已冻结，准备执行）
+        """
         defaults = self._default_params_for_intent(pending.intent_family)
         resolved_params = dict(defaults)
         resolved_params.update(pending.user_specified_params)
         if pending.target_repo and "repo" not in resolved_params:
             resolved_params["repo"] = pending.target_repo
+
+        # ── 综合榜/关键词榜：用户未指定窗口时，提前确定实际窗口 ──
+        # 若 DB 有效则用 DB 年龄，否则用默认值，确保确认文本与实际执行一致
+        ranking_intents = {"comprehensive_ranking", "keyword_ranking"}
+        if pending.intent_family in ranking_intents:
+            user_specified_window = "growth_calc_days" in pending.user_specified_params
+            if not user_specified_window:
+                db_valid = self.state.db.get("valid", False)
+                db_age = get_db_age_days(self.state.db)
+                if db_valid and db_age is not None and db_age > 0:
+                    # 用 DB 年龄作为实际窗口，与 batch_check_growth 逻辑保持一致
+                    resolved_params["growth_calc_days"] = db_age
+
         defaulted_params = {
             key: value for key, value in defaults.items()
             if key not in pending.user_specified_params
@@ -1105,7 +1428,7 @@ class HotProjectAgent:
         )
 
     def _sync_active_repo_from_resolved_request(self, resolved: ResolvedRequest) -> None:
-        """Sync active repo cache from resolved request context."""
+        """从已解析请求上下文中同步当前活跃仓库缓存。"""
         repo = resolved.target_repo
         if not repo:
             raw_repo = resolved.resolved_params.get("repo")
@@ -1116,12 +1439,12 @@ class HotProjectAgent:
 
     @staticmethod
     def _default_params_for_intent(intent_family: str) -> dict[str, object]:
-        """Return intent-level default slots used before tool execution."""
+        """返回各意图类型在 Tool 执行前使用的默认参数槽位。"""
         if intent_family == "comprehensive_ranking":
             return {
                 "mode": "comprehensive",
                 "top_n": HOT_PROJECT_COUNT,
-                "time_window_days": TIME_WINDOW_DAYS,
+                "growth_calc_days": GROWTH_CALC_DAYS,
                 "growth_threshold": STAR_GROWTH_THRESHOLD,
                 "project_min_star": MIN_STAR_FILTER,
                 "min_star": STAR_RANGE_MIN,
@@ -1132,8 +1455,8 @@ class HotProjectAgent:
             return {
                 "mode": "hot_new",
                 "top_n": HOT_NEW_PROJECT_COUNT,
-                "time_window_days": TIME_WINDOW_DAYS,
-                "new_project_days": NEW_PROJECT_DAYS,
+                "growth_calc_days": GROWTH_CALC_DAYS,
+                "days_since_created": DAYS_SINCE_CREATED,
                 "growth_threshold": STAR_GROWTH_THRESHOLD,
                 "project_min_star": MIN_STAR_FILTER,
                 "min_star": STAR_RANGE_MIN,
@@ -1143,13 +1466,49 @@ class HotProjectAgent:
         if intent_family == "trending_only":
             return {"trending_range": "weekly"}
         if intent_family == "repo_info":
-            return {"time_window_days": TIME_WINDOW_DAYS}
+            return {"growth_calc_days": GROWTH_CALC_DAYS}
         if intent_family == "repo_growth":
-            return {"time_window_days": TIME_WINDOW_DAYS}
+            return {"growth_calc_days": GROWTH_CALC_DAYS}
+        # keyword_ranking 使用与 comprehensive_ranking 相同的默认参数槽位
+        if intent_family == "keyword_ranking":
+            return {
+                "mode": "keyword",
+                "top_n": HOT_PROJECT_COUNT,
+                "growth_calc_days": GROWTH_CALC_DAYS,
+                "growth_threshold": STAR_GROWTH_THRESHOLD,
+                "project_min_star": MIN_STAR_FILTER,
+            }
         return {}
 
+    # ────────────────────────────────────────────────────────────────────────────────────
+    # 参数注入：在 LLM 调用工具时，将路由解析的参数合并到工具参数
+    # ────────────────────────────────────────────────────────────────────────────────────
+    #
+    # 合并时机：LLM 决定调用工具后，执行工具前
+    # 合入来源：resolved_request.resolved_params（用户参数 + 意图默认参数）
+    #
+    # 合并规则：
+    #   1. setdefault（不覆盖 LLM 已选择的参数）
+    #   2. 单仓库工具自动注入 target_repo
+    #   3. 榜单任务 fetch_trending 强制 trending_range="all"
+    #   4. rank_candidates 根据 intent_family 设置 mode
+    #
+    # ────────────────────────────────────────────────────────────────────────────────────
+
     def _merge_request_defaults_into_tool_args(self, name: str, args: dict) -> dict:
-        """Merge resolved request defaults into current tool args deterministically."""
+        """
+        将路由解析的参数注入到工具参数
+
+        合入规则：
+          1. resolved_params → setdefault（不覆盖 LLM 已选）
+          2. 单仓库工具（check_repo_growth/describe_project/get_db_info）→ 注入 repo
+          3. 榜单任务 fetch_trending → 强制 trending_range="all"
+          4. rank_candidates → 根据 intent_family 设置 mode
+
+        注意：
+          - 使用 setdefault，LLM 显式选择的参数优先级更高
+          - 硬编码工具名判断，扩展时需同步修改（架构改进点）
+        """
         merged = dict(args)
         resolved_request = self.state.last_confirmed_request
         if resolved_request is None:
@@ -1256,17 +1615,18 @@ class HotProjectAgent:
         log_validated_params(name, args, prepared_args, validated)
         self._maybe_reset_discovery_state(name, validated)
 
-        if name == "search_hot_projects":
-            result = tool_search_hot_projects(
+        if name == "search_by_keywords":
+            project_min_star = validated.get("project_min_star", MIN_STAR_FILTER)
+            result = tool_search_by_keywords(
                 state.token_mgr,
                 categories=validated.get("categories"),
-                project_min_star=validated.get("project_min_star", MIN_STAR_FILTER),
-                max_pages=validated.get("max_pages", 3),
-                new_project_days=validated.get("new_project_days"),
+                project_min_star=project_min_star,
+                days_since_created=validated.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
             state.last_search_repos = raw_repos
             state.seen_repos.update(r["full_name"] for r in raw_repos)
+            state.last_min_star = project_min_star
             return result
 
         elif name == "scan_star_range":
@@ -1275,7 +1635,7 @@ class HotProjectAgent:
                 min_star=validated.get("min_star", STAR_RANGE_MIN),
                 max_star=validated.get("max_star", STAR_RANGE_MAX),
                 seen_repos=state.seen_repos,
-                new_project_days=validated.get("new_project_days"),
+                days_since_created=validated.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
             state.last_search_repos.extend(raw_repos)
@@ -1289,7 +1649,7 @@ class HotProjectAgent:
                 state.token_mgr,
                 repo=repo,
                 db=state.db,
-                time_window_days=validated.get("time_window_days", TIME_WINDOW_DAYS),
+                growth_calc_days=validated.get("growth_calc_days", GROWTH_CALC_DAYS),
             )
 
         elif name == "batch_check_growth":
@@ -1302,25 +1662,31 @@ class HotProjectAgent:
                     suggested_text,
                 )
             if not state.last_search_repos:
-                return {"error": "没有搜索结果，请先调用 search_hot_projects"}
-            time_window_days = validated.get("time_window_days", TIME_WINDOW_DAYS)
-            new_project_days = validated.get("new_project_days")
+                return {"error": "没有搜索结果，请先调用 search_by_keywords"}
+            growth_calc_days = validated.get("growth_calc_days", GROWTH_CALC_DAYS)
+            days_since_created = validated.get("days_since_created")
+            growth_threshold = validated.get("growth_threshold", STAR_GROWTH_THRESHOLD)
             resolved_request = self.state.last_confirmed_request
-            window_specified = "time_window_days" in args or (
-                resolved_request is not None and "time_window_days" in resolved_request.user_specified_params
+            # window_specified 判断：LLM args 或用户指定 或系统预设（DB年龄自适应）
+            window_specified = "growth_calc_days" in args or (
+                resolved_request is not None and (
+                    "growth_calc_days" in resolved_request.user_specified_params
+                    or "growth_calc_days" in resolved_request.resolved_params
+                )
             )
             result = tool_batch_check_growth(
                 state.token_mgr,
                 repos=state.last_search_repos,
                 db=state.db,
-                growth_threshold=validated.get("growth_threshold", STAR_GROWTH_THRESHOLD),
-                new_project_days=new_project_days,
-                time_window_days=time_window_days,
+                growth_threshold=growth_threshold,
+                days_since_created=days_since_created,
+                growth_calc_days=growth_calc_days,
                 window_specified=window_specified,
             )
             state.last_candidates = result.get("candidates", {})
-            state.last_candidate_new_project_days = new_project_days
-            state.last_time_window_days = result.get("time_window_days", time_window_days)
+            state.last_candidate_days_since_created = days_since_created
+            state.last_growth_calc_days = result.get("growth_calc_days", growth_calc_days)
+            state.last_growth_threshold = growth_threshold
             persistence_policy = self._persistence_policy_for_request()
             if result.get("db_updated", False) and persistence_policy == "desc_only":
                 changed = save_db_desc_only(state.db)
@@ -1340,14 +1706,14 @@ class HotProjectAgent:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
             mode = validated.get("mode", "comprehensive")
             top_n = validated.get("top_n", HOT_PROJECT_COUNT if mode == "comprehensive" else HOT_NEW_PROJECT_COUNT)
-            new_project_days = validated.get("new_project_days")
+            days_since_created = validated.get("days_since_created")
             result = tool_rank_candidates(
                 state.last_candidates,
                 top_n=top_n,
                 mode=mode,
                 db=state.db,
-                new_project_days=new_project_days,
-                prefiltered_new_project_days=state.last_candidate_new_project_days,
+                days_since_created=days_since_created,
+                prefiltered_days_since_created=state.last_candidate_days_since_created,
             )
             state.last_ranked = result.pop("_ordered_tuples", [])
             state.last_mode = mode
@@ -1362,13 +1728,15 @@ class HotProjectAgent:
         elif name == "generate_report":
             if not state.last_ranked:
                 return {"error": "没有排序结果，请先调用 rank_candidates"}
-            report_new_project_days = state.last_candidate_new_project_days if state.last_mode == "hot_new" else None
+            report_new_project_days = state.last_candidate_days_since_created if state.last_mode == "hot_new" else None
             result = tool_generate_report(
                 state.last_ranked,
                 state.db,
                 mode=state.last_mode,
-                new_project_days=report_new_project_days,
-                time_window_days=state.last_time_window_days,
+                days_since_created=report_new_project_days,
+                growth_calc_days=state.last_growth_calc_days,
+                growth_threshold=state.last_growth_threshold,
+                min_star=state.last_min_star,
             )
             persistence_policy = self._persistence_policy_for_request(mode=state.last_mode)
             if persistence_policy == "desc_only":
@@ -1396,7 +1764,7 @@ class HotProjectAgent:
 
     def _maybe_reset_discovery_state(self, tool_name: str, args: dict) -> None:
         """在新一轮榜单构建开始前，清理上一轮的候选/去重状态。"""
-        is_discovery_bootstrap = tool_name in {"search_hot_projects", "scan_star_range"}
+        is_discovery_bootstrap = tool_name in {"search_by_keywords", "scan_star_range"}
         is_trending_supplement = tool_name == "fetch_trending" and args.get("trending_range") == "all"
         if not is_discovery_bootstrap and not is_trending_supplement:
             return
@@ -1407,10 +1775,10 @@ class HotProjectAgent:
 
         self.state.last_search_repos = []
         self.state.last_candidates = {}
-        self.state.last_candidate_new_project_days = None
+        self.state.last_candidate_days_since_created = None
         self.state.last_ranked = []
         self.state.last_mode = "comprehensive"
-        self.state.last_time_window_days = TIME_WINDOW_DAYS
+        self.state.last_growth_calc_days = GROWTH_CALC_DAYS
         self.state.seen_repos.clear()
         self.state.discovery_turn_id = current_turn
         logger.info("[Agent] 检测到新一轮榜单构建，已重置候选、排序和去重状态。")
@@ -1503,8 +1871,8 @@ class HotProjectAgent:
             f"已排序: {len(self.state.last_ranked)} 个, "
             f"已扫描: {len(self.state.seen_repos)} 个, "
             f"榜单模式: {self.state.last_mode}, "
-            f"增长窗口: {self.state.last_time_window_days} 天, "
-            f"创建窗口: {self.state.last_candidate_new_project_days if self.state.last_candidate_new_project_days is not None else '未启用'}"
+            f"增长窗口: {self.state.last_growth_calc_days} 天, "
+            f"创建窗口: {self.state.last_candidate_days_since_created if self.state.last_candidate_days_since_created is not None else '未启用'}"
             + (f"\n[上轮排序 Top 5] {', '.join(name for name, _ in self.state.last_ranked[:5])}" if self.state.last_ranked else "")
         )
 

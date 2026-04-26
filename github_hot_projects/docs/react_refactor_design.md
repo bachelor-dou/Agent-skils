@@ -8,10 +8,10 @@
    - 正则只匹配 "20天内创建"、"近20天创建" 等严格模式
    - "近20天内新创建项目" 不匹配任何模式（"20天内" 和 "创建" 之间插入了 "新"）
 2. `has_explicit_creation_window()` → **False**
-3. `normalize_tool_args()` 看到"用户未显式指定创建窗口"→ **剥掉 LLM 传入的 `new_project_days=20`**
-4. `resolve_new_project_days()` 走到兜底 → 返回 `NEW_PROJECT_DAYS`（默认 45 天）
+3. `normalize_tool_args()` 看到"用户未显式指定创建窗口"→ **剥掉 LLM 传入的 `days_since_created=20`**
+4. `resolve_new_project_days()` 走到兜底 → 返回 `DAYS_SINCE_CREATED`（默认 45 天）
 
-**核心矛盾**：LLM 已经正确理解了"近20天新创建"并传了 `new_project_days=20`，但程序用正则"二审"否决了 LLM 的判断。正则覆盖不了自然语言的多样性，导致正确输入被误杀。
+**核心矛盾**：LLM 已经正确理解了"近20天新创建"并传了 `days_since_created=20`，但程序用正则"二审"否决了 LLM 的判断。正则覆盖不了自然语言的多样性，导致正确输入被误杀。
 
 ## 2. 设计理念：受约束的 ReAct
 
@@ -70,26 +70,26 @@
 
 from ..common.config import (
     MIN_STAR_FILTER, STAR_RANGE_MIN, STAR_RANGE_MAX,
-    STAR_GROWTH_THRESHOLD, TIME_WINDOW_DAYS,
+    STAR_GROWTH_THRESHOLD, GROWTH_CALC_DAYS,
     HOT_PROJECT_COUNT, HOT_NEW_PROJECT_COUNT,
 )
 
 TOOL_PARAM_SCHEMA = {
-    "search_hot_projects": {
+    "search_by_keywords": {
         "categories": {"type": "list_str", "default": None},
         "project_min_star": {"type": "int", "min": 0, "default": MIN_STAR_FILTER},
         "max_pages": {"type": "int", "min": 1, "max": 10, "default": 3},
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "scan_star_range": {
         "min_star": {"type": "int", "min": 1, "default": STAR_RANGE_MIN},
         "max_star": {"type": "int", "min": 1, "default": STAR_RANGE_MAX},
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "batch_check_growth": {
         "growth_threshold": {"type": "int", "min": 0, "default": STAR_GROWTH_THRESHOLD},
-        "time_window_days": {"type": "int", "min": 1, "default": TIME_WINDOW_DAYS},
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "growth_calc_days": {"type": "int", "min": 1, "default": GROWTH_CALC_DAYS},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
         "force_refresh": {"type": "bool", "default": False},
     },
     "rank_candidates": {
@@ -101,11 +101,11 @@ TOOL_PARAM_SCHEMA = {
                 "hot_new": HOT_NEW_PROJECT_COUNT,
             },
         },
-        "new_project_days": {"type": "int", "min": 1, "default": None},
+        "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "check_repo_growth": {
         "repo": {"type": "str", "required": True},
-        "time_window_days": {"type": "int", "min": 1, "default": TIME_WINDOW_DAYS},
+        "growth_calc_days": {"type": "int", "min": 1, "default": GROWTH_CALC_DAYS},
     },
     "fetch_trending": {
         "since": {"type": "enum", "choices": ["daily", "weekly", "monthly"], "default": "weekly"},
@@ -196,10 +196,10 @@ def _coerce(value, spec):
    b) 用户说"热门项目"但不清楚要综合榜还是新项目榜
    c) 用户说"生成报告"但不清楚是基于当前结果还是重新执行
 3. **参数透传原则**：
-   - new_project_days：用户提到"新创建"、"新项目"、"天内创建"时传入具体天数
-   - time_window_days：用户提到"近N天增长"、"最近N天"时传入
+   - days_since_created：用户提到"新创建"、"新项目"、"天内创建"时传入具体天数
+   - growth_calc_days：用户提到"近N天增长"、"最近N天"时传入
    - 两者可以共存：创建窗口和增长窗口是独立参数
-4. **不要遗漏用户提到的参数**：用户说"前10名"必须传 top_n=10，说"近20天新创建"必须传 new_project_days=20。
+4. **不要遗漏用户提到的参数**：用户说"前10名"必须传 top_n=10，说"近20天新创建"必须传 days_since_created=20。
 ```
 
 ### 6.4 TOOL_SCHEMAS description 增强
@@ -207,12 +207,12 @@ def _coerce(value, spec):
 在每个 tool 参数的 description 中明确业务语义，例如：
 
 ```python
-# search_hot_projects 的 new_project_days
+# search_by_keywords 的 days_since_created
 {
-    "name": "new_project_days",
+    "name": "days_since_created",
     "description": "新项目创建时间窗口（天）。指定后只搜索创建时间在该天数以内的仓库。"
                    "例如用户说'近20天内新创建的项目'则传 20。"
-                   "与 time_window_days（增长统计窗口）是独立参数。"
+                   "与 growth_calc_days（增长统计窗口）是独立参数。"
                    "如果用户意图不涉及新项目过滤，不要传此参数。",
     "type": "integer",
 }
@@ -227,13 +227,13 @@ def _execute_tool(self, name: str, args: dict) -> dict:
     validated_args = validate_tool_args(name, args)
     self._maybe_reset_discovery_state(name, validated_args)
 
-    if name == "search_hot_projects":
-        result = tool_search_hot_projects(
+    if name == "search_by_keywords":
+        result = tool_search_by_keywords(
             state.token_mgr,
             categories=validated_args.get("categories"),
             project_min_star=validated_args.get("project_min_star"),
             max_pages=validated_args.get("max_pages"),
-            new_project_days=validated_args.get("new_project_days"),
+            days_since_created=validated_args.get("days_since_created"),
         )
         raw_repos = result.pop("_raw_repos", [])
         state.last_search_repos = raw_repos
@@ -255,7 +255,7 @@ def _execute_tool(self, name: str, args: dict) -> dict:
            → 继续调 Tool / 向用户确认参数 / 返回回复
 ```
 
-关键区别：**程序不再用正则二审 LLM 的语义判断**。LLM 传了 `new_project_days=20`，validate 只检查它是正整数，不会因为"正则没匹配到创建窗口"就把它删掉。
+关键区别：**程序不再用正则二审 LLM 的语义判断**。LLM 传了 `days_since_created=20`，validate 只检查它是正整数，不会因为"正则没匹配到创建窗口"就把它删掉。
 
 ## 8. 处理用户追问/质疑
 
@@ -269,7 +269,7 @@ ReAct 循环天然支持：
 | 阶段 | 改动 | 验收 |
 |------|------|------|
 | 1 | 新建 `parsing/schema.py` + `parsing/arg_validator.py` | 单元测试通过 |
-| 2 | `agent.py`：`_execute_tool()` 改用 `validate_tool_args()`，删除所有 `_resolve_*` 调用 | "近20天新创建项目前10名" 正确传入 `new_project_days=20` |
+| 2 | `agent.py`：`_execute_tool()` 改用 `validate_tool_args()`，删除所有 `_resolve_*` 调用 | "近20天新创建项目前10名" 正确传入 `days_since_created=20` |
 | 3 | SYSTEM_PROMPT 增加参数确认指引 + TOOL_SCHEMAS description 增强 | LLM 不确定时主动问用户 |
 | 4 | 删除 `parsing/intent_detector.py`，清理 `parsing/param_extractor.py` 中的死代码 | 测试全部通过 |
 | 5 | `parsing/tool_arg_normalizer.py` 重命名为 `arg_validator.py`（迁移完成后删除旧文件） | 无 import 引用旧模块 |

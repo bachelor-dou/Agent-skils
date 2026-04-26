@@ -22,36 +22,36 @@ def _tool_call(name: str, arguments: str = "{}", tool_call_id: str = "call-1") -
 class TestArgValidation:
     """测试 validate_tool_args 通过 _execute_tool 的实际效果。"""
 
-    def test_search_preserves_llm_new_project_days(self):
-        """LLM 传了 new_project_days=20，不应被剥离。"""
+    def test_search_preserves_llm_days_since_created(self):
+        """LLM 传了 days_since_created=20，不应被剥离。"""
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
 
         with patch(
-            "github_hot_projects.agent.tool_search_hot_projects",
+            "github_hot_projects.agent.tool_search_by_keywords",
             return_value={"repos": [], "total": 0, "_raw_repos": []},
         ) as mock_search:
-            agent._execute_tool("search_hot_projects", {"new_project_days": 20})
+            agent._execute_tool("search_by_keywords", {"days_since_created": 20})
 
-        assert mock_search.call_args.kwargs["new_project_days"] == 20
+        assert mock_search.call_args.kwargs["days_since_created"] == 20
 
-    def test_search_defaults_when_no_new_project_days(self):
-        """LLM 没传 new_project_days，默认不过滤。"""
+    def test_search_defaults_when_no_days_since_created(self):
+        """LLM 没传 days_since_created，默认不过滤。"""
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
 
         with patch(
-            "github_hot_projects.agent.tool_search_hot_projects",
+            "github_hot_projects.agent.tool_search_by_keywords",
             return_value={"repos": [], "total": 0, "_raw_repos": []},
         ) as mock_search:
-            agent._execute_tool("search_hot_projects", {})
+            agent._execute_tool("search_by_keywords", {})
 
-        assert mock_search.call_args.kwargs["new_project_days"] is None
+        assert mock_search.call_args.kwargs["days_since_created"] is None
 
     def test_batch_check_preserves_both_windows(self):
-        """LLM 同时传 time_window_days 和 new_project_days，都应保留。"""
+        """LLM 同时传 growth_calc_days 和 days_since_created，都应保留。"""
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -62,12 +62,12 @@ class TestArgValidation:
             return_value={"candidates": {}, "total": 0},
         ) as mock_batch:
             agent._execute_tool("batch_check_growth", {
-                "time_window_days": 10,
-                "new_project_days": 20,
+                "growth_calc_days": 10,
+                "days_since_created": 20,
             })
 
-        assert mock_batch.call_args.kwargs["time_window_days"] == 10
-        assert mock_batch.call_args.kwargs["new_project_days"] == 20
+        assert mock_batch.call_args.kwargs["growth_calc_days"] == 10
+        assert mock_batch.call_args.kwargs["days_since_created"] == 20
 
     def test_rank_candidates_preserves_llm_mode_and_top_n(self):
         """LLM 传了 mode=hot_new + top_n=10，都应保留。"""
@@ -80,11 +80,11 @@ class TestArgValidation:
             "github_hot_projects.agent.tool_rank_candidates",
             return_value={"ranked_projects": [], "_ordered_tuples": [], "total_candidates": 1, "returned": 0, "mode": "hot_new"},
         ) as mock_rank:
-            agent._execute_tool("rank_candidates", {"mode": "hot_new", "top_n": 10, "new_project_days": 20})
+            agent._execute_tool("rank_candidates", {"mode": "hot_new", "top_n": 10, "days_since_created": 20})
 
         assert mock_rank.call_args.kwargs["mode"] == "hot_new"
         assert mock_rank.call_args.kwargs["top_n"] == 10
-        assert mock_rank.call_args.kwargs["new_project_days"] == 20
+        assert mock_rank.call_args.kwargs["days_since_created"] == 20
 
     def test_rank_candidates_returns_retryable_error_for_invalid_values(self):
         """LLM 显式传错参数时，应返回可重试错误而不是静默纠偏。"""
@@ -112,16 +112,15 @@ class TestArgValidation:
         agent = HotProjectAgent()
 
         with patch(
-            "github_hot_projects.agent.tool_search_hot_projects",
+            "github_hot_projects.agent.tool_search_by_keywords",
             return_value={"repos": [], "total": 0, "_raw_repos": []},
         ) as mock_search:
-            result = agent._execute_tool("search_hot_projects", {"project_min_star": -5, "max_pages": 0})
+            result = agent._execute_tool("search_by_keywords", {"project_min_star": -5})
 
         assert result["error_code"] == "invalid_arguments"
         assert result["retryable"] is True
         invalid_fields = {item["param"] for item in result["invalid_arguments"]}
         assert "project_min_star" in invalid_fields
-        assert "max_pages" in invalid_fields
         mock_search.assert_not_called()
 
     def test_fetch_trending_validates_trending_range(self):
@@ -144,7 +143,7 @@ class TestArgValidation:
         }
 
     def test_rank_defaults_top_n_by_mode(self):
-        from github_hot_projects.agent import HotProjectAgent, HOT_NEW_PROJECT_COUNT, NEW_PROJECT_DAYS
+        from github_hot_projects.agent import HotProjectAgent, HOT_NEW_PROJECT_COUNT, DAYS_SINCE_CREATED
 
         agent = HotProjectAgent()
         agent.state.last_candidates = {"org/repo": {"growth": 100, "star": 1000}}
@@ -156,19 +155,19 @@ class TestArgValidation:
             agent._execute_tool("rank_candidates", {"mode": "hot_new"})
 
         assert mock_rank.call_args.kwargs["top_n"] == HOT_NEW_PROJECT_COUNT
-        assert mock_rank.call_args.kwargs["new_project_days"] == NEW_PROJECT_DAYS
+        assert mock_rank.call_args.kwargs["days_since_created"] == DAYS_SINCE_CREATED
 
     def test_batch_check_growth_passes_time_window(self):
-        """batch_check_growth 应正确传递 time_window_days 参数。"""
+        """batch_check_growth 应正确传递 growth_calc_days 参数。"""
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
         agent.state.last_search_repos = [{"full_name": "org/repo", "_raw": {}}]
 
         with patch("github_hot_projects.agent.tool_batch_check_growth", return_value={"candidates": {}, "total": 0}) as mock_batch:
-            agent._execute_tool("batch_check_growth", {"time_window_days": 10})
+            agent._execute_tool("batch_check_growth", {"growth_calc_days": 10})
 
-        assert mock_batch.call_args.kwargs["time_window_days"] == 10
+        assert mock_batch.call_args.kwargs["growth_calc_days"] == 10
 
     def test_log_validated_params_marks_system_injected_params(self):
         from github_hot_projects.parsing.arg_validator import log_validated_params
@@ -216,7 +215,7 @@ class TestAgentStateMachine:
             return_value=PendingRequest(
                 intent_family="comprehensive_ranking",
                 intent_label_zh="综合热榜",
-                user_specified_params={"time_window_days": 10, "top_n": 100},
+                user_specified_params={"growth_calc_days": 10, "top_n": 100},
                 should_execute_now=True,
                 source_turn_id=1,
             ),
@@ -253,7 +252,7 @@ class TestAgentStateMachine:
                 PendingRequest(
                     intent_family="comprehensive_ranking",
                     intent_label_zh="综合热榜",
-                    user_specified_params={"time_window_days": 10, "top_n": 100},
+                    user_specified_params={"growth_calc_days": 10, "top_n": 100},
                     should_execute_now=True,
                     source_turn_id=2,
                 ),
@@ -351,7 +350,7 @@ class TestAgentStateMachine:
                 "specified_params": {
                     "min_stars_gain": 500,
                     "limit": 5,
-                    "new_project_days": 10,
+                    "days_since_created": 10,
                 },
                 "ambiguous_fields": [],
                 "should_execute_now": True,
@@ -361,7 +360,7 @@ class TestAgentStateMachine:
 
         pending = agent._parse_pending_request_content(payload)
 
-        assert pending.user_specified_params == {"new_project_days": 10}
+        assert pending.user_specified_params == {"days_since_created": 10}
         assert pending.should_execute_now is False
         assert any("min_stars_gain" in item for item in pending.unresolved_constraints)
         assert any("limit" in item for item in pending.unresolved_constraints)
@@ -377,7 +376,7 @@ class TestAgentStateMachine:
                 "intent_label_zh": "综合热榜",
                 "specified_params": {
                     "foo_signal": 123,
-                    "time_window_days": 7,
+                    "growth_calc_days": 7,
                 },
                 "unresolved_constraints": ["用户提到热度系数，但未给计算口径"],
                 "ambiguous_fields": [],
@@ -388,7 +387,7 @@ class TestAgentStateMachine:
 
         pending = agent._parse_pending_request_content(payload)
 
-        assert pending.user_specified_params == {"time_window_days": 7}
+        assert pending.user_specified_params == {"growth_calc_days": 7}
         assert pending.should_execute_now is False
         assert "用户提到热度系数，但未给计算口径" in pending.unresolved_constraints
         assert any("foo_signal" in item for item in pending.unresolved_constraints)
@@ -624,15 +623,15 @@ class TestAgentStateMachine:
         agent = HotProjectAgent()
         raw_repos = [{"full_name": "org/repo", "star": 123}]
 
-        with patch("github_hot_projects.agent.tool_search_hot_projects", return_value={"repos": [], "total": 1, "_raw_repos": raw_repos}):
-            result = agent._execute_tool("search_hot_projects", {})
+        with patch("github_hot_projects.agent.tool_search_by_keywords", return_value={"repos": [], "total": 1, "_raw_repos": raw_repos}):
+            result = agent._execute_tool("search_by_keywords", {})
 
         assert result["total"] == 1
         assert agent.state.last_search_repos == raw_repos
         assert "org/repo" in agent.state.seen_repos
 
     def test_execute_tool_search_resets_discovery_state_on_new_turn(self):
-        from github_hot_projects.agent import HotProjectAgent, TIME_WINDOW_DAYS
+        from github_hot_projects.agent import HotProjectAgent, GROWTH_CALC_DAYS
 
         agent = HotProjectAgent()
         agent.state.current_user_turn = 2
@@ -644,16 +643,16 @@ class TestAgentStateMachine:
         raw_repos = [{"full_name": "new/repo", "star": 123}]
 
         with patch(
-            "github_hot_projects.agent.tool_search_hot_projects",
+            "github_hot_projects.agent.tool_search_by_keywords",
             return_value={"repos": [], "total": 1, "_raw_repos": raw_repos},
         ):
-            agent._execute_tool("search_hot_projects", {})
+            agent._execute_tool("search_by_keywords", {})
 
         assert agent.state.last_search_repos == raw_repos
         assert agent.state.last_candidates == {}
         assert agent.state.last_ranked == []
         assert agent.state.last_mode == "comprehensive"
-        assert agent.state.last_time_window_days == TIME_WINDOW_DAYS
+        assert agent.state.last_growth_calc_days == GROWTH_CALC_DAYS
         assert agent.state.seen_repos == {"new/repo"}
 
     def test_execute_tool_batch_check_growth_requires_search_results(self):
@@ -698,7 +697,7 @@ class TestAgentStateHelpers:
                                 "turn_kind": "new_request",
                                 "intent_family": "comprehensive_ranking",
                                 "intent_label_zh": "综合热榜",
-                                "specified_params": {"time_window_days": 10, "top_n": 100},
+                                "specified_params": {"growth_calc_days": 10, "top_n": 100},
                                 "ambiguous_fields": [],
                                 "report_requested": False,
                                 "should_execute_now": True,
@@ -734,7 +733,7 @@ class TestAgentStateHelpers:
                             {
                                 "intent_family": "comprehensive_ranking",
                                 "intent_label_zh": "综合热榜",
-                                "specified_params": {"time_window_days": 10, "top_n": 20},
+                                "specified_params": {"growth_calc_days": 10, "top_n": 20},
                                 "ambiguous_fields": [],
                                 "report_requested": True,
                                 "should_execute_now": True,
@@ -751,7 +750,7 @@ class TestAgentStateHelpers:
 
         assert "返回前20名" in pending.confirmation_text_zh
         assert pending.intent_family == "comprehensive_ranking"
-        assert pending.user_specified_params == {"time_window_days": 10, "top_n": 20}
+        assert pending.user_specified_params == {"growth_calc_days": 10, "top_n": 20}
         assert pending.report_requested is True
 
     def test_parse_pending_request_ignores_structured_confirmation_text(self):
@@ -782,9 +781,9 @@ class TestAgentStateHelpers:
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="hot_new_ranking",
             intent_label_zh="新项目热榜",
-            resolved_params={"mode": "hot_new", "new_project_days": 30, "time_window_days": 10},
-            user_specified_params={"new_project_days": 30},
-            defaulted_params={"time_window_days": 10},
+            resolved_params={"mode": "hot_new", "days_since_created": 30, "growth_calc_days": 10},
+            user_specified_params={"days_since_created": 30},
+            defaulted_params={"growth_calc_days": 10},
             report_requested=True,
         )
 
@@ -799,7 +798,7 @@ class TestAgentStateHelpers:
         assert "[执行上下文]" in messages[0]["content"]
         assert "[已确认请求]" in messages[0]["content"]
         # 新架构使用 Python 列表格式显示可用工具
-        assert "search_hot_projects" in messages[0]["content"]
+        assert "search_by_keywords" in messages[0]["content"]
         assert "generate_report" in messages[0]["content"]
 
     def test_select_tools_for_llm_filters_by_intent_when_confidence_high(self):
@@ -842,8 +841,8 @@ class TestAgentStateHelpers:
         agent.state.last_candidates = {"org/repo": {"growth": 1, "star": 1}}
         agent.state.last_ranked = [("org/repo", {"growth": 1, "star": 1})]
         agent.state.last_mode = "hot_new"
-        agent.state.last_time_window_days = 10
-        agent.state.last_candidate_new_project_days = 45
+        agent.state.last_growth_calc_days = 10
+        agent.state.last_candidate_days_since_created = 45
         for idx in range(MAX_CONVERSATION_MESSAGES + 5):
             agent.state.conversation.append({"role": "user", "content": f"用户消息 {idx}"})
             agent.state.conversation.append({"role": "assistant", "content": f"助手回复 {idx}"})
@@ -880,20 +879,19 @@ class TestAgentStateHelpers:
 class TestValidateToolArgs:
     """直接测试 validate_tool_args 函数。"""
 
-    def test_preserves_llm_new_project_days(self):
+    def test_preserves_llm_days_since_created(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
 
-        result = validate_tool_args("search_hot_projects", {"new_project_days": 20})
-        assert result["new_project_days"] == 20
+        result = validate_tool_args("search_by_keywords", {"days_since_created": 20})
+        assert result["days_since_created"] == 20
 
     def test_defaults_missing_params(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
         from github_hot_projects.common.config import MIN_STAR_FILTER
 
-        result = validate_tool_args("search_hot_projects", {})
+        result = validate_tool_args("search_by_keywords", {})
         assert result["project_min_star"] == MIN_STAR_FILTER
-        assert result["max_pages"] == 3
-        assert "new_project_days" not in result
+        assert "days_since_created" not in result
 
     def test_coerces_out_of_range_int(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
@@ -916,11 +914,11 @@ class TestValidateToolArgs:
 
     def test_default_by_mode_hot_new(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
-        from github_hot_projects.common.config import HOT_NEW_PROJECT_COUNT, NEW_PROJECT_DAYS
+        from github_hot_projects.common.config import HOT_NEW_PROJECT_COUNT, DAYS_SINCE_CREATED
 
         result = validate_tool_args("rank_candidates", {"mode": "hot_new"})
         assert result["top_n"] == HOT_NEW_PROJECT_COUNT
-        assert result["new_project_days"] == NEW_PROJECT_DAYS
+        assert result["days_since_created"] == DAYS_SINCE_CREATED
 
     def test_default_by_mode_comprehensive(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
@@ -928,7 +926,7 @@ class TestValidateToolArgs:
 
         result = validate_tool_args("rank_candidates", {"mode": "comprehensive"})
         assert result["top_n"] == HOT_PROJECT_COUNT
-        assert "new_project_days" not in result
+        assert "days_since_created" not in result
 
     def test_enum_coercion_trending_range(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
@@ -953,15 +951,15 @@ class TestConfirmedRequestExecution:
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="comprehensive_ranking",
             intent_label_zh="综合热榜",
-            resolved_params={"mode": "comprehensive", "time_window_days": 10},
+            resolved_params={"mode": "comprehensive", "growth_calc_days": 10},
         )
-        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range"}
+        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
         # 现在不强制返回错误，只是打印警告
         with patch(
             "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": False},
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 10, "db_updated": False},
         ):
             result = agent._execute_tool("batch_check_growth", {})
 
@@ -977,7 +975,7 @@ class TestConfirmedRequestExecution:
             intent_label_zh="关键词热榜",
             resolved_params={"categories": ["llm"]},
         )
-        agent.state.current_turn_tools = {"search_hot_projects"}
+        agent.state.current_turn_tools = {"search_by_keywords"}
 
         missing = agent._check_suggested_collection_tools("batch_check_growth")
         assert missing == []
@@ -991,24 +989,24 @@ class TestConfirmedRequestExecution:
             intent_label_zh="新项目热榜",
             resolved_params={
                 "mode": "hot_new",
-                "time_window_days": 10,
-                "new_project_days": 30,
+                "growth_calc_days": 10,
+                "days_since_created": 30,
                 "growth_threshold": 400,
             },
-            user_specified_params={"new_project_days": 30},
+            user_specified_params={"days_since_created": 30},
         )
-        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
         with patch(
             "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": False},
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 10, "db_updated": False},
         ) as mock_batch:
             result = agent._execute_tool("batch_check_growth", {})
 
         assert "candidates" in result
-        assert mock_batch.call_args.kwargs["time_window_days"] == 10
-        assert mock_batch.call_args.kwargs["new_project_days"] == 30
+        assert mock_batch.call_args.kwargs["growth_calc_days"] == 10
+        assert mock_batch.call_args.kwargs["days_since_created"] == 30
         assert mock_batch.call_args.kwargs["growth_threshold"] == 400
 
     def test_log_execution_overview_prints_summary_snapshot(self):
@@ -1022,10 +1020,10 @@ class TestConfirmedRequestExecution:
             intent_label_zh="新项目热榜",
             resolved_params={
                 "mode": "hot_new",
-                "time_window_days": 10,
-                "new_project_days": 30,
+                "growth_calc_days": 10,
+                "days_since_created": 30,
             },
-            user_specified_params={"time_window_days": 10, "new_project_days": 30},
+            user_specified_params={"growth_calc_days": 10, "days_since_created": 30},
             defaulted_params={"mode": "hot_new"},
             report_requested=True,
         )
@@ -1039,7 +1037,7 @@ class TestConfirmedRequestExecution:
         )
         assert "运行参数总览" in merged_logs
         assert "desc_only" in merged_logs
-        assert '"time_window_days": 10' in merged_logs
+        assert '"growth_calc_days": 10' in merged_logs
 
     def test_log_execution_overview_shows_trending_range_all(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
@@ -1072,14 +1070,14 @@ class TestConfirmedRequestExecution:
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="hot_new_ranking",
             intent_label_zh="新项目热榜",
-            resolved_params={"mode": "hot_new", "new_project_days": 30},
+            resolved_params={"mode": "hot_new", "days_since_created": 30},
         )
-        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
         with patch(
             "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 10, "db_updated": True},
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 10, "db_updated": True},
         ):
             with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
                 agent._execute_tool("batch_check_growth", {})
@@ -1132,14 +1130,14 @@ class TestConfirmedRequestExecution:
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="comprehensive_ranking",
             intent_label_zh="综合热榜",
-            resolved_params={"mode": "comprehensive", "time_window_days": 7},
+            resolved_params={"mode": "comprehensive", "growth_calc_days": 7},
         )
-        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
         with patch(
             "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 7, "db_updated": True},
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 7, "db_updated": True},
         ):
             with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
                 agent._execute_tool("batch_check_growth", {})
@@ -1154,14 +1152,14 @@ class TestConfirmedRequestExecution:
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="hot_new_ranking",
             intent_label_zh="新项目热榜",
-            resolved_params={"mode": "hot_new", "new_project_days": 10},
+            resolved_params={"mode": "hot_new", "days_since_created": 10},
         )
-        agent.state.current_turn_tools = {"search_hot_projects", "scan_star_range", "fetch_trending"}
+        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
         agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
         with patch(
             "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "time_window_days": 7, "db_updated": True},
+            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 7, "db_updated": True},
         ):
             with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
                 agent._execute_tool("batch_check_growth", {})

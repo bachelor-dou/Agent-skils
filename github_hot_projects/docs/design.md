@@ -122,7 +122,7 @@ graph TB
 graph LR
     subgraph TOOLS["agent_tools.py — 9 个核心 Tool"]
         direction TB
-        T1["🔍 search_hot_projects<br/>关键词搜索"]
+        T1["🔍 search_by_keywords<br/>关键词搜索"]
         T2["📊 scan_star_range<br/>Star 范围扫描"]
         T3["📈 check_repo_growth<br/>单仓库增长"]
         T4["⚡ batch_check_growth<br/>批量增长筛选"]
@@ -145,7 +145,7 @@ graph LR
 
 | Tool | 创建 Pool | 写 DB | 说明 |
 |------|----------|-------|------|
-| search_hot_projects | ✅ | — | 25 类关键词多页搜索 |
+| search_by_keywords | ✅ | — | 25 类关键词多页搜索 |
 | scan_star_range | ✅ | — | auto_split_star_range 递归二分 |
 | check_repo_growth | — | — | 单仓库详情 + LLM 描述 |
 | batch_check_growth | ✅ | 内存 | 批量增长计算 + checkpoint |
@@ -167,7 +167,7 @@ flowchart TD
 
     subgraph COLLECT["Phase 1 · 数据收集"]
         direction TB
-        KW["关键词搜索<br/>search_hot_projects<br/>25类 × 150+词 × 3页"]
+        KW["关键词搜索<br/>search_by_keywords<br/>25类 × 150+词 × 3页"]
         SCAN["Star 范围扫描<br/>scan_star_range<br/>auto_split ≤800条/段"]
         TREN["Trending 爬虫<br/>fetch_trending<br/>daily/weekly/monthly"]
         KW --> MERGE["去重合并 → raw_repos"]
@@ -345,9 +345,9 @@ graph TD
 | `STAR_GROWTH_THRESHOLD` | 800 | 增长门槛 |
 | `HOT_PROJECT_COUNT` | 100 | 综合榜默认 Top N |
 | `HOT_NEW_PROJECT_COUNT` | 20 | 新项目榜默认 Top N |
-| `TIME_WINDOW_DAYS` | 7 | 增长统计窗口（天），用户可通过 time_window_days 自定义 |
-| `NEW_PROJECT_DAYS` | 45 | 新项目判定窗口 |
-| `DATA_EXPIRE_DAYS` | TIME_WINDOW_DAYS + 1 | DB 有效期（动态计算） |
+| `GROWTH_CALC_DAYS` | 7 | 增长统计窗口（天），用户可通过 growth_calc_days 自定义 |
+| `DAYS_SINCE_CREATED` | 45 | 新项目判定窗口 |
+| `DATA_EXPIRE_DAYS` | GROWTH_CALC_DAYS + 1 | DB 有效期（动态计算） |
 | `STAR_RANGE_MIN` / `MAX` | 1300 / 45000 | Star 扫描范围 |
 | `MAX_BINARY_SEARCH_DEPTH` | 20 | 二分法最大深度 |
 | `SEARCH_REQUEST_INTERVAL` | 2.5s | Search API 请求间隔 |
@@ -360,9 +360,9 @@ graph TD
 | `categories` | search | 全部 25 类 | 搜索类别 |
 | `project_min_star` | search | 1000 | 关键词搜索项目最低 star |
 | `top_n` | rank | 100（综合）/ 20（新项目） | 返回前 N |
-| `time_window_days` | check_repo_growth, batch_check_growth | 7 | 增长统计窗口 |
+| `growth_calc_days` | check_repo_growth, batch_check_growth | 7 | 增长统计窗口 |
 | `growth_threshold` | batch_check | 800 | 增长阈值 |
-| `new_project_days` | search, scan, batch_check, rank | None | 新项目天数窗口 |
+| `days_since_created` | search, scan, batch_check, rank | None | 新项目天数窗口 |
 | `mode` | rank | comprehensive | comprehensive / hot_new |
 
 ---
@@ -375,9 +375,9 @@ graph TD
 | C1 | REST 5000 次/小时/Token | 多 Token 轮换 |
 | `STAR_GROWTH_THRESHOLD` | 800 | 默认增长门槛 |
 | `HOT_PROJECT_COUNT` | 100 | 综合榜默认 Top N |
-| `TIME_WINDOW_DAYS` | 7 | 默认增长窗口（Agent 对话可覆盖） |
+| `GROWTH_CALC_DAYS` | 7 | 默认增长窗口（Agent 对话可覆盖） |
 | C5 | GraphQL 节点 500k/小时 | 每仓库最多 3000 条 |
-| `DATA_EXPIRE_DAYS` | `TIME_WINDOW_DAYS + 1`（当前 8） | DB 有效期 |
+| `DATA_EXPIRE_DAYS` | `GROWTH_CALC_DAYS + 1`（当前 8） | DB 有效期 |
 ### 线程安全不变量
 | 编号 | 约束 |
 |------|------|
@@ -393,9 +393,9 @@ graph TD
 | `project_min_star` | search | 1000 | 关键词搜索项目最低 star 过滤线 |
 | `min_star` / `max_star` | scan | 1300 / 45000 | Star 范围扫描上下界 |
 | `top_n` | rank | 综合榜 100 / 新项目榜 20 | 返回前 N 个项目 |
-| `time_window_days` | check_repo_growth / batch_check / report | 7 | 增长统计窗口 |
+| `growth_calc_days` | check_repo_growth / batch_check / report | 7 | 增长统计窗口 |
 | `growth_threshold` | batch_check | 800 | 候选筛选阈值 |
-| `new_project_days` | search / scan / batch_check / rank | 仅 hot_new 默认为 45 | 新项目创建窗口 |
+| `days_since_created` | search / scan / batch_check / rank | 仅 hot_new 默认为 45 | 新项目创建窗口 |
 | `since` | fetch_trending | weekly | Trending 浏览参数 |
 |------|---------|----------|
 | 加搜索关键词 | `config.py` SEARCH_KEYWORDS | 无需改其他文件 |
