@@ -527,17 +527,62 @@ class TestAgentStateMachine:
         assert agent.state.awaiting_confirmation is True
         mock_route.assert_called_once()
 
-    def test_chat_returns_scoped_capability_reply_for_greeting(self):
-        from github_hot_projects.agent import HotProjectAgent
+    def test_chat_routes_greeting_request(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
 
         agent = HotProjectAgent()
 
-        with patch.object(agent, "_call_llm") as mock_llm:
-            reply = agent.chat("你好")
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            return_value=PendingRequest(
+                turn_kind="greeting",
+                intent_family="freeform_answer",
+                intent_label_zh="自由回答",
+                should_execute_now=True,
+                route_confidence="high",
+                source_turn_id=1,
+            ),
+        ) as mock_route:
+            with patch.object(
+                agent,
+                "_call_llm",
+                return_value={"choices": [{"message": {"content": "我是 GitHub 热门项目助手", "tool_calls": []}}]},
+            ) as mock_llm:
+                reply = agent.chat("你好")
 
         assert "GitHub 热门项目助手" in reply
-        assert "编程问题" not in reply
-        mock_llm.assert_not_called()
+        mock_route.assert_called_once()
+        mock_llm.assert_called_once()
+        assert agent.state.awaiting_confirmation is False
+
+    def test_chat_routes_capability_query_request(self):
+        from github_hot_projects.agent import HotProjectAgent, PendingRequest
+
+        agent = HotProjectAgent()
+
+        with patch.object(
+            agent,
+            "_build_route_pending_request",
+            return_value=PendingRequest(
+                turn_kind="capability_query",
+                intent_family="freeform_answer",
+                intent_label_zh="自由回答",
+                should_execute_now=True,
+                route_confidence="high",
+                source_turn_id=1,
+            ),
+        ) as mock_route:
+            with patch.object(
+                agent,
+                "_call_llm",
+                return_value={"choices": [{"message": {"content": "我是 GitHub 热门项目助手", "tool_calls": []}}]},
+            ) as mock_llm:
+                reply = agent.chat("你能做什么")
+
+        assert "GitHub 热门项目助手" in reply
+        mock_route.assert_called_once()
+        mock_llm.assert_called_once()
         assert agent.state.awaiting_confirmation is False
 
     def test_chat_executes_tool_then_returns_final_reply(self):
@@ -801,13 +846,13 @@ class TestAgentStateHelpers:
         assert "search_by_keywords" in messages[0]["content"]
         assert "generate_report" in messages[0]["content"]
 
-    def test_select_tools_for_llm_filters_by_intent_when_confidence_high(self):
+    def test_select_tools_for_llm_filters_for_constrained_intent(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
         agent = HotProjectAgent()
         agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="repo_info",
-            intent_label_zh="单仓库综合查询",
+            intent_family="keyword_ranking",
+            intent_label_zh="关键词热榜",
             route_confidence="high",
         )
 
@@ -817,9 +862,9 @@ class TestAgentStateHelpers:
             for schema in selected
             if schema.get("function", {}).get("name")
         }
-        assert names == {"describe_project", "check_repo_growth"}
+        assert names == {"search_by_keywords", "batch_check_growth", "rank_candidates"}
 
-    def test_select_tools_for_llm_keeps_all_when_route_confidence_low(self):
+    def test_select_tools_for_llm_keeps_all_for_open_intent(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
         from github_hot_projects.parsing.schema import TOOL_SCHEMAS
 
@@ -827,7 +872,7 @@ class TestAgentStateHelpers:
         agent.state.last_confirmed_request = ResolvedRequest(
             intent_family="repo_info",
             intent_label_zh="单仓库综合查询",
-            route_confidence="low",
+            route_confidence="high",
         )
 
         selected = agent._select_tools_for_llm()

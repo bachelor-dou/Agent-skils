@@ -186,7 +186,10 @@ TURN_KINDS = {
 # 意图类型 + 工具映射（混合架构核心）
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-# 意图中文标签（用于用户确认文本和日志输出）
+# 意图中文标签（用于用户确认文本、日志输出与路由标准化白名单）。
+# 注意：这不是“工具约束集合”。
+# 即便当前仅榜单类做工具约束，trending/repo/db 等意图标签仍需保留，
+# 否则这些请求会在 normalize_intent_family 阶段退化为 unknown。
 INTENT_LABELS = {
     "comprehensive_ranking": "综合热榜",
     "hot_new_ranking": "新项目热榜",
@@ -200,8 +203,19 @@ INTENT_LABELS = {
     "unknown": "未确定请求",
 }
 
-# 意图 → 可用工具范围（LLM在此范围内自主选择，用于裁剪 tools 参数）
-AVAILABLE_TOOLS_BY_INTENT: dict[str, set[str]] = {
+# 意图别名映射：将简写/常见写法映射到标准意图名
+INTENT_ALIASES = {
+    "comprehensive": "comprehensive_ranking",
+    "hot_new": "hot_new_ranking",
+    "keyword": "keyword_ranking",
+    "trending": "trending_only",
+    "describe_project": "repo_description",
+    "check_repo_growth": "repo_growth",
+    "freeform": "freeform_answer",
+}
+
+# 仅对复杂榜单意图做工具约束；其他意图默认开放
+CONSTRAINED_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "comprehensive_ranking": {
         "search_by_keywords", "scan_star_range", "fetch_trending",
         "batch_check_growth", "rank_candidates", "generate_report",
@@ -214,13 +228,6 @@ AVAILABLE_TOOLS_BY_INTENT: dict[str, set[str]] = {
         "search_by_keywords",                 # 只需要关键词搜索
         "batch_check_growth", "rank_candidates",
     },
-    "trending_only": {"fetch_trending"},
-    "repo_info": {"describe_project", "check_repo_growth"},  # 单仓库综合查询，同时调用两个工具
-    "repo_growth": {"check_repo_growth"},
-    "repo_description": {"describe_project"},
-    "db_info": {"get_db_info"},
-    "freeform_answer": set(ALL_TOOL_NAMES),
-    "unknown": set(ALL_TOOL_NAMES),
 }
 
 # 榜单型意图集合：需要完整候选收集→增长计算→排名流程的意图类型
@@ -233,16 +240,6 @@ SUGGESTED_COLLECTION_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "keyword_ranking": {"search_by_keywords"},
 }
 
-# 意图别名映射：将简写/常见写法映射到标准意图名
-INTENT_ALIASES = {
-    "comprehensive": "comprehensive_ranking",
-    "hot_new": "hot_new_ranking",
-    "keyword": "keyword_ranking",
-    "trending": "trending_only",
-    "describe_project": "repo_description",
-    "check_repo_growth": "repo_growth",
-    "freeform": "freeform_answer",
-}
 
 # 参数渲染器：将参数键值转换为用户可见的确认文本片段
 PARAM_DISPLAYERS = {
@@ -403,6 +400,7 @@ class ResolvedRequest:
 
     def to_execution_context(self) -> str:
         """生成执行上下文文本，注入到 system prompt 中指导 LLM 执行。"""
+        tool_constraint = "constrained" if self.intent_family in CONSTRAINED_TOOLS_BY_INTENT else "open"
         lines = [
             "[已确认请求]",
             f"turn_kind={self.turn_kind}",
@@ -411,7 +409,7 @@ class ResolvedRequest:
             f"target_repo={self.target_repo or '未指定'}",
             f"route_confidence={self.route_confidence}",
             f"must_call_tool_before_reply={self.must_call_tool_before_reply}",
-            f"可用工具={sorted(AVAILABLE_TOOLS_BY_INTENT.get(self.intent_family, set()))}",
+            f"tool_constraint={tool_constraint}",
             f"suggested_tools={self.suggested_tools}",
             f"resolved_params={json.dumps(self.resolved_params, ensure_ascii=False, sort_keys=True)}",
         ]
@@ -740,14 +738,12 @@ class HotProjectAgent:
 
         裁剪规则：
           1. 无路由结果 → 开放全工具
-          2. 自由回答/未知意图 → 开放全工具（保证可扩展性）
-          3. 榜单型意图 → 限制到 AVAILABLE_TOOLS_BY_INTENT 指定的工具
-          4. suggested_tools 额外补充
-          5. fact_check 类型 → 补充核查类工具
+                    2. 仅对复杂榜单意图做工具约束
+                    3. 其他意图默认开放全工具
 
         目的：
-          - 减少执行 LLM 的选择干扰
-          - 防止工具混用导致流程混乱
+                    - 在复杂流程场景提供必要护栏
+                    - 在普通查询场景保留 ReAct 自主工具选择
         """
         resolved = self.state.last_confirmed_request
 
@@ -755,26 +751,14 @@ class HotProjectAgent:
         if resolved is None:
             return TOOL_SCHEMAS
 
-        # ── 分支2：自由回答/未知意图 → 开放全工具 ────────────────────────────────────────
-        if resolved.intent_family in {"freeform_answer", "unknown"}:
-            return TOOL_SCHEMAS
+        # ── 分支2：仅对受约束意图应用工具白名单 ──────────────────────────────────────────
+        allowed = set(CONSTRAINED_TOOLS_BY_INTENT.get(resolved.intent_family, set()))
 
-        # ── 分支3：按意图获取允许的工具集 ─────────────────────────────────────────────────
-        allowed = set(AVAILABLE_TOOLS_BY_INTENT.get(resolved.intent_family, set()))
-
-        # ── 分支4：无限制工具集 → 开放全工具（兜底）─────────────────────────────────────
+        # ── 分支3：非受约束意图默认开放全工具（兜底）────────────────────────────────────
         if not allowed:
             return TOOL_SCHEMAS
 
-        # ── 分支5：补充 suggested_tools ───────────────────────────────────────────────────
-        if resolved.suggested_tools:
-            allowed.update(name for name in resolved.suggested_tools if name in TOOL_SCHEMA_NAME_SET)
-
-        # ── 分支6：fact_check 类型 → 补充核查类工具 ─────────────────────────────────────
-        if resolved.turn_kind == "fact_check":
-            allowed.update({"check_repo_growth", "get_db_info", "describe_project", "fetch_trending"})
-
-        # ── 分支7：过滤并返回工具 schema ─────────────────────────────────────────────────
+        # ── 分支4：过滤并返回工具 schema ─────────────────────────────────────────────────
         filtered = [TOOL_SCHEMA_BY_NAME[name] for name in ALL_TOOL_NAMES if name in allowed]
         return filtered or TOOL_SCHEMAS
 
@@ -1083,7 +1067,7 @@ class HotProjectAgent:
         #    场景：用户误回复"开始"，但上一轮并没有待确认的请求
         if not self.state.awaiting_confirmation and self._is_confirmation_ack(text):
             self.state.awaiting_confirmation = False
-            return "请先直接描述要查询的 GitHub 烳门项目需求。", False
+            return "请先直接描述要查询的 GitHub 热门项目需求。", False
 
         # ── 分支4：新消息或澄清内容 → 调用路由 LLM 解析 ────────────────────────────────
         #    这是核心路由流程：调用 CONFIRMATION_PROMPT 让 LLM 识别意图和抽取参数
@@ -1163,7 +1147,6 @@ class HotProjectAgent:
                 return True
         return False
 
-
     # ────────────────────────────────────────────────────────────────────────────────────
     # 路由 LLM 调用：意图识别 + 参数抽取的核心流程
     # ────────────────────────────────────────────────────────────────────────────────────
@@ -1209,7 +1192,7 @@ class HotProjectAgent:
             temperature=0.1,
             max_tokens=1024,
             log_prefix="[Agent-Route]",
-            enable_thinking=True,
+            enable_thinking=False,
         )
         fallback = self._default_confirmation_message()
         if response is None:
@@ -1528,12 +1511,6 @@ class HotProjectAgent:
         榜单型任务特殊处理：
           - 用户未指定 growth_calc_days → 使用 DB 年龄（若有效）或默认值
           - 确保确认文本与实际执行一致
-
-        工具列表确定：
-          - suggested_tools 优先使用路由建议
-          - 无建议时使用 AVAILABLE_TOOLS_BY_INTENT[intent_family]
-          - fact_check 场景补充核查工具
-
         返回：
           ResolvedRequest（参数已冻结，准备执行）
         """
@@ -1562,7 +1539,7 @@ class HotProjectAgent:
 
         suggested_tools = list(pending.suggested_tools)
         if not suggested_tools:
-            intent_tools = AVAILABLE_TOOLS_BY_INTENT.get(pending.intent_family, set())
+            intent_tools = CONSTRAINED_TOOLS_BY_INTENT.get(pending.intent_family, set())
             suggested_tools = ordered_tool_names(intent_tools, all_tool_names=ALL_TOOL_NAMES)
 
         if pending.turn_kind == "fact_check":
