@@ -34,14 +34,12 @@ from .common.config import (
     GITHUB_TOKENS,
     HOT_PROJECT_COUNT,
     HOT_NEW_PROJECT_COUNT,
-    MIN_STAR_FILTER,
+    MIN_STAR,
+    MAX_STAR,
     DAYS_SINCE_CREATED,
     SEARCH_KEYWORDS,
-    SEARCH_MAX_PAGES,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
-    STAR_RANGE_MAX,
-    STAR_RANGE_MIN,
     GROWTH_CALC_DAYS,
 )
 from .common.db import save_db, update_db_project
@@ -174,10 +172,8 @@ def _ensure_project_record(
 def tool_search_by_keywords(
     token_mgr: TokenManager,
     categories: list[str] | None = None,
-    project_min_star: int = MIN_STAR_FILTER,
+    min_star: int = MIN_STAR,
     days_since_created: int | None = None,
-    *,
-    min_stars: int | None = None,
 ) -> dict:
     """
     Tool 1: 按关键词类别搜索 GitHub 热门仓库（并行）。
@@ -187,7 +183,7 @@ def tool_search_by_keywords(
     Args:
         token_mgr:        TokenManager 实例
         categories:       搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
-        project_min_star: 关键词搜索项目最低 star 过滤线
+        min_star:         项目最低 star 门槛
         days_since_created: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
 
     Returns:
@@ -196,19 +192,16 @@ def tool_search_by_keywords(
     """
     from datetime import timedelta
 
-    if min_stars is not None and project_min_star == MIN_STAR_FILTER:
-        project_min_star = min_stars
-
     validated = validate_tool_args(
         "search_by_keywords",
         {
             "categories": categories,
-            "project_min_star": project_min_star,
+            "min_star": min_star,
             "days_since_created": days_since_created,
         },
     )
     categories = validated.get("categories")
-    project_min_star = validated.get("project_min_star", MIN_STAR_FILTER)
+    min_star = validated.get("min_star", MIN_STAR)
     days_since_created = validated.get("days_since_created")
 
     if categories:
@@ -243,7 +236,7 @@ def tool_search_by_keywords(
                     keyword_idx=keyword_idx,
                     total_keywords=total_keywords,
                     created_after=created_after,
-                    project_min_star_override=project_min_star,
+                    min_star=min_star,
                     _raw_repos=raw_repos,
                 ))
         pool.wait_all_done()
@@ -256,7 +249,7 @@ def tool_search_by_keywords(
     for fn, info in raw_repos.items():
         repo_item = info["repo_item"]
         star = info["star"]
-        if star < project_min_star:
+        if star < min_star:
             continue
         repos.append({
             "full_name": fn,
@@ -278,8 +271,8 @@ def tool_search_by_keywords(
 
 def tool_scan_star_range(
     token_mgr: TokenManager,
-    min_star: int = STAR_RANGE_MIN,
-    max_star: int = STAR_RANGE_MAX,
+    min_star: int = MIN_STAR,
+    max_star: int = MAX_STAR,
     seen_repos: set[str] | None = None,
     days_since_created: int | None = None,
 ) -> dict:
@@ -293,8 +286,8 @@ def tool_scan_star_range(
       Phase 1 — 并行：ScanSegmentTask 提交到 Pool，N Worker 并行扫描
 
     Args:
-        min_star:         最低星数
-        max_star:         最高星数
+        min_star:         项目最低 star 门槛（扫描区间下界）
+        max_star:         扫描区间上限
         seen_repos:       已扫描过的仓库集合（用于去重）
         days_since_created: 新项目判定窗口（天），指定后在查询条件中加入 created:>=date 过滤项目
     """
@@ -309,8 +302,8 @@ def tool_scan_star_range(
         },
     )
     min_star, max_star = _normalize_star_range(
-        validated.get("min_star", STAR_RANGE_MIN),
-        validated.get("max_star", STAR_RANGE_MAX),
+        validated.get("min_star", MIN_STAR),
+        validated.get("max_star", MAX_STAR),
     )
     days_since_created = validated.get("days_since_created")
 
@@ -320,7 +313,6 @@ def tool_scan_star_range(
     # 新项目模式：计算创建时间截止日期
     created_after = ""
     extra_query = ""
-    min_star_filter = min_star
     if days_since_created is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days_since_created)
         created_after = cutoff.strftime("%Y-%m-%d")
@@ -345,7 +337,7 @@ def tool_scan_star_range(
                 high=high,
                 total_segments=len(segments),
                 created_after=created_after,
-                min_star_filter_override=min_star_filter,
+                min_star=min_star,
                 _raw_repos=raw_repos,
             )
             segment_tasks.append(task)
@@ -366,7 +358,7 @@ def tool_scan_star_range(
                 high=task.high,
                 total_segments=task.total_segments,
                 created_after=task.created_after,
-                min_star_filter_override=task.min_star_filter_override,
+                min_star=task.min_star,
                 page_numbers=list(task.failed_pages),
                 retry_round=1,
                 _raw_repos=raw_repos,
@@ -611,7 +603,7 @@ def tool_batch_check_growth(
                 token_idx=0,
                 page=1,
                 per_page=1,
-                auto_star_filter=False,
+                min_star=0,
             )
             if items:
                 repo_item = next(
@@ -932,7 +924,7 @@ def tool_generate_report(
     days_since_created: int | None = None,
     growth_calc_days: int = GROWTH_CALC_DAYS,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
-    min_star: int = MIN_STAR_FILTER,
+    min_star: int = MIN_STAR,
 ) -> dict:
     """
     Tool 7: 生成完整 Markdown 报告。

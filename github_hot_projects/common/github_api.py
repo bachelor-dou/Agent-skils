@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import requests
 
 from .config import (
-    MIN_STAR_FILTER,
+    MIN_STAR,
     SEARCH_REQUEST_INTERVAL,
 )
 from .token_manager import TokenManager
@@ -63,11 +63,17 @@ def search_github_repos(
     per_page: int = 100,
     sort: str = "stars",
     order: str = "desc",
-    auto_star_filter: bool = True,
+    min_star: int | None = None,
     worker_idx: int | None = None,
 ) -> list[dict] | None:
     """
     调用 GitHub Search API 搜索仓库（3 次重试）。
+
+    Args:
+        min_star: 最低 star 过滤阈值。
+            - None: 使用默认 MIN_STAR
+            - > 0: 使用指定值
+            - = 0: 不添加 star 过滤（query 已包含范围或查特定仓库）
 
     Returns:
         仓库列表，成功但无数据返回 []，3 次网络异常全失败返回 None。
@@ -76,7 +82,18 @@ def search_github_repos(
         TokenInvalidError: Token 失效 (401)
         RateLimitError:    Token 限流 (403/429)
     """
-    q = f"{query} stars:>={MIN_STAR_FILTER}" if auto_star_filter else query
+    if min_star is None:
+        star_threshold = MIN_STAR
+    elif min_star > 0:
+        star_threshold = min_star
+    else:
+        # min_star <= 0: 不添加 star 过滤
+        star_threshold = None
+
+    if star_threshold is not None:
+        q = f"{query} stars:>={star_threshold}"
+    else:
+        q = query
     url = "https://api.github.com/search/repositories"
     params = {"q": q, "sort": sort, "order": order, "per_page": per_page, "page": page}
     headers = token_mgr.get_rest_headers(token_idx)

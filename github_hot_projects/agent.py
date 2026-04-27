@@ -27,9 +27,8 @@ from .common.config import (
     LLM_API_KEY,
     LLM_API_URL,
     LLM_MODEL,
-    MIN_STAR_FILTER,
-    STAR_RANGE_MIN,
-    STAR_RANGE_MAX,
+    MIN_STAR,
+    MAX_STAR,
     GROWTH_CALC_DAYS,
     STAR_GROWTH_THRESHOLD,
     HOT_PROJECT_COUNT,
@@ -248,7 +247,7 @@ INTENT_ALIASES = {
 # 参数渲染器：将参数键值转换为用户可见的确认文本片段
 PARAM_DISPLAYERS = {
     "categories": lambda v: f"关注方向为{'、'.join(v)}" if isinstance(v, list) and v else None,
-    "project_min_star": lambda v: f"关键词搜索最低star为{v}",
+    "min_star": lambda v: f"项目最低star为{v}",
     "growth_calc_days": lambda v: f"统计近{v}天的增长",
     "days_since_created": lambda v: f"只看近{v}天内创建的项目",
     "growth_threshold": lambda v: f"增长门槛为{v}",
@@ -459,7 +458,7 @@ class AgentState:
     last_mode: str = "comprehensive"  # 当前榜单模式
     last_growth_calc_days: int = GROWTH_CALC_DAYS  # 当前增长统计窗口
     last_growth_threshold: int = STAR_GROWTH_THRESHOLD  # 当前增长阈值
-    last_min_star: int = MIN_STAR_FILTER  # 当前最低 star 过滤值
+    last_min_star: int = MIN_STAR  # 当前最低 star 过滤值
     seen_repos: set[str] = field(default_factory=set)  # 已扫描仓库（用于去重）
 
     # ─── 路由状态：确认门控和请求追踪 ───
@@ -519,25 +518,33 @@ class HotProjectAgent:
         内部执行 ReAct 循环：
           1. 如果对话历史过长，触发压缩
           2. 将用户消息加入会话历史
-          3. 调用 LLM（带 Tool 定义）
-          4. 如果 LLM 选择调用 Tool → 执行 Tool → 将结果加入历史 → 回到 3
-          5. 如果 LLM 直接回复 → 返回回复文本
+          3. 调用路由门控判断是否拦截
+          4. 调用 LLM（带 Tool 定义）
+          5. 如果 LLM 选择调用 Tool → 执行 Tool → 将结果加入历史 → 回到 4
+          6. 如果 LLM 直接回复 → 返回回复文本
         """
-        # 对话历史压缩
+        # ── 步骤1：对话历史压缩检查 ──────────────────────────────────────────────────────
+        #    超过上限时触发 LLM 摘要压缩，保留最近消息
         if len(self.state.conversation) > MAX_CONVERSATION_MESSAGES:
             self._compress_conversation()
 
+        # ── 步骤2：用户消息校验与追加 ─────────────────────────────────────────────────────
+        #    过长消息拦截，正常消息追加到 conversation
         if len(user_message) > 2000:
             return "消息过长（超过 2000 字符），请缩短后重试。"
 
         self.state.current_user_turn += 1
         self.state.conversation.append({"role": "user", "content": user_message})
 
+        # ── 步骤3：路由门控判断 ──────────────────────────────────────────────────────────
+        #    调用路由 LLM 判断意图，可能返回拦截文本或放行执行
         intercept_reply, execution_confirmed = self._maybe_handle_confirmation_gate(user_message)
         if intercept_reply is not None:
             self.state.conversation.append({"role": "assistant", "content": intercept_reply})
             return intercept_reply
 
+        # ── 步骤4：初始化本轮执行状态 ─────────────────────────────────────────────────────
+        #    清空工具计数、设置执行契约约束
         self.state.current_turn_tools = set()
         self.state.current_turn_tool_call_count = 0
         self.state.current_turn_requires_tool_call = bool(
@@ -550,6 +557,7 @@ class HotProjectAgent:
         if execution_confirmed:
             self._log_execution_overview()
 
+        # ── 步骤5：ReAct 循环（最多 MAX_TOOL_CALLS_PER_TURN 次调用）──────────────────────
         for step in range(MAX_TOOL_CALLS_PER_TURN):
             response = self._call_llm(
                 execution_confirmed=execution_confirmed,
@@ -562,12 +570,14 @@ class HotProjectAgent:
 
             message = response.get("choices", [{}])[0].get("message", {})
 
-            # 检查是否有 Tool 调用
+            # ── 分支5a：无 Tool 调用 → LLM 直接回复 ───────────────────────────────────────
+            #    需检查执行契约：事实核查类请求必须先调用 Tool
             tool_calls = message.get("tool_calls", [])
 
             if not tool_calls:
-                # LLM 直接回复用户
                 content = message.get("content", "") or ""
+
+                # 子分支：违反执行契约 → 强制重试一次
                 if self._violates_execution_contract(content):
                     if not contract_retry_used:
                         contract_retry_used = True
@@ -575,17 +585,19 @@ class HotProjectAgent:
                             "[执行契约] 当前请求属于事实核查，必须先调用至少一个 Tool 获取事实，"
                             "再给出回复。不要直接输出等待文案或结论。"
                         )
-                        logger.warning("[Agent] 命中执行契约重试：本轮尚无 Tool 调用，触发强制二次规划。")
+                        logger.warning("[Agent] 周中执行契约重试：本轮尚无 Tool 调用，触发强制二次规划。")
                         continue
                     safe_reply = self._build_contract_fallback_reply()
                     self.state.conversation.append({"role": "assistant", "content": safe_reply})
                     return safe_reply
+
+                # 子分支：正常回复 → 返回给用户
                 self.state.conversation.append({"role": "assistant", "content": content})
                 return content if content else "（Agent 未生成回复，请重试或换个问法。）"
 
+            # ── 分支5b：有 Tool 调用 → 依次执行 ────────────────────────────────────────────
             contract_hint = None
 
-            # 有 Tool 调用 → 执行每个 Tool
             self.state.conversation.append({
                 "role": "assistant",
                 "content": message.get("content"),
@@ -597,6 +609,7 @@ class HotProjectAgent:
                 tool_args_str = tc.get("function", {}).get("arguments", "{}")
                 tool_call_id = tc.get("id", "")
 
+                # 子分支：参数解析失败 → 返回错误提示给 LLM
                 try:
                     tool_args = json.loads(tool_args_str) if tool_args_str else {}
                     if not isinstance(tool_args, dict):
@@ -622,16 +635,23 @@ class HotProjectAgent:
                     })
                     continue
 
+                # 子分支：参数解析成功 → 执行 Tool
                 logger.info(f"[Agent] Tool 调用: {tool_name}({tool_args})")
                 try:
                     result = self._execute_tool(tool_name, tool_args)
                 except Exception as e:
                     logger.error(f"[Agent] Tool {tool_name} 执行异常: {e}")
                     result = {"error": f"工具执行异常: {e}"}
+
+                # 记录成功调用的工具（用于执行契约检查）
                 if not (isinstance(result, dict) and result.get("error")):
                     self.state.current_turn_tools.add(tool_name)
                     self.state.current_turn_tool_call_count += 1
+
+                # 记录 Tool 结果到持久化状态（用于追问上下文）
                 self._remember_tool_observation(tool_name, tool_args, result)
+
+                # 序列化结果并追加到 conversation
                 try:
                     result_str = self._serialize_result(result)
                 except Exception as serialize_err:
@@ -644,6 +664,7 @@ class HotProjectAgent:
                     "content": result_str,
                 })
 
+        # ── 步骤6：超过最大调用次数 → 返回提示 ───────────────────────────────────────────
         return "已达到单轮最大 Tool 调用次数，请尝试简化请求。"
 
     def _call_llm(
@@ -651,29 +672,58 @@ class HotProjectAgent:
         execution_confirmed: bool = False,
         contract_hint: str | None = None,
     ) -> dict | None:
-        """调用 LLM（带 Tool 定义）。"""
+        """
+        调用执行阶段 LLM（带 Tool 定义）。
+
+        处理流程：
+          1. 复制 conversation 作为消息基础
+          2. 根据路由结果裁剪工具集
+          3. 向 system prompt 注入执行上下文（ResolvedRequest、工具集、契约提示）
+          4. 调用 LLM API
+
+        参数：
+          - execution_confirmed: 是否已通过路由确认，可直接执行
+          - contract_hint: 执行契约提示（用于强制调用 Tool）
+        """
+        # ── 步骤1：准备消息基础 ───────────────────────────────────────────────────────────
         messages = list(self.state.conversation)
+
+        # ── 步骤2：裁剪工具集 ─────────────────────────────────────────────────────────────
         selected_tools = self._select_tools_for_llm()
         selected_tool_names = [
             schema.get("function", {}).get("name")
             for schema in selected_tools
             if schema.get("function", {}).get("name")
         ]
+
+        # ── 步骤3：注入执行上下文到 system prompt ────────────────────────────────────────
+        #    包括：执行确认标记、ResolvedRequest、工具集列表、契约提示
         if messages and messages[0].get("role") == "system":
             extra_sections = []
+
+            # 子分支：已确认执行 → 添加执行标记
             if execution_confirmed:
-                extra_sections.append("[执行上下文] 当前请求已通过路由判定可执行。请直接执行对应 Tool，不要回到“确认请回复开始”。")
+                extra_sections.append("[执行上下文] 当前请求已通过路由判定可执行。请直接执行对应 Tool，不要回到\"确认请回复开始\"。")
+
+            # 子分支：有已确认请求 → 注入执行参数
             if self.state.last_confirmed_request is not None:
                 extra_sections.append(self.state.last_confirmed_request.to_execution_context())
+
+            # 子分支：添加工具集列表
             extra_sections.append(f"[本轮工具集] {selected_tool_names}")
+
+            # 子分支：契约提示（强制调用 Tool）
             if contract_hint:
                 extra_sections.append(contract_hint)
+
+            # 合并到 system prompt
             if extra_sections:
                 messages[0] = {
                     "role": "system",
                     "content": messages[0]["content"] + "\n\n" + "\n\n".join(extra_sections),
                 }
 
+        # ── 步骤4：调用 LLM API ───────────────────────────────────────────────────────────
         return self._request_llm(
             messages=messages,
             tools=selected_tools,
@@ -685,38 +735,90 @@ class HotProjectAgent:
         )
 
     def _select_tools_for_llm(self) -> list[dict]:
-        """根据路由结果动态裁剪可用工具，保留 ReAct 自主选择空间。"""
+        """
+        根据路由结果动态裁剪可用工具集。
+
+        裁剪规则：
+          1. 无路由结果 → 开放全工具
+          2. 自由回答/未知意图 → 开放全工具（保证可扩展性）
+          3. 榜单型意图 → 限制到 AVAILABLE_TOOLS_BY_INTENT 指定的工具
+          4. suggested_tools 额外补充
+          5. fact_check 类型 → 补充核查类工具
+
+        目的：
+          - 减少执行 LLM 的选择干扰
+          - 防止工具混用导致流程混乱
+        """
         resolved = self.state.last_confirmed_request
+
+        # ── 分支1：无路由结果 → 开放全工具 ──────────────────────────────────────────────
         if resolved is None:
             return TOOL_SCHEMAS
 
-        # 自由回答/未知意图默认开放全工具，保证可扩展性
+        # ── 分支2：自由回答/未知意图 → 开放全工具 ────────────────────────────────────────
         if resolved.intent_family in {"freeform_answer", "unknown"}:
             return TOOL_SCHEMAS
 
+        # ── 分支3：按意图获取允许的工具集 ─────────────────────────────────────────────────
         allowed = set(AVAILABLE_TOOLS_BY_INTENT.get(resolved.intent_family, set()))
+
+        # ── 分支4：无限制工具集 → 开放全工具（兜底）─────────────────────────────────────
         if not allowed:
             return TOOL_SCHEMAS
 
+        # ── 分支5：补充 suggested_tools ───────────────────────────────────────────────────
         if resolved.suggested_tools:
             allowed.update(name for name in resolved.suggested_tools if name in TOOL_SCHEMA_NAME_SET)
 
+        # ── 分支6：fact_check 类型 → 补充核查类工具 ─────────────────────────────────────
         if resolved.turn_kind == "fact_check":
             allowed.update({"check_repo_growth", "get_db_info", "describe_project", "fetch_trending"})
 
+        # ── 分支7：过滤并返回工具 schema ─────────────────────────────────────────────────
         filtered = [TOOL_SCHEMA_BY_NAME[name] for name in ALL_TOOL_NAMES if name in allowed]
         return filtered or TOOL_SCHEMAS
 
     def _violates_execution_contract(self, content: str) -> bool:
-        """执行契约：必须先调 Tool 的轮次，禁止无取证直接回复。"""
+        """
+        执行契约检查：当前轮次是否违反"必须先调 Tool"的约束。
+
+        触发条件：
+          - current_turn_requires_tool_call = true（路由判定需要先调工具）
+          - current_turn_tool_call_count = 0（本轮尚未调用任何工具）
+
+        返回：
+          - True: 违反契约，LLM 试图直接回复而非调用工具
+          - False: 不违反契约，可以直接回复或已调用过工具
+
+        目的：
+          - 防止 fact_check 类请求跳过数据获取直接给出结论
+          - 确保事实核查类回复基于真实数据
+        """
+        # ── 分支1：本轮不需要强制调用工具 → 不违反 ─────────────────────────────────────
         if not self.state.current_turn_requires_tool_call:
             return False
+
+        # ── 分支2：本轮已调用过工具 → 不违反 ───────────────────────────────────────────
         if self.state.current_turn_tool_call_count > 0:
             return False
+
+        # ── 分支3：需要调用但未调用 → 违反契约 ───────────────────────────────────────────
         return True
 
     def _build_contract_fallback_reply(self) -> str:
-        """执行契约失败后的兜底回复。"""
+        """
+        构建执行契约失败后的兜底回复。
+
+        场景：
+          - fact_check 类请求
+          - 路由判定 must_call_tool_before_reply=true
+          - LLM 尝试直接回复（违反契约）
+          - 重试后仍违反 → 返回此兜底文本
+
+        目的：
+          - 引导用户补充具体核查点
+          - 保证对话不中断
+        """
         repo = self.state.active_repo
         if repo:
             return (
@@ -726,19 +828,37 @@ class HotProjectAgent:
         return "为了保证准确性，我需要先调用数据工具核查。请先提供仓库名（owner/repo），我会立即执行查询。"
 
     def _remember_tool_observation(self, tool_name: str, tool_args: dict, result: dict) -> None:
-        """记录本轮 Tool 观测结果，供后续事实核查复用。"""
+        """
+        记录本轮 Tool 观测结果，供后续事实核查复用。
+
+        记录内容：
+          - active_repo: 从工具参数或结果中提取的仓库名
+          - recent_verified_claims: check_repo_growth / get_db_info 的核查结果
+
+        目的：
+          - 支持追问时复用已核查的事实（fact_check 场景）
+          - 避免重复查询相同仓库的相同数据
+
+        存储限制：
+          - recent_verified_claims 最多保留 20 条
+        """
+        # ── 分支1：结果无效 → 不记录 ────────────────────────────────────────────────────
         if not isinstance(result, dict) or result.get("error"):
             return
 
+        # ── 分支2：提取仓库名（从参数或结果）────────────────────────────────────────────
         repo = None
         if isinstance(tool_args, dict):
             repo = tool_args.get("repo")
         if not repo:
             repo = result.get("repo")
 
+        # ── 分支3：更新 active_repo（用于追问上下文）────────────────────────────────────
         if isinstance(repo, str) and repo:
             self.state.active_repo = repo
 
+        # ── 分支4：记录 check_repo_growth 结果 ───────────────────────────────────────────
+        #    包含：仓库、创建时间、当前 star、增长值、统计窗口
         if tool_name == "check_repo_growth":
             claim = {
                 "repo": result.get("repo") or repo,
@@ -751,6 +871,8 @@ class HotProjectAgent:
             }
             if claim.get("repo"):
                 self.state.recent_verified_claims.append(claim)
+
+        # ── 分支5：记录 get_db_info 结果 ────────────────────────────────────────────────
         elif tool_name == "get_db_info" and repo:
             info = result.get("info") if isinstance(result.get("info"), dict) else {}
             if info:
@@ -764,6 +886,7 @@ class HotProjectAgent:
                     }
                 )
 
+        # ── 分支6：限制 recent_verified_claims 长度 ─────────────────────────────────────
         if len(self.state.recent_verified_claims) > 20:
             self.state.recent_verified_claims = self.state.recent_verified_claims[-20:]
 
@@ -777,7 +900,28 @@ class HotProjectAgent:
         enable_thinking: bool | None = None,
         thinking_budget: int | None = None,
     ) -> dict | None:
-        """统一的 LLM 请求入口，支持带 Tool 或纯文本确认。"""
+        """
+        统一的 LLM API 请求入口。
+
+        功能：
+          - 支持带 Tool 定义（执行阶段）或纯文本（路由阶段）
+          - 支持启用 thinking 模式（路由阶段）
+          - 3 次重试机制
+          - 诊断日志记录 token 用量
+
+        参数：
+          - messages: 对话消息列表
+          - tools: 工具定义（可选）
+          - temperature: 温度参数（路由阶段 0.1，执行阶段 0.3）
+          - max_tokens: 最大输出 token
+          - enable_thinking: 是否启用 thinking 模式
+          - thinking_budget: thinking token 预算
+
+        返回：
+          - dict: LLM 响应数据（包含 choices、usage）
+          - None: 调用失败（重试 3 次后）
+        """
+        # ── 步骤1：构建请求头和基础 payload ─────────────────────────────────────────────
         headers = {
             "Authorization": f"Bearer {LLM_API_KEY}",
             "Content-Type": "application/json",
@@ -788,6 +932,8 @@ class HotProjectAgent:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        # ── 步骤2：可选参数注入（thinking、tools）──────────────────────────────────────
         if enable_thinking is not None:
             payload["enable_thinking"] = enable_thinking
         if thinking_budget is not None:
@@ -796,10 +942,13 @@ class HotProjectAgent:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
+        # ── 步骤3：重试循环（最多 3 次）──────────────────────────────────────────────────
         for attempt in range(3):
             try:
                 logger.info("%s 开始 LLM 调用: model=%s, attempt=%d", log_prefix, LLM_MODEL, attempt + 1)
                 resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=300)
+
+                # ── 分支3a：HTTP 200 → 解析响应 ───────────────────────────────────────────
                 if resp.status_code == 200:
                     try:
                         data = resp.json()
@@ -809,7 +958,8 @@ class HotProjectAgent:
                             e, resp.text[:500],
                         )
                         continue
-                    # 诊断日志：记录 finish_reason 和 token 用量
+
+                    # 子分支：诊断日志（token 用量）
                     choice = (data.get("choices") or [{}])[0]
                     finish = choice.get("finish_reason", "unknown")
                     usage = data.get("usage", {})
@@ -823,6 +973,8 @@ class HotProjectAgent:
                         usage.get("completion_tokens"),
                         detail.get("reasoning_tokens"),
                     )
+
+                    # 子分支：空响应检查（content + tool_calls 都为空）
                     msg = choice.get("message", {})
                     content = msg.get("content") or ""
                     has_tools = bool(msg.get("tool_calls"))
@@ -836,14 +988,20 @@ class HotProjectAgent:
                             attempt + 1,
                         )
                         continue  # 重试，可能是 reasoning 耗尽 token
+
                     return data
+
+                # ── 分支3b：HTTP 非 200 → 记录警告并重试 ───────────────────────────────────
                 logger.warning(
                     "LLM 调用失败: status=%s, body=%s, attempt=%d",
                     resp.status_code, resp.text[:300], attempt + 1,
                 )
+
+            # ── 分支3c：请求异常 → 记录错误并重试 ─────────────────────────────────────────
             except requests.RequestException as e:
                 logger.error(f"LLM 请求异常: {e}, attempt={attempt + 1}")
 
+        # ── 步骤4：重试耗尽 → 返回 None ───────────────────────────────────────────────────
         return None
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -1428,29 +1586,60 @@ class HotProjectAgent:
         )
 
     def _sync_active_repo_from_resolved_request(self, resolved: ResolvedRequest) -> None:
-        """从已解析请求上下文中同步当前活跃仓库缓存。"""
+        """
+        从已解析请求中同步活跃仓库缓存。
+
+        提取顺序：
+          1. target_repo 字段（路由阶段识别的仓库）
+          2. resolved_params["repo"]（参数中的仓库）
+
+        目的：
+          - 支持追问时复用仓库上下文（如 "查 langchain 的增长" → "它的 star 多少"）
+        """
+        # ── 分支1：从 target_repo 提取 ─────────────────────────────────────────────────
         repo = resolved.target_repo
         if not repo:
+            # ── 分支2：从 resolved_params 提取 ───────────────────────────────────────────
             raw_repo = resolved.resolved_params.get("repo")
             if isinstance(raw_repo, str) and raw_repo.strip():
                 repo = raw_repo.strip()
+
+        # ── 分支3：更新 active_repo ────────────────────────────────────────────────────
         if repo:
             self.state.active_repo = repo
 
     @staticmethod
     def _default_params_for_intent(intent_family: str) -> dict[str, object]:
-        """返回各意图类型在 Tool 执行前使用的默认参数槽位。"""
+        """
+        返回各意图类型在 Tool 执行前使用的默认参数槽位。
+
+        用途：
+          - 在 _resolve_pending_request 中与用户参数合并
+          - 确保工具执行时有完整参数集
+
+        各意图的默认值：
+          - comprehensive_ranking: 综合榜默认配置
+          - hot_new_ranking: 新项目榜默认配置（含创建时间窗口）
+          - keyword_ranking: 关键词榜默认配置
+          - trending_only: Trending 默认范围
+          - repo_info / repo_growth: 单仓库默认增长窗口
+
+        返回：
+          - dict: 默认参数字典（空 dict 表示无默认值）
+        """
+        # ── 分支1：综合榜默认参数 ───────────────────────────────────────────────────────
         if intent_family == "comprehensive_ranking":
             return {
                 "mode": "comprehensive",
                 "top_n": HOT_PROJECT_COUNT,
                 "growth_calc_days": GROWTH_CALC_DAYS,
                 "growth_threshold": STAR_GROWTH_THRESHOLD,
-                "project_min_star": MIN_STAR_FILTER,
-                "min_star": STAR_RANGE_MIN,
-                "max_star": STAR_RANGE_MAX,
+                "min_star": MIN_STAR,
+                "max_star": MAX_STAR,
                 "trending_range": "all",
             }
+
+        # ── 分支2：新项目榜默认参数 ─────────────────────────────────────────────────────
         if intent_family == "hot_new_ranking":
             return {
                 "mode": "hot_new",
@@ -1458,26 +1647,32 @@ class HotProjectAgent:
                 "growth_calc_days": GROWTH_CALC_DAYS,
                 "days_since_created": DAYS_SINCE_CREATED,
                 "growth_threshold": STAR_GROWTH_THRESHOLD,
-                "project_min_star": MIN_STAR_FILTER,
-                "min_star": STAR_RANGE_MIN,
-                "max_star": STAR_RANGE_MAX,
+                "min_star": MIN_STAR,
+                "max_star": MAX_STAR,
                 "trending_range": "all",
             }
+
+        # ── 分支3：Trending 默认参数 ────────────────────────────────────────────────────
         if intent_family == "trending_only":
             return {"trending_range": "weekly"}
+
+        # ── 分支4：单仓库查询默认参数 ──────────────────────────────────────────────────
         if intent_family == "repo_info":
             return {"growth_calc_days": GROWTH_CALC_DAYS}
         if intent_family == "repo_growth":
             return {"growth_calc_days": GROWTH_CALC_DAYS}
-        # keyword_ranking 使用与 comprehensive_ranking 相同的默认参数槽位
+
+        # ── 分支5：关键词榜默认参数 ─────────────────────────────────────────────────────
         if intent_family == "keyword_ranking":
             return {
                 "mode": "keyword",
                 "top_n": HOT_PROJECT_COUNT,
                 "growth_calc_days": GROWTH_CALC_DAYS,
                 "growth_threshold": STAR_GROWTH_THRESHOLD,
-                "project_min_star": MIN_STAR_FILTER,
+                "min_star": MIN_STAR,
             }
+
+        # ── 分支6：其他意图 → 无默认参数 ───────────────────────────────────────────────
         return {}
 
     # ────────────────────────────────────────────────────────────────────────────────────
@@ -1531,8 +1726,24 @@ class HotProjectAgent:
         return merged
 
     def _log_execution_overview(self) -> None:
-        """在执行开始时打印单条执行参数总览。"""
+        """
+        在执行开始时打印本轮执行参数总览。
+
+        输出内容：
+          - turn: 当前轮次
+          - turn_kind: 轮次类型
+          - intent: 意图类型（英文 + 中文）
+          - route_confidence: 路由置信度
+          - persistence_policy: 持久化策略
+          - params: 解析后的参数
+
+        用途：
+          - 调试追踪执行流程
+          - 确认路由解析结果正确
+        """
         resolved_request = self.state.last_confirmed_request
+
+        # ── 分支1：无已确认请求 → 打印提示 ─────────────────────────────────────────────
         if resolved_request is None:
             logger.info(
                 "[Agent] 运行参数总览: turn=%s | 当前无已确认请求（将按 LLM/工具默认参数执行）。",
@@ -1540,6 +1751,7 @@ class HotProjectAgent:
             )
             return
 
+        # ── 分支2：有已确认请求 → 打印完整参数 ─────────────────────────────────────────
         mode = resolved_request.resolved_params.get("mode")
         mode_text = mode if isinstance(mode, str) else None
         persistence_policy = self._persistence_policy_for_request(mode=mode_text)
@@ -1556,20 +1768,37 @@ class HotProjectAgent:
         )
 
     def _check_suggested_collection_tools(self, tool_name: str) -> list[str]:
-        """检查建议的候选收集工具是否已调用（仅作提示，不强制阻断）。
+        """
+        检查建议的候选收集工具是否已调用（仅作提示，不强制阻断）。
 
-        LLM自主决策为主，硬编码只做建议提示：
-        - 返回缺失的建议工具列表
-        - 不强制阻断执行，只记录日志警告
+        设计原则：
+          - LLM 自主决策为主
+          - 硬编码只做建议提示
+          - 不强制阻断执行
+
+        检查时机：
+          - 调用 batch_check_growth 或 rank_candidates 时
+
+        返回：
+          - list[str]: 缺失的建议工具名称列表
+          - []: 无缺失或不需要检查
         """
         resolved_request = self.state.last_confirmed_request
+
+        # ── 分支1：无已确认请求 或 不需要完整收集 → 跳过检查 ─────────────────────────────
         if resolved_request is None or not resolved_request.requires_full_collection():
             return []
+
+        # ── 分支2：不是候选处理工具 → 跳过检查 ───────────────────────────────────────────
         if tool_name not in {"batch_check_growth", "rank_candidates"}:
             return []
+
+        # ── 分支3：获取建议工具列表 ───────────────────────────────────────────────────────
         suggested_tools = SUGGESTED_COLLECTION_TOOLS_BY_INTENT.get(resolved_request.intent_family, set())
         if not suggested_tools:
             return []
+
+        # ── 分支4：计算缺失的工具 ─────────────────────────────────────────────────────────
         missing = suggested_tools - self.state.current_turn_tools
         return sorted(missing)
 
@@ -1591,14 +1820,25 @@ class HotProjectAgent:
         return "none"
 
     def _execute_tool(self, name: str, args: dict) -> dict:
-        """路由并执行 Tool 调用。
+        """
+        路由并执行 Tool 调用。
 
         参数校验分两层：
-        1) 严格校验（仅针对 LLM 显式传入参数）：出错直接返回可重试错误
-        2) 宽松校验（系统默认值注入 + 边界裁剪）
+          1. 严格校验（LLM 显式传入参数）：出错直接返回可重试错误
+          2. 宽松校验（系统默认值注入 + 边界裁剪）
+
+        执行流程：
+          1. 严格校验 LLM 参数
+          2. 合并默认参数
+          3. 宽松校验并裁剪
+          4. 重置榜单构建缓存（新一轮开始时）
+          5. 调用具体 Tool 函数
+          6. 更新状态缓存（last_search_repos、last_candidates 等）
         """
         state = self.state
 
+        # ── 步骤1：严格校验 LLM 参数 ─────────────────────────────────────────────────────
+        #    出错直接返回，要求 LLM 修正参数后重试
         _, strict_errors = validate_tool_args_strict(name, args)
         if strict_errors:
             logger.warning("[Agent] Tool %s 参数严格校验失败: %s", name, strict_errors)
@@ -1610,30 +1850,37 @@ class HotProjectAgent:
                 "retryable": True,
             }
 
+        # ── 步骤2：合并默认参数 + 宽松校验 ──────────────────────────────────────────────
         prepared_args = self._merge_request_defaults_into_tool_args(name, args)
         validated = validate_tool_args(name, prepared_args)
         log_validated_params(name, args, prepared_args, validated)
+
+        # ── 步骤3：重置榜单构建缓存（新一轮开始时）─────────────────────────────────────
         self._maybe_reset_discovery_state(name, validated)
 
+        # ── 步骤4：Tool 路由分发 ─────────────────────────────────────────────────────────
+
+        # 分支4a：关键词搜索 → 更新 last_search_repos、seen_repos
         if name == "search_by_keywords":
-            project_min_star = validated.get("project_min_star", MIN_STAR_FILTER)
+            min_star = validated.get("min_star", MIN_STAR)
             result = tool_search_by_keywords(
                 state.token_mgr,
                 categories=validated.get("categories"),
-                project_min_star=project_min_star,
+                min_star=min_star,
                 days_since_created=validated.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
             state.last_search_repos = raw_repos
             state.seen_repos.update(r["full_name"] for r in raw_repos)
-            state.last_min_star = project_min_star
+            state.last_min_star = min_star
             return result
 
+        # 分支4b：star 范围扫描 → 追加到 last_search_repos
         elif name == "scan_star_range":
             result = tool_scan_star_range(
                 state.token_mgr,
-                min_star=validated.get("min_star", STAR_RANGE_MIN),
-                max_star=validated.get("max_star", STAR_RANGE_MAX),
+                min_star=validated.get("min_star", MIN_STAR),
+                max_star=validated.get("max_star", MAX_STAR),
                 seen_repos=state.seen_repos,
                 days_since_created=validated.get("days_since_created"),
             )
@@ -1641,6 +1888,7 @@ class HotProjectAgent:
             state.last_search_repos.extend(raw_repos)
             return result
 
+        # 分支4c：单仓库增长核查 → 直接返回结果
         elif name == "check_repo_growth":
             repo = validated.get("repo")
             if not repo:
@@ -1652,8 +1900,9 @@ class HotProjectAgent:
                 growth_calc_days=validated.get("growth_calc_days", GROWTH_CALC_DAYS),
             )
 
+        # 分支4d：批量增长计算 → 更新 last_candidates、持久化 desc
         elif name == "batch_check_growth":
-            # 检查建议的候选收集工具（仅提示，不强制阻断）
+            # 子分支：检查建议的候选收集工具（仅提示，不强制阻断）
             suggested_tools = self._check_suggested_collection_tools(name)
             if suggested_tools:
                 suggested_text = "、".join(suggested_tools)
@@ -1661,13 +1910,18 @@ class HotProjectAgent:
                     "[Agent] batch_check_growth: 建议先调用 %s 以最大化候选覆盖，但LLM可自主决策是否跳过。",
                     suggested_text,
                 )
+
+            # 子分支：检查前置条件（需要 search 结果）
             if not state.last_search_repos:
                 return {"error": "没有搜索结果，请先调用 search_by_keywords"}
+
+            # 子分支：提取参数并执行
             growth_calc_days = validated.get("growth_calc_days", GROWTH_CALC_DAYS)
             days_since_created = validated.get("days_since_created")
             growth_threshold = validated.get("growth_threshold", STAR_GROWTH_THRESHOLD)
             resolved_request = self.state.last_confirmed_request
-            # window_specified 判断：LLM args 或用户指定 或系统预设（DB年龄自适应）
+
+            # 子分支：window_specified 判断（用户是否显式指定窗口）
             window_specified = "growth_calc_days" in args or (
                 resolved_request is not None and (
                     "growth_calc_days" in resolved_request.user_specified_params
@@ -1693,8 +1947,9 @@ class HotProjectAgent:
                 logger.info("[Agent] batch_check_growth 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
             return result
 
+        # 分支4e：候选排序 → 更新 last_ranked、last_mode
         elif name == "rank_candidates":
-            # 检查建议的候选收集工具（仅提示，不强制阻断）
+            # 子分支：检查建议的候选收集工具（仅提示）
             suggested_tools = self._check_suggested_collection_tools(name)
             if suggested_tools:
                 suggested_text = "、".join(suggested_tools)
@@ -1702,8 +1957,12 @@ class HotProjectAgent:
                     "[Agent] rank_candidates: 建议先调用 %s 以最大化候选覆盖，但LLM可自主决策是否跳过。",
                     suggested_text,
                 )
+
+            # 子分支：检查前置条件（需要 candidates）
             if not state.last_candidates:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
+
+            # 子分支：提取参数并执行
             mode = validated.get("mode", "comprehensive")
             top_n = validated.get("top_n", HOT_PROJECT_COUNT if mode == "comprehensive" else HOT_NEW_PROJECT_COUNT)
             days_since_created = validated.get("days_since_created")
@@ -1719,15 +1978,20 @@ class HotProjectAgent:
             state.last_mode = mode
             return result
 
+        # 分支4f：项目详情查询 → 直接返回
         elif name == "describe_project":
             repo = validated.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
             return tool_describe_project(repo=repo, db=state.db, token_mgr=state.token_mgr)
 
+        # 分支4g：报告生成 → 持久化 desc 字段
         elif name == "generate_report":
+            # 子分支：检查前置条件（需要 ranked）
             if not state.last_ranked:
                 return {"error": "没有排序结果，请先调用 rank_candidates"}
+
+            # 子分支：执行报告生成
             report_new_project_days = state.last_candidate_days_since_created if state.last_mode == "hot_new" else None
             result = tool_generate_report(
                 state.last_ranked,
@@ -1738,15 +2002,19 @@ class HotProjectAgent:
                 growth_threshold=state.last_growth_threshold,
                 min_star=state.last_min_star,
             )
+
+            # 子分支：持久化 desc 字段
             persistence_policy = self._persistence_policy_for_request(mode=state.last_mode)
             if persistence_policy == "desc_only":
                 changed = save_db_desc_only(state.db)
                 logger.info("[Agent] generate_report 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
             return result
 
+        # 分支4h：数据库信息查询 → 直接返回
         elif name == "get_db_info":
             return tool_get_db_info(db=state.db, repo=validated.get("repo"))
 
+        # 分支4i：Trending 获取 → 补充到 last_search_repos
         elif name == "fetch_trending":
             result = tool_fetch_trending(
                 trending_range=validated.get("trending_range", "weekly"),
@@ -1759,20 +2027,41 @@ class HotProjectAgent:
                     state.last_search_repos.append(trending_repo_to_search_repo(r))
             return result
 
+        # 分支4j：未知 Tool → 返回错误
         else:
             return {"error": f"未知 Tool: {name}"}
 
     def _maybe_reset_discovery_state(self, tool_name: str, args: dict) -> None:
-        """在新一轮榜单构建开始前，清理上一轮的候选/去重状态。"""
+        """
+        在新一轮榜单构建开始时，重置缓存状态。
+
+        触发条件：
+          - 调用 search_by_keywords 或 scan_star_range（榜单构建入口）
+          - 调用 fetch_trending 且 trending_range="all"（全量补充）
+
+        检查逻辑：
+          - discovery_turn_id != current_user_turn → 新一轮，需要重置
+          - discovery_turn_id == current_user_turn → 同一轮，跳过
+
+        重置内容：
+          - last_search_repos: 搜索结果缓存
+          - last_candidates: 增长筛选后的候选
+          - last_ranked: 排序结果
+          - seen_repos: 已扫描仓库（去重）
+          - discovery_turn_id: 标记本轮已初始化
+        """
+        # ── 分支1：判断是否为榜单构建入口工具 ───────────────────────────────────────────
         is_discovery_bootstrap = tool_name in {"search_by_keywords", "scan_star_range"}
         is_trending_supplement = tool_name == "fetch_trending" and args.get("trending_range") == "all"
         if not is_discovery_bootstrap and not is_trending_supplement:
             return
 
+        # ── 分支2：检查是否同一轮（避免重复重置）──────────────────────────────────────
         current_turn = self.state.current_user_turn
         if self.state.discovery_turn_id == current_turn:
             return
 
+        # ── 分支3：重置缓存状态 ─────────────────────────────────────────────────────────
         self.state.last_search_repos = []
         self.state.last_candidates = {}
         self.state.last_candidate_days_since_created = None
@@ -1785,18 +2074,29 @@ class HotProjectAgent:
 
     @staticmethod
     def _serialize_result(result: dict, max_len: int = 8000) -> str:
-        """将 Tool 结果序列化为 JSON 字符串（供 LLM 阅读）。
-
-        超长时按结构智能截断：保留摘要字段，截取列表前 N 项。
         """
+        将 Tool 结果序列化为 JSON 字符串（供 LLM 阅读）。
+
+        截断策略：
+          1. 正常长度 → 直接返回 JSON
+          2. 超长 → 智能截断（保留摘要字段，截取列表前 N 项）
+          3. 仍超长 → 硬截断
+
+        目的：
+          - 防止 Tool 结果过大导致 LLM context 溢出
+          - 保留关键信息（error、摘要字段）
+          - 标注截断信息让 LLM 知道数据不完整
+        """
+        # ── 步骤1：尝试直接序列化 ───────────────────────────────────────────────────────
         result_str = json.dumps(result, ensure_ascii=False, default=str)
         if len(result_str) <= max_len:
             return result_str
 
-        # 智能截断：找到列表/字典类型的大字段，逐步缩减
+        # ── 步骤2：智能截断（逐步缩减列表/字典字段）────────────────────────────────────
         truncated = dict(result)
         list_keys = [k for k, v in truncated.items() if isinstance(v, (list, dict)) and k != "error"]
 
+        # 子分支：尝试不同截断级别（50→30→20→10→5）
         for trim_count in (50, 30, 20, 10, 5):
             for key in list_keys:
                 val = truncated[key]
@@ -1811,7 +2111,7 @@ class HotProjectAgent:
             if len(s) <= max_len:
                 return s
 
-        # 兜底：硬截断
+        # ── 步骤3：兜底硬截断 ───────────────────────────────────────────────────────────
         return s[:max_len] + "\n...(结果已截断)"
 
     def _compress_conversation(self) -> None:
@@ -1823,32 +2123,39 @@ class HotProjectAgent:
           2. 用 LLM 将旧消息浓缩为语义摘要
           3. 注入摘要到 system prompt 之后
           4. 保留最近的消息
+
+        触发条件：
+          - len(conversation) > MAX_CONVERSATION_MESSAGES（40 条）
         """
         conv = self.state.conversation
+
+        # ── 步骤1：检查是否需要压缩 ─────────────────────────────────────────────────────
         if len(conv) <= MAX_CONVERSATION_MESSAGES:
             return
 
-        # 只压缩非 system 消息，system prompt 始终保留基座。
+        # ── 步骤2：提取并清理 system prompt ─────────────────────────────────────────────
+        #    移除旧的摘要标记，保留原始 system prompt
         system_message = next((m for m in conv if m.get("role") == "system"), None)
         system_content = (system_message or {}).get("content") or SYSTEM_PROMPT
         if "[对话历史摘要]" in system_content:
             system_content = system_content.split("\n\n[对话历史摘要]", 1)[0].strip() or SYSTEM_PROMPT
 
+        # ── 步骤3：分离非 system 消息 ────────────────────────────────────────────────────
         non_system = [m for m in conv if m.get("role") != "system"]
 
         if len(non_system) <= KEEP_RECENT_MESSAGES:
             return
 
-        # 要压缩的旧消息
+        # ── 步骤4：划分旧消息和近期消息 ────────────────────────────────────────────────
         old_msgs = non_system[:-KEEP_RECENT_MESSAGES]
         recent_msgs = non_system[-KEEP_RECENT_MESSAGES:]
 
-        # 用 LLM 生成语义摘要
+        # ── 步骤5：生成语义摘要 ─────────────────────────────────────────────────────────
         llm_summary = self._generate_summary_with_llm(old_msgs)
         if llm_summary:
             self.state.conversation_summary = llm_summary
         else:
-            # fallback: 简单截取（LLM 调用失败时）
+            # 子分支：LLM 调用失败 → fallback 简单截取
             summary_parts = []
             if self.state.conversation_summary:
                 summary_parts.append(self.state.conversation_summary)
@@ -1862,7 +2169,7 @@ class HotProjectAgent:
             self.state.conversation_summary = "\n".join(summary_parts[-20:])
             logger.warning("[Agent] LLM 摘要生成失败，fallback 到简单截取")
 
-        # 重建对话：将摘要合并到初始 system prompt 内
+        # ── 步骤6：重建对话（system + 摘要 + 近期消息）──────────────────────────────────
         summary_text = (
             f"\n\n[对话历史摘要]\n"
             f"{self.state.conversation_summary}\n"
@@ -1880,6 +2187,7 @@ class HotProjectAgent:
             "role": "system",
             "content": system_content + summary_text,
         }] + recent_msgs
+
         logger.info(
             f"[Agent] 对话历史已压缩: {len(old_msgs)} 条旧消息 → LLM摘要, "
             f"保留 {len(recent_msgs)} 条近期消息"
@@ -1894,6 +2202,12 @@ class HotProjectAgent:
 
         Returns:
             摘要文本，失败时返回 None
+
+        摘要要求：
+          - 保留用户核心意图和关键参数
+          - 保留已完成的关键操作
+          - 保留重要结果结论
+          - 去除进度提示、重复内容、无关细节
         """
         SUMMARY_PROMPT = """你是对话历史压缩器。请将以下对话历史浓缩为简洁摘要。
 
@@ -1915,18 +2229,22 @@ class HotProjectAgent:
 
 请输出摘要（不要输出任何额外内容）："""
 
-        # 构建对话历史文本（简化格式，减少 token）
+        # ── 步骤1：构建对话历史文本 ─────────────────────────────────────────────────────
+        #    简化格式，减少 token 消耗
         history_parts = []
+
+        # 子分支：保留之前的摘要（如果有）
         if self.state.conversation_summary:
             history_parts.append(f"[之前的摘要]\n{self.state.conversation_summary}")
 
+        # 子分支：遍历旧消息，按角色提取关键内容
         for msg in old_msgs:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "user":
                 history_parts.append(f"[用户] {content}")
             elif role == "assistant":
-                # assistant 消息可能很长，截取关键部分
+                # assistant 消息可能很长，截取关键部分（最多500字符）
                 history_parts.append(f"[助手] {content[:500] if content else '(tool调用)'}")
             elif role == "tool":
                 # tool 结果保留关键信息提示，不保留完整数据
@@ -1934,15 +2252,17 @@ class HotProjectAgent:
 
         history_text = "\n".join(history_parts)
 
-        # 调用 LLM（低成本配置）
+        # ── 步骤2：调用 LLM（低成本配置）───────────────────────────────────────────────
+        #    低温度、短输出、不需要 thinking
         response = self._request_llm(
             messages=[{"role": "user", "content": SUMMARY_PROMPT.format(conversation_history=history_text)}],
-            temperature=0.1,  # 低温度，稳定输出
+            temperature=0.1,
             max_tokens=600,
             log_prefix="[摘要生成]",
-            enable_thinking=False,  # 不需要思考过程
+            enable_thinking=False,
         )
 
+        # ── 步骤3：提取摘要文本 ───────────────────────────────────────────────────────────
         if response:
             choice = response.get("choices", [{}])[0]
             content = choice.get("message", {}).get("content", "")

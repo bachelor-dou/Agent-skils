@@ -106,7 +106,7 @@ class TestArgValidation:
         assert "mode" in invalid_fields
         mock_rank.assert_not_called()
 
-    def test_search_returns_retryable_error_for_invalid_project_min_star(self):
+    def test_search_returns_retryable_error_for_invalid_min_star(self):
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -115,12 +115,12 @@ class TestArgValidation:
             "github_hot_projects.agent.tool_search_by_keywords",
             return_value={"repos": [], "total": 0, "_raw_repos": []},
         ) as mock_search:
-            result = agent._execute_tool("search_by_keywords", {"project_min_star": -5})
+            result = agent._execute_tool("search_by_keywords", {"min_star": -5})
 
         assert result["error_code"] == "invalid_arguments"
         assert result["retryable"] is True
         invalid_fields = {item["param"] for item in result["invalid_arguments"]}
-        assert "project_min_star" in invalid_fields
+        assert "min_star" in invalid_fields
         mock_search.assert_not_called()
 
     def test_fetch_trending_validates_trending_range(self):
@@ -887,10 +887,10 @@ class TestValidateToolArgs:
 
     def test_defaults_missing_params(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
-        from github_hot_projects.common.config import MIN_STAR_FILTER
+        from github_hot_projects.common.config import MIN_STAR
 
         result = validate_tool_args("search_by_keywords", {})
-        assert result["project_min_star"] == MIN_STAR_FILTER
+        assert result["min_star"] == MIN_STAR
         assert "days_since_created" not in result
 
     def test_coerces_out_of_range_int(self):

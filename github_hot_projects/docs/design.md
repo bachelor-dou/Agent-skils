@@ -341,14 +341,14 @@ graph TD
 
 | 常量 | 默认值 | 说明 |
 |------|--------|------|
-| `MIN_STAR_FILTER` | 1000 | 关键词搜索最低 star |
+| `MIN_STAR` | 1200 | 项目最低 star 门槛（关键词搜索 + 范围扫描共用） |
+| `MAX_STAR` | 45000 | 范围扫描上限 |
 | `STAR_GROWTH_THRESHOLD` | 800 | 增长门槛 |
 | `HOT_PROJECT_COUNT` | 100 | 综合榜默认 Top N |
 | `HOT_NEW_PROJECT_COUNT` | 20 | 新项目榜默认 Top N |
 | `GROWTH_CALC_DAYS` | 7 | 增长统计窗口（天），用户可通过 growth_calc_days 自定义 |
 | `DAYS_SINCE_CREATED` | 45 | 新项目判定窗口 |
 | `DATA_EXPIRE_DAYS` | GROWTH_CALC_DAYS + 1 | DB 有效期（动态计算） |
-| `STAR_RANGE_MIN` / `MAX` | 1300 / 45000 | Star 扫描范围 |
 | `MAX_BINARY_SEARCH_DEPTH` | 20 | 二分法最大深度 |
 | `SEARCH_REQUEST_INTERVAL` | 2.5s | Search API 请求间隔 |
 | `SEARCH_KEYWORDS` | 25 类 × 150+ 词 | 搜索关键词字典 |
@@ -358,7 +358,8 @@ graph TD
 | 参数 | 影响 Tool | 默认 | 说明 |
 |------|----------|------|------|
 | `categories` | search | 全部 25 类 | 搜索类别 |
-| `project_min_star` | search | 1000 | 关键词搜索项目最低 star |
+| `min_star` | search, scan | 1200 | 项目最低 star 门槛 |
+| `max_star` | scan | 45000 | 范围扫描上限 |
 | `top_n` | rank | 100（综合）/ 20（新项目） | 返回前 N |
 | `growth_calc_days` | check_repo_growth, batch_check_growth | 7 | 增长统计窗口 |
 | `growth_threshold` | batch_check | 800 | 增长阈值 |
@@ -390,8 +391,8 @@ graph TD
 | T5 | API Server _tool_execution_lock 防多会话并发 Tool |
 | T6 | _sessions_lock 保护会话字典读写 |
 | `categories` | search | 全部 25 类 | 搜索类别 |
-| `project_min_star` | search | 1000 | 关键词搜索项目最低 star 过滤线 |
-| `min_star` / `max_star` | scan | 1300 / 45000 | Star 范围扫描上下界 |
+| `min_star` | search / scan | 1200 | 项目最低 star 门槛 |
+| `max_star` | scan | 45000 | 范围扫描上限 |
 | `top_n` | rank | 综合榜 100 / 新项目榜 20 | 返回前 N 个项目 |
 | `growth_calc_days` | check_repo_growth / batch_check / report | 7 | 增长统计窗口 |
 | `growth_threshold` | batch_check | 800 | 候选筛选阈值 |

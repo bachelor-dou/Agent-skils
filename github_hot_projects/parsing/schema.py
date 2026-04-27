@@ -7,9 +7,8 @@
 """
 
 from ..common.config import (
-    MIN_STAR_FILTER,
-    STAR_RANGE_MIN,
-    STAR_RANGE_MAX,
+    MIN_STAR,
+    MAX_STAR,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
     HOT_PROJECT_COUNT,
@@ -23,12 +22,12 @@ from ..common.config import (
 TOOL_PARAM_SCHEMA: dict[str, dict] = {
     "search_by_keywords": {
         "categories": {"type": "list_str", "default": None},
-        "project_min_star": {"type": "int", "min": 1, "default": MIN_STAR_FILTER},
+        "min_star": {"type": "int", "min": 1, "default": MIN_STAR},
         "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "scan_star_range": {
-        "min_star": {"type": "int", "min": 1, "default": STAR_RANGE_MIN},
-        "max_star": {"type": "int", "min": 1, "default": STAR_RANGE_MAX},
+        "min_star": {"type": "int", "min": 1, "default": MIN_STAR},
+        "max_star": {"type": "int", "min": 1, "default": MAX_STAR},
         "days_since_created": {"type": "int", "min": 1, "default": None},
     },
     "check_repo_growth": {
@@ -107,10 +106,10 @@ TOOL_SCHEMAS = [
                             "不传则搜索全部类别。"
                         ),
                     },
-                    "project_min_star": {
+                    "min_star": {
                         "type": "integer",
-                        "description": f"关键词搜索项目最低 star 过滤线，默认{MIN_STAR_FILTER}",
-                        "default": MIN_STAR_FILTER,
+                        "description": f"项目最低 star 门槛，默认{MIN_STAR}",
+                        "default": MIN_STAR,
                     },
                     "days_since_created": {
                         "type": "integer",
@@ -139,13 +138,13 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "min_star": {
                         "type": "integer",
-                        "description": f"扫描区间最低星数，默认{STAR_RANGE_MIN}",
-                        "default": STAR_RANGE_MIN,
+                        "description": f"项目最低 star 门槛（扫描区间下界），默认{MIN_STAR}",
+                        "default": MIN_STAR,
                     },
                     "max_star": {
                         "type": "integer",
-                        "description": f"最高星数，默认{STAR_RANGE_MAX}",
-                        "default": STAR_RANGE_MAX,
+                        "description": f"扫描区间上限，默认{MAX_STAR}",
+                        "default": MAX_STAR,
                     },
                     "days_since_created": {
                         "type": "integer",

@@ -24,7 +24,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .common.config import (
-    MIN_STAR_FILTER,
+    MIN_STAR,
     DAYS_SINCE_CREATED,
     REPORT_DIR,
     STAR_GROWTH_THRESHOLD,
@@ -263,7 +263,7 @@ def step3_generate_report(
     days_since_created: int | None = None,
     growth_calc_days: int = GROWTH_CALC_DAYS,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
-    min_star: int = MIN_STAR_FILTER,
+    min_star: int = MIN_STAR,
 ) -> str:
     """为 Top N 项目生成 LLM 描述并输出 Markdown 报告。"""
     os.makedirs(REPORT_DIR, exist_ok=True)

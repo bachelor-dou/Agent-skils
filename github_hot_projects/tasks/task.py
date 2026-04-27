@@ -23,8 +23,7 @@ from datetime import datetime, timezone
 
 from ..common.config import (
     CHECKPOINT_FILE_PATH,
-    MIN_STAR_FILTER,
-    SEARCH_MAX_PAGES,
+    MIN_STAR,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
@@ -140,13 +139,16 @@ def _project_refresh_age_days(project: dict) -> int | None:
 class KeywordSearchTask(Task):
     """关键词搜索任务：搜索单个关键词的多页结果。"""
 
+    # 类常量：每个关键词搜索的最大页数
+    MAX_PAGES: int = 3
+
     needs_token: bool = True
     keyword: str = ""
     category: str = ""
     keyword_idx: int = 0
     total_keywords: int = 0
     created_after: str = ""
-    project_min_star_override: int = 0
+    min_star: int = 0  # 最低 star 过滤阈值，0 则使用默认 MIN_STAR
     _raw_repos: dict = field(default=None, repr=False)
 
     def execute(self, token_idx: int | None) -> list[dict]:
@@ -156,14 +158,15 @@ class KeywordSearchTask(Task):
             f"'{self.keyword}' (类别: {self.category}{worker_suffix})"
         )
         collected: list[dict] = []
-        project_min_star = self.project_min_star_override if self.project_min_star_override else MIN_STAR_FILTER
+        star_threshold = self.min_star if self.min_star else MIN_STAR
         query = self.keyword
         if self.created_after:
             query = f"{query} created:>={self.created_after}"
 
-        for page in range(1, SEARCH_MAX_PAGES + 1):
+        for page in range(1, self.MAX_PAGES + 1):
             items = search_github_repos(
-                self._token_mgr, query, token_idx, page=page, worker_idx=token_idx
+                self._token_mgr, query, token_idx, page=page,
+                min_star=star_threshold, worker_idx=token_idx
             )
             if items is None:
                 continue
@@ -173,12 +176,9 @@ class KeywordSearchTask(Task):
                 full_name = repo_item.get("full_name", "")
                 if not full_name:
                     continue
-                current_star = repo_item.get("stargazers_count", 0)
-                if current_star < project_min_star:
-                    continue
                 collected.append({
                     "full_name": full_name,
-                    "star": current_star,
+                    "star": repo_item.get("stargazers_count", 0),
                     "repo_item": repo_item,
                     "created_at": repo_item.get("created_at", ""),
                 })
@@ -212,7 +212,7 @@ class ScanSegmentTask(Task):
     high: int = 0
     total_segments: int = 0
     created_after: str = ""
-    min_star_filter_override: int = 0
+    min_star: int = 0  # 最低 star 过滤阈值，0 则使用默认 MIN_STAR
     page_numbers: list[int] | None = None
     retry_round: int = 0
     _raw_repos: dict = field(default=None, repr=False)
@@ -231,14 +231,14 @@ class ScanSegmentTask(Task):
             f"{query}{worker_suffix}{retry_suffix}{page_suffix}"
         )
         collected: list[dict] = []
-        min_star_filter = self.min_star_filter_override if self.min_star_filter_override else MIN_STAR_FILTER
+        star_threshold = self.min_star if self.min_star else MIN_STAR
         pages = self.page_numbers if self.page_numbers is not None else list(range(1, 11))
         stop_on_empty = self.page_numbers is None
 
         for page in pages:
             items = search_github_repos(
                 self._token_mgr, query, token_idx,
-                page=page, sort="updated", auto_star_filter=False, worker_idx=token_idx,
+                page=page, sort="updated", min_star=0, worker_idx=token_idx,
             )
             if items is None:
                 self.failed_pages.append(page)
@@ -258,7 +258,7 @@ class ScanSegmentTask(Task):
                 if not full_name:
                     continue
                 current_star = repo_item.get("stargazers_count", 0)
-                if current_star < min_star_filter:
+                if current_star < star_threshold:
                     continue
                 collected.append({
                     "full_name": full_name,
