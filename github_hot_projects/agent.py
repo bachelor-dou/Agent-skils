@@ -203,17 +203,6 @@ INTENT_LABELS = {
     "unknown": "未确定请求",
 }
 
-# 意图别名映射：将简写/常见写法映射到标准意图名
-INTENT_ALIASES = {
-    "comprehensive": "comprehensive_ranking",
-    "hot_new": "hot_new_ranking",
-    "keyword": "keyword_ranking",
-    "trending": "trending_only",
-    "describe_project": "repo_description",
-    "check_repo_growth": "repo_growth",
-    "freeform": "freeform_answer",
-}
-
 # 仅对复杂榜单意图做工具约束；其他意图默认开放
 CONSTRAINED_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "comprehensive_ranking": {
@@ -1281,7 +1270,7 @@ class HotProjectAgent:
 
         字段归一化：
           - turn_kind: 映射到 TURN_KINDS 白名单
-          - intent_family: 映射到 INTENT_LABELS + INTENT_ALIASES
+          - intent_family: 映射到 INTENT_LABELS 白名单
           - specified_params: 过滤非法参数名，只保留 ALL_TOOL_PARAM_NAMES
           - suggested_tools: 过滤非法工具名，只保留 TOOL_SCHEMA_NAME_SET
 
@@ -1308,10 +1297,9 @@ class HotProjectAgent:
         # turn_kind: 映射到白名单，非法值归为 "unknown"
         turn_kind = normalize_turn_kind(payload.get("turn_kind"), turn_kinds=TURN_KINDS)
 
-        # intent_family: 别名映射 + 白名单校验，非法值归为 "unknown"
+        # intent_family: 白名单校验，非法值归为 "unknown"
         intent_family = normalize_intent_family(
             payload.get("intent_family"),
-            intent_aliases=INTENT_ALIASES,
             intent_labels=INTENT_LABELS,
         )
 
@@ -1814,9 +1802,10 @@ class HotProjectAgent:
         """
         state = self.state
 
-        # ── 步骤1：严格校验 LLM 参数 ─────────────────────────────────────────────────────
+        # ── 步骤1：严格校验 LLM 参数 + 填充默认值 ────────────────────────────────────────
         #    出错直接返回，要求 LLM 修正参数后重试
-        _, strict_errors = validate_tool_args_strict(name, args)
+        #    通过校验后返回的 strict_args 已包含默认值填充
+        strict_args, strict_errors = validate_tool_args_strict(name, args)
         if strict_errors:
             logger.warning("[Agent] Tool %s 参数严格校验失败: %s", name, strict_errors)
             return {
@@ -1827,24 +1816,25 @@ class HotProjectAgent:
                 "retryable": True,
             }
 
-        # ── 步骤2：合并默认参数 + 宽松校验 ──────────────────────────────────────────────
-        prepared_args = self._merge_request_defaults_into_tool_args(name, args)
-        validated = validate_tool_args(name, prepared_args)
-        log_validated_params(name, args, prepared_args, validated)
+        # ── 步骤2：合并路由解析的默认参数 ───────────────────────────────────────────────
+        #    将 resolved_params（榜单参数）注入到 strict_args
+        #    使用 setdefault，LLM 显式选择的参数优先级更高
+        prepared_args = self._merge_request_defaults_into_tool_args(name, strict_args)
+        log_validated_params(name, args, strict_args, prepared_args)
 
         # ── 步骤3：重置榜单构建缓存（新一轮开始时）─────────────────────────────────────
-        self._maybe_reset_discovery_state(name, validated)
+        self._maybe_reset_discovery_state(name, prepared_args)
 
         # ── 步骤4：Tool 路由分发 ─────────────────────────────────────────────────────────
 
         # 分支4a：关键词搜索 → 更新 last_search_repos、seen_repos
         if name == "search_by_keywords":
-            min_star = validated.get("min_star", MIN_STAR)
+            min_star = prepared_args.get("min_star", MIN_STAR)
             result = tool_search_by_keywords(
                 state.token_mgr,
-                categories=validated.get("categories"),
+                categories=prepared_args.get("categories"),
                 min_star=min_star,
-                days_since_created=validated.get("days_since_created"),
+                days_since_created=prepared_args.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
             state.last_search_repos = raw_repos
@@ -1856,10 +1846,10 @@ class HotProjectAgent:
         elif name == "scan_star_range":
             result = tool_scan_star_range(
                 state.token_mgr,
-                min_star=validated.get("min_star", MIN_STAR),
-                max_star=validated.get("max_star", MAX_STAR),
+                min_star=prepared_args.get("min_star", MIN_STAR),
+                max_star=prepared_args.get("max_star", MAX_STAR),
                 seen_repos=state.seen_repos,
-                days_since_created=validated.get("days_since_created"),
+                days_since_created=prepared_args.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
             state.last_search_repos.extend(raw_repos)
@@ -1867,14 +1857,14 @@ class HotProjectAgent:
 
         # 分支4c：单仓库增长核查 → 直接返回结果
         elif name == "check_repo_growth":
-            repo = validated.get("repo")
+            repo = prepared_args.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
             return tool_check_repo_growth(
                 state.token_mgr,
                 repo=repo,
                 db=state.db,
-                growth_calc_days=validated.get("growth_calc_days", GROWTH_CALC_DAYS),
+                growth_calc_days=prepared_args.get("growth_calc_days", GROWTH_CALC_DAYS),
             )
 
         # 分支4d：批量增长计算 → 更新 last_candidates、持久化 desc
@@ -1893,9 +1883,9 @@ class HotProjectAgent:
                 return {"error": "没有搜索结果，请先调用 search_by_keywords"}
 
             # 子分支：提取参数并执行
-            growth_calc_days = validated.get("growth_calc_days", GROWTH_CALC_DAYS)
-            days_since_created = validated.get("days_since_created")
-            growth_threshold = validated.get("growth_threshold", STAR_GROWTH_THRESHOLD)
+            growth_calc_days = prepared_args.get("growth_calc_days", GROWTH_CALC_DAYS)
+            days_since_created = prepared_args.get("days_since_created")
+            growth_threshold = prepared_args.get("growth_threshold", STAR_GROWTH_THRESHOLD)
             resolved_request = self.state.last_confirmed_request
 
             # 子分支：window_specified 判断（用户是否显式指定窗口）
@@ -1940,9 +1930,9 @@ class HotProjectAgent:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
 
             # 子分支：提取参数并执行
-            mode = validated.get("mode", "comprehensive")
-            top_n = validated.get("top_n", HOT_PROJECT_COUNT if mode == "comprehensive" else HOT_NEW_PROJECT_COUNT)
-            days_since_created = validated.get("days_since_created")
+            mode = prepared_args.get("mode", "comprehensive")
+            top_n = prepared_args.get("top_n", HOT_PROJECT_COUNT if mode == "comprehensive" else HOT_NEW_PROJECT_COUNT)
+            days_since_created = prepared_args.get("days_since_created")
             result = tool_rank_candidates(
                 state.last_candidates,
                 top_n=top_n,
@@ -1957,7 +1947,7 @@ class HotProjectAgent:
 
         # 分支4f：项目详情查询 → 直接返回
         elif name == "describe_project":
-            repo = validated.get("repo")
+            repo = prepared_args.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
             return tool_describe_project(repo=repo, db=state.db, token_mgr=state.token_mgr)
@@ -1989,12 +1979,12 @@ class HotProjectAgent:
 
         # 分支4h：数据库信息查询 → 直接返回
         elif name == "get_db_info":
-            return tool_get_db_info(db=state.db, repo=validated.get("repo"))
+            return tool_get_db_info(db=state.db, repo=prepared_args.get("repo"))
 
         # 分支4i：Trending 获取 → 补充到 last_search_repos
         elif name == "fetch_trending":
             result = tool_fetch_trending(
-                trending_range=validated.get("trending_range", "weekly"),
+                trending_range=prepared_args.get("trending_range", "weekly"),
             )
             raw_repos = result.pop("_raw_repos", [])
             for r in raw_repos:

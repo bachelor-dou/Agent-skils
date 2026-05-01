@@ -107,20 +107,17 @@ def sanitize_confirmation_fallback(content: str, default_message: str) -> str:
 def normalize_intent_family(
     raw_intent: object,
     *,
-    intent_aliases: dict[str, str],
     intent_labels: dict[str, str],
 ) -> str:
     """
-    规范化意图名称：别名映射 + 白名单校验。
+    规范化意图名称：白名单校验。
 
     将用户/LLM 输出的意图名称转换为系统标准名称：
       1. 空值或非字符串 → "unknown"
-      2. 小写化后查找别名映射
-      3. 不在白名单内 → "unknown"
+      2. 不在白名单内 → "unknown"
 
     Args:
         raw_intent: 原始意图名称（可能为任意类型）
-        intent_aliases: 别名映射表，如 {"comprehensive": "comprehensive_ranking"}
         intent_labels: 有效意图白名单
 
     Returns:
@@ -129,7 +126,6 @@ def normalize_intent_family(
     if not isinstance(raw_intent, str) or not raw_intent.strip():
         return "unknown"
     normalized = raw_intent.strip().lower()
-    normalized = intent_aliases.get(normalized, normalized)
     return normalized if normalized in intent_labels else "unknown"
 
 

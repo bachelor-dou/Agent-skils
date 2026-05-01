@@ -77,12 +77,9 @@ PAGE_NO_CACHE_HEADERS = {
 
 
 def setup_app_logging() -> str:
-    """配置 API 业务日志：使用 RotatingFileHandler 防止单日志过大，不污染 uvicorn 访问日志输出。"""
+    """配置 API 业务日志：使用 TimedRotatingFileHandler 按日期切换日志文件。"""
     os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(
-        LOG_DIR,
-        f"agent-{datetime.now().strftime('%Y-%m-%d')}.log",
-    )
+    log_path = os.path.join(LOG_DIR, "agent.log")
 
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
@@ -91,9 +88,11 @@ def setup_app_logging() -> str:
         except Exception:
             pass
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    # 每天午夜自动切换，保留 7 天备份，备份文件名格式: agent.log.2026-04-28
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_path, when="midnight", interval=1, backupCount=7, encoding="utf-8",
     )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
