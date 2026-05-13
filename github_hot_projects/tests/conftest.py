@@ -7,7 +7,7 @@
 import os
 import pytest
 
-# 在导入项目模块之前设置环境变量，避免 TokenManager sys.exit
+# 在导入项目模块之前设置环境变量，避免 GitHubTokenPool sys.exit
 os.environ.setdefault("GITHUB_TOKENS", "ghp_test_token_001,ghp_test_token_002")
 os.environ.setdefault("LLM_API_KEY", "test-llm-key")
 os.environ.setdefault("LLM_API_URL", "https://test-llm-api.example.com/v1/chat/completions")
@@ -15,7 +15,7 @@ os.environ.setdefault("LLM_API_URL", "https://test-llm-api.example.com/v1/chat/c
 
 @pytest.fixture
 def mock_token_mgr():
-    """创建一个不会 sys.exit 的 TokenManager mock。"""
+    """创建一个不会 sys.exit 的 token pool mock。"""
     from unittest.mock import MagicMock
     mgr = MagicMock()
     mgr.tokens = ["ghp_test_token_001", "ghp_test_token_002"]

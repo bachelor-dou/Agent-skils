@@ -1,12 +1,13 @@
 """
 测试 common 子包模块
 ====================
-覆盖：exceptions / token_manager / db / github_api / llm
+覆盖：exceptions / async_token_pool / db / github_api / llm
 """
 
 import json
 import os
 import tempfile
+import asyncio
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
@@ -52,42 +53,42 @@ class TestExceptions:
 
 
 # ──────────────────────────────────────────────────────────────
-# 2. TokenManager
+# 2. GitHubTokenPool
 # ──────────────────────────────────────────────────────────────
 
-class TestTokenManager:
-    @patch("github_hot_projects.common.token_manager.GITHUB_TOKENS", ["ghp_aaa", "ghp_bbb"])
+class TestGitHubTokenPool:
+    @patch("github_hot_projects.common.async_token_pool.GITHUB_TOKENS", ["ghp_aaa", "ghp_bbb"])
     def test_init_with_tokens(self):
-        from github_hot_projects.common.token_manager import TokenManager
-        mgr = TokenManager()
+        from github_hot_projects.common.async_token_pool import GitHubTokenPool
+        mgr = GitHubTokenPool()
         assert len(mgr.tokens) == 2
         assert mgr.tokens[0] == "ghp_aaa"
 
-    @patch("github_hot_projects.common.token_manager.GITHUB_TOKENS", [])
+    @patch("github_hot_projects.common.async_token_pool.GITHUB_TOKENS", [])
     def test_init_no_tokens_exits(self):
-        from github_hot_projects.common.token_manager import TokenManager
+        from github_hot_projects.common.async_token_pool import GitHubTokenPool
         with pytest.raises(SystemExit):
-            TokenManager()
+            GitHubTokenPool()
 
-    @patch("github_hot_projects.common.token_manager.GITHUB_TOKENS", ["ghp_test"])
+    @patch("github_hot_projects.common.async_token_pool.GITHUB_TOKENS", ["ghp_test"])
     def test_rest_headers(self):
-        from github_hot_projects.common.token_manager import TokenManager
-        mgr = TokenManager()
+        from github_hot_projects.common.async_token_pool import GitHubTokenPool
+        mgr = GitHubTokenPool()
         headers = mgr.get_rest_headers(0)
         assert headers["Authorization"] == "token ghp_test"
         assert "github.v3+json" in headers["Accept"]
 
-    @patch("github_hot_projects.common.token_manager.GITHUB_TOKENS", ["ghp_test"])
+    @patch("github_hot_projects.common.async_token_pool.GITHUB_TOKENS", ["ghp_test"])
     def test_star_headers(self):
-        from github_hot_projects.common.token_manager import TokenManager
-        mgr = TokenManager()
+        from github_hot_projects.common.async_token_pool import GitHubTokenPool
+        mgr = GitHubTokenPool()
         headers = mgr.get_star_headers(0)
         assert "star+json" in headers["Accept"]
 
-    @patch("github_hot_projects.common.token_manager.GITHUB_TOKENS", ["ghp_test"])
+    @patch("github_hot_projects.common.async_token_pool.GITHUB_TOKENS", ["ghp_test"])
     def test_graphql_headers(self):
-        from github_hot_projects.common.token_manager import TokenManager
-        mgr = TokenManager()
+        from github_hot_projects.common.async_token_pool import GitHubTokenPool
+        mgr = GitHubTokenPool()
         headers = mgr.get_graphql_headers(0)
         assert headers["Authorization"] == "bearer ghp_test"
 
@@ -353,6 +354,21 @@ class TestGitHubAPI:
             with pytest.raises(RateLimitError):
                 search_github_repos(mock_token_mgr, "test", token_idx=0)
 
+    def test_check_response_rate_limit_without_reset_uses_default_cooldown(self):
+        from github_hot_projects.common.exceptions import RateLimitError
+        from github_hot_projects.common.github_api import _check_response
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.headers = {}
+        mock_resp.text = "rate limit"
+
+        with patch("github_hot_projects.common.github_api.time.time", return_value=1000.0):
+            with pytest.raises(RateLimitError) as exc_info:
+                _check_response(mock_resp, token_idx=0)
+
+        assert exc_info.value.reset_time == 1060.0
+
     def test_search_github_repos_token_invalid(self, mock_token_mgr):
         from github_hot_projects.common.exceptions import TokenInvalidError
         mock_resp = MagicMock()
@@ -384,6 +400,103 @@ class TestGitHubAPI:
 
         assert result is None
         assert mock_get.call_count == 3
+
+    def test_async_search_github_repos_success(self, mock_token_mgr):
+        class DummyAsyncClient:
+            def __init__(self, response):
+                self._response = response
+
+            async def get(self, *_args, **_kwargs):
+                return self._response
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.json.return_value = {
+            "items": [{"full_name": "org/repo", "stargazers_count": 5000}],
+        }
+
+        from github_hot_projects.common.github_api import async_search_github_repos
+
+        result = asyncio.run(
+            async_search_github_repos(
+                mock_token_mgr,
+                "ai agent",
+                token_idx=0,
+                client=DummyAsyncClient(mock_resp),
+            )
+        )
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["full_name"] == "org/repo"
+
+    def test_async_search_github_repos_rate_limit(self, mock_token_mgr):
+        from github_hot_projects.common.exceptions import RateLimitError
+        from github_hot_projects.common.github_api import async_search_github_repos
+
+        class DummyAsyncClient:
+            def __init__(self, response):
+                self._response = response
+
+            async def get(self, *_args, **_kwargs):
+                return self._response
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.headers = {"X-RateLimit-Reset": "9999999999"}
+        mock_resp.text = "rate limited"
+
+        with pytest.raises(RateLimitError):
+            asyncio.run(
+                async_search_github_repos(
+                    mock_token_mgr,
+                    "test",
+                    token_idx=0,
+                    client=DummyAsyncClient(mock_resp),
+                )
+            )
+
+    def test_check_response_async_rate_limit_uses_retry_after_when_reset_invalid(self):
+        from github_hot_projects.common.exceptions import RateLimitError
+        from github_hot_projects.common.github_api import _check_response_async
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"X-RateLimit-Reset": "bad", "Retry-After": "15"}
+        mock_resp.text = "rate limited"
+
+        with patch("github_hot_projects.common.github_api.time.time", return_value=2000.0):
+            with pytest.raises(RateLimitError) as exc_info:
+                _check_response_async(mock_resp, token_idx=1)
+
+        assert exc_info.value.reset_time == 2015.0
+
+    def test_async_search_github_repos_token_invalid(self, mock_token_mgr):
+        from github_hot_projects.common.exceptions import TokenInvalidError
+        from github_hot_projects.common.github_api import async_search_github_repos
+
+        class DummyAsyncClient:
+            def __init__(self, response):
+                self._response = response
+
+            async def get(self, *_args, **_kwargs):
+                return self._response
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.headers = {}
+        mock_resp.text = "Bad credentials"
+
+        with pytest.raises(TokenInvalidError):
+            asyncio.run(
+                async_search_github_repos(
+                    mock_token_mgr,
+                    "test",
+                    token_idx=0,
+                    client=DummyAsyncClient(mock_resp),
+                )
+            )
 
     def test_auto_split_star_range_falls_back_to_another_token_when_preferred_is_rate_limited(self):
         from github_hot_projects.common.exceptions import RateLimitError

@@ -78,7 +78,7 @@ class TestDiscoveryPipeline:
 def test_scheduled_update_passes_growth_window_and_force_refresh():
     from github_hot_projects.scheduled_update import run_update
 
-    with patch("github_hot_projects.scheduled_update.TokenManager"), patch(
+    with patch("github_hot_projects.scheduled_update.GitHubTokenPool"), patch(
         "github_hot_projects.scheduled_update.load_db",
         return_value={"valid": True, "date": "2026-04-01", "projects": {}},
     ), patch("github_hot_projects.scheduled_update.DiscoveryPipeline") as mock_pipeline:

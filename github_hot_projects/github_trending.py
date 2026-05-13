@@ -21,6 +21,7 @@ GitHub Trending 爬虫（执行层 · 数据源组件）
 
 import logging
 import re
+import time
 
 import requests
 
@@ -33,6 +34,9 @@ _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+_TRENDING_FETCH_MAX_ATTEMPTS = 3
+_TRENDING_FETCH_BACKOFF_SECONDS = 2
+_TRENDING_MIN_RESULT_WARN_COUNT = 5
 
 
 def fetch_trending(since: str = DEFAULT_TRENDING_SINCE) -> list[dict]:
@@ -57,19 +61,37 @@ def fetch_trending(since: str = DEFAULT_TRENDING_SINCE) -> list[dict]:
     if normalized_since:
         params["since"] = normalized_since
 
-    try:
-        resp = requests.get(
-            url,
-            params=params,
-            headers={"User-Agent": _USER_AGENT},
-            timeout=120,
-        )
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.error(f"Trending 页面请求失败: {e}")
-        return []
+    for attempt in range(_TRENDING_FETCH_MAX_ATTEMPTS):
+        attempt_no = attempt + 1
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                headers={"User-Agent": _USER_AGENT},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return _parse_trending_html(resp.text, normalized_since)
+        except requests.RequestException as exc:
+            if attempt_no >= _TRENDING_FETCH_MAX_ATTEMPTS:
+                logger.error(
+                    "Trending 页面请求失败: since=%s, attempt=%s/%s, error=%s",
+                    normalized_since,
+                    attempt_no,
+                    _TRENDING_FETCH_MAX_ATTEMPTS,
+                    exc,
+                )
+                return []
+            logger.warning(
+                "Trending 页面请求异常: since=%s, attempt=%s/%s, error=%s",
+                normalized_since,
+                attempt_no,
+                _TRENDING_FETCH_MAX_ATTEMPTS,
+                exc,
+            )
+            time.sleep(_TRENDING_FETCH_BACKOFF_SECONDS * attempt_no)
 
-    return _parse_trending_html(resp.text, normalized_since)
+    return []
 
 
 def fetch_trending_all() -> list[dict]:
@@ -78,10 +100,19 @@ def fetch_trending_all() -> list[dict]:
 
     主要用于综合/新项目工作流中的候选补充阶段。
     """
+    period_results = {
+        since: fetch_trending(since=since)
+        for since in TRENDING_PERIODS
+    }
+    return merge_trending_period_results(period_results)
+
+
+def merge_trending_period_results(period_results: dict[str, list[dict]]) -> list[dict]:
+    """将多个 Trending 周期抓取结果按仓库去重汇总。"""
     merged: dict[str, dict] = {}
 
     for since in TRENDING_PERIODS:
-        repos = fetch_trending(since=since)
+        repos = period_results.get(since, [])
         for repo in repos:
             full_name = repo["full_name"]
             existing = merged.get(full_name)
@@ -139,6 +170,7 @@ def _parse_trending_html(html: str, since: str = "daily") -> list[dict]:
       </article>
     """
     repos: list[dict] = []
+    skipped_articles = 0
 
     # 按 <article> 分段
     articles = re.findall(
@@ -151,11 +183,13 @@ def _parse_trending_html(html: str, since: str = "daily") -> list[dict]:
         # 仓库名：<h2> 内 <a href="/owner/repo">
         name_match = re.search(r'<h2[^>]*>.*?<a\s[^>]*href="/([^"]+)"', article, re.DOTALL)
         if not name_match:
+            skipped_articles += 1
             continue
         full_name = name_match.group(1).strip().strip("/")
         # 确保是 owner/repo 格式（排除 /stargazers 等子路径）
         parts = full_name.split("/", 1)
         if len(parts) != 2:
+            skipped_articles += 1
             continue
 
         # 描述
@@ -203,6 +237,22 @@ def _parse_trending_html(html: str, since: str = "daily") -> list[dict]:
             "language": language,
             "since": since,
         })
+
+    total_articles = len(articles)
+    if total_articles > 0 and len(repos) < max(_TRENDING_MIN_RESULT_WARN_COUNT, total_articles // 4):
+        logger.warning(
+            "Trending 解析结果异常偏低: since=%s, parsed=%d, articles=%d, skipped=%d",
+            since,
+            len(repos),
+            total_articles,
+            skipped_articles,
+        )
+    elif len(repos) < _TRENDING_MIN_RESULT_WARN_COUNT:
+        logger.warning(
+            "Trending 解析结果较少: since=%s, parsed=%d",
+            since,
+            len(repos),
+        )
 
     logger.info(f"Trending 解析完成: {len(repos)} 个仓库 (since={since})")
     return repos

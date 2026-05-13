@@ -1,15 +1,16 @@
 """
 测试 tasks 子包
 ===============
-覆盖：Task 基类、KeywordSearchTask、CalcGrowthTask、WorkerPool。
+覆盖：Task 基类、KeywordSearchTask、CalcGrowthTask、任务辅助函数。
 """
 
 from datetime import datetime, timedelta, timezone
+import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
@@ -31,13 +32,28 @@ class TestTaskBase:
 
         @dataclass
         class DummyTask(Task):
-            needs_token: bool = False
+            needs_github_token: bool = False
             def execute(self, token_idx=None):
                 return "done"
 
         task = DummyTask()
         assert task.execute() == "done"
-        assert task.needs_token is False
+        assert task.needs_github_token is False
+
+    def test_concrete_task_execute_async_bridge(self):
+        """execute_async 默认桥接到同步 execute。"""
+        from github_hot_projects.tasks.task_base import Task
+
+        @dataclass
+        class DummyTask(Task):
+            needs_github_token: bool = False
+
+            def execute(self, token_idx=None):
+                return f"done:{token_idx}"
+
+        task = DummyTask()
+        result = asyncio.run(task.execute_async(token_idx=3))
+        assert result == "done:3"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -57,7 +73,10 @@ class TestKeywordSearchTask:
             }
         ]
 
-        with patch("github_hot_projects.tasks.task.search_github_repos", return_value=mock_items):
+        with patch(
+            "github_hot_projects.tasks.task.search_github_repos",
+            side_effect=[mock_items, [], []],
+        ):
             with patch("github_hot_projects.tasks.task.time.sleep"):
                 from github_hot_projects.tasks.task import KeywordSearchTask
                 raw_repos = {}
@@ -72,6 +91,87 @@ class TestKeywordSearchTask:
                 result = task.execute(token_idx=0)
                 assert len(result) == 1
                 assert result[0]["full_name"] == "org/repo"
+
+    def test_execute_async_uses_task_level_token(self, mock_token_mgr):
+        """关键词搜索异步路径默认使用任务级 token。"""
+        from github_hot_projects.tasks.task import KeywordSearchTask
+
+        async def scenario() -> None:
+            with patch(
+                "github_hot_projects.tasks.task.async_search_github_repos",
+                return_value=[],
+            ) as mock_search:
+                task = KeywordSearchTask(
+                    keyword="ai agent",
+                    category="AI-Agent",
+                    keyword_idx=1,
+                    total_keywords=1,
+                    min_star=1500,
+                    page_numbers=[1],
+                    _raw_repos={},
+                    _token_mgr=mock_token_mgr,
+                )
+
+                assert task.needs_github_token is True
+                await task.execute_async(token_idx=7)
+
+            mock_search.assert_awaited_once_with(
+                mock_token_mgr,
+                "ai agent",
+                7,
+                page=1,
+                min_star=1500,
+                client=None,
+            )
+
+        asyncio.run(scenario())
+
+    def test_execute_async_rate_limit_marks_remaining_pages_for_retry(self, mock_token_mgr):
+        """任务级 token 在中途限流时，只补偿当前页及后续页，不重跑已成功页。"""
+        from github_hot_projects.common.exceptions import RateLimitError
+        from github_hot_projects.tasks.task import KeywordSearchTask
+
+        calls = []
+        token_mgr = MagicMock()
+        token_mgr.mark_rate_limited = AsyncMock()
+
+        async def scenario() -> None:
+            async def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
+                calls.append(page)
+                if page == 1:
+                    return [{
+                        "full_name": "org/repo-1",
+                        "stargazers_count": 1800,
+                        "description": "repo1",
+                        "language": "Python",
+                        "created_at": "2026-04-01T00:00:00Z",
+                    }]
+                raise RateLimitError(token_idx=token_idx, reset_time=time.time() + 60)
+
+            with patch(
+                "github_hot_projects.tasks.task.async_search_github_repos",
+                side_effect=fake_search,
+            ), patch("github_hot_projects.tasks.task.asyncio.sleep"):
+                task = KeywordSearchTask(
+                    keyword="ai agent",
+                    category="AI-Agent",
+                    keyword_idx=1,
+                    total_keywords=1,
+                    _raw_repos={},
+                    _token_mgr=token_mgr,
+                )
+
+                result = await task.execute_async(token_idx=3)
+
+            assert [repo["full_name"] for repo in result] == ["org/repo-1"]
+            assert task.failed_pages == [2, 3]
+
+        asyncio.run(scenario())
+        assert calls == [1, 2]
+        assert token_mgr.mark_rate_limited.await_count == 1
+        mark_args = token_mgr.mark_rate_limited.await_args.args
+        assert mark_args[0] == 3
+        assert isinstance(mark_args[1], float)
 
     def test_on_result_populates_raw_repos(self, mock_token_mgr):
         """on_result 应将结果写入共享 raw_repos 字典。"""
@@ -88,6 +188,21 @@ class TestKeywordSearchTask:
         result = [{"full_name": "x/y", "star": 1000, "repo_item": {}, "created_at": ""}]
         task.on_result(result)
         assert "x/y" in raw_repos
+
+
+class TestTrendingPeriodTask:
+    def test_execute_fetches_single_period(self):
+        from github_hot_projects.tasks.task import TrendingPeriodTask
+
+        repos = [{"full_name": "org/repo", "star": 100, "forks": 10, "stars_today": 5}]
+
+        with patch("github_hot_projects.tasks.task.fetch_trending", return_value=repos) as mock_fetch:
+            task = TrendingPeriodTask(period="daily")
+            period, result = task.execute(token_idx=None)
+
+        assert period == "daily"
+        assert result == repos
+        mock_fetch.assert_called_once_with(since="daily")
 
 
 class TestScanSegmentTask:
@@ -125,6 +240,84 @@ class TestScanSegmentTask:
         assert len(result) == 1
         assert calls == [2]
 
+    def test_execute_async_uses_task_level_token(self, mock_token_mgr):
+        """区间扫描异步路径默认使用任务级 token。"""
+        from github_hot_projects.tasks.task import ScanSegmentTask
+
+        async def scenario() -> None:
+            with patch(
+                "github_hot_projects.tasks.task.async_search_github_repos",
+                return_value=[],
+            ) as mock_search:
+                task = ScanSegmentTask(
+                    seg_idx=1,
+                    low=100,
+                    high=200,
+                    total_segments=1,
+                    page_numbers=[1],
+                    _raw_repos={},
+                    _token_mgr=mock_token_mgr,
+                )
+
+                assert task.needs_github_token is True
+                await task.execute_async(token_idx=9)
+
+            mock_search.assert_awaited_once_with(
+                mock_token_mgr,
+                "stars:100..200",
+                9,
+                page=1,
+                sort="updated",
+                min_star=0,
+                client=None,
+            )
+
+        asyncio.run(scenario())
+
+    def test_execute_async_token_invalid_marks_remaining_pages_for_retry(self, mock_token_mgr):
+        """区间扫描中途 token 失效时，只补偿未完成页。"""
+        from github_hot_projects.common.exceptions import TokenInvalidError
+        from github_hot_projects.tasks.task import ScanSegmentTask
+
+        calls = []
+        token_mgr = MagicMock()
+        token_mgr.mark_invalid = AsyncMock()
+
+        async def scenario() -> None:
+            async def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
+                calls.append(page)
+                if page == 1:
+                    return [{
+                        "full_name": "org/repo-1",
+                        "stargazers_count": 2000,
+                        "description": "repo1",
+                        "language": "Python",
+                        "created_at": "2026-04-01T00:00:00Z",
+                    }]
+                raise TokenInvalidError(token_idx=token_idx)
+
+            with patch(
+                "github_hot_projects.tasks.task.async_search_github_repos",
+                side_effect=fake_search,
+            ), patch("github_hot_projects.tasks.task.asyncio.sleep"):
+                task = ScanSegmentTask(
+                    seg_idx=1,
+                    low=100,
+                    high=200,
+                    total_segments=1,
+                    _raw_repos={},
+                    _token_mgr=token_mgr,
+                )
+
+                result = await task.execute_async(token_idx=5)
+
+            assert [repo["full_name"] for repo in result] == ["org/repo-1"]
+            assert task.failed_pages == [2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+        asyncio.run(scenario())
+        assert calls == [1, 2]
+        token_mgr.mark_invalid.assert_awaited_once_with(5, "Token#5 invalid (401)")
+
 
 # ──────────────────────────────────────────────────────────────
 # 3. CalcGrowthTask
@@ -144,6 +337,29 @@ class TestCalcGrowthTask:
             )
             result = task.execute(token_idx=0)
             assert result == ("org/repo", 1500, 10000)
+
+    def test_execute_async_calls_async_estimator(self, mock_token_mgr):
+        """CalcGrowthTask 的异步路径应调用异步增长估算。"""
+        from github_hot_projects.tasks.task import CalcGrowthTask
+
+        async def scenario() -> None:
+            with patch(
+                "github_hot_projects.tasks.task.estimate_star_growth_binary_async",
+                return_value=1200,
+            ) as mock_estimator:
+                task = CalcGrowthTask(
+                    full_name="org/repo",
+                    current_star=10000,
+                    repo_item={"full_name": "org/repo", "stargazers_count": 10000},
+                    _ctx=None,
+                    _token_mgr=mock_token_mgr,
+                )
+                result = await task.execute_async(token_idx=1)
+
+            assert result == ("org/repo", 1200, 10000)
+            mock_estimator.assert_awaited_once()
+
+        asyncio.run(scenario())
 
     def test_execute_invalid_format(self, mock_token_mgr):
         """非 owner/repo 格式应返回 -1。"""
@@ -197,14 +413,16 @@ class TestCalcGrowthTask:
             "growth_threshold": 800,
             "use_realtime_growth": False,
             "can_write_db": False,
+            "growth_calc_days": 7,
+            "window_specified": True,
             "unresolved_count": [0],
             "checkpoint_dirty": [False],
             "completed_since_save": [0],
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
-            "github_hot_projects.tasks.task._save_checkpoint"
+        with patch("github_hot_projects.tasks.task_help._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task_help._save_checkpoint"
         ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
@@ -262,8 +480,8 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
-            "github_hot_projects.tasks.task._save_checkpoint"
+        with patch("github_hot_projects.tasks.task_help._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task_help._save_checkpoint"
         ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
@@ -321,8 +539,8 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
-            "github_hot_projects.tasks.task._save_checkpoint"
+        with patch("github_hot_projects.tasks.task_help._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task_help._save_checkpoint"
         ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
@@ -382,8 +600,8 @@ class TestCalcGrowthTask:
         }
         pool = DummyPool()
 
-        with patch("github_hot_projects.tasks.task._load_checkpoint", return_value={}), patch(
-            "github_hot_projects.tasks.task._save_checkpoint"
+        with patch("github_hot_projects.tasks.task_help._load_checkpoint", return_value={}), patch(
+            "github_hot_projects.tasks.task_help._save_checkpoint"
         ):
             checkpoint = _submit_growth_tasks(pool, mock_token_mgr, raw_repos, db, {}, growth_ctx)
 
@@ -391,146 +609,3 @@ class TestCalcGrowthTask:
         assert len(pool.submitted) == 1
         assert isinstance(pool.submitted[0], CalcGrowthTask)
 
-
-# ──────────────────────────────────────────────────────────────
-# 4. WorkerPool
-# ──────────────────────────────────────────────────────────────
-
-class TestWorkerPool:
-    def test_basic_task_execution(self):
-        """基本任务执行：提交 → 完成 → drain_results。"""
-        from github_hot_projects.tasks.task_base import Task
-        from github_hot_projects.tasks.worker_pool import TokenWorkerPool
-
-        @dataclass
-        class SimpleTask(Task):
-            needs_token: bool = False
-            result_value: Any = None
-            def execute(self, token_idx=None):
-                return 42
-            def on_result(self, result):
-                self.result_value = result
-
-        pool = TokenWorkerPool(["token1"])
-        pool.start()
-        try:
-            task = SimpleTask()
-            pool.submit(task)
-            pool.wait_all_done(timeout=5.0)
-            pool.drain_results()
-            assert task.result_value == 42
-        finally:
-            pool.shutdown()
-
-    def test_multiple_tasks(self):
-        """多任务并行执行。"""
-        from github_hot_projects.tasks.task_base import Task
-        from github_hot_projects.tasks.worker_pool import TokenWorkerPool
-
-        results = []
-
-        @dataclass
-        class CountTask(Task):
-            needs_token: bool = False
-            n: int = 0
-            def execute(self, token_idx=None):
-                return self.n * 2
-            def on_result(self, result):
-                results.append(result)
-
-        pool = TokenWorkerPool(["token1", "token2"])
-        pool.start()
-        try:
-            for i in range(10):
-                pool.submit(CountTask(n=i))
-            pool.wait_all_done(timeout=10.0)
-            pool.drain_results()
-            assert len(results) == 10
-            assert sorted(results) == [i * 2 for i in range(10)]
-        finally:
-            pool.shutdown()
-
-    def test_task_with_exception(self):
-        """任务抛出普通异常 → 调用 on_error，不崩溃 pool。"""
-        from github_hot_projects.tasks.task_base import Task
-        from github_hot_projects.tasks.worker_pool import TokenWorkerPool
-
-        error_received = []
-
-        @dataclass
-        class FailTask(Task):
-            needs_token: bool = False
-            def execute(self, token_idx=None):
-                raise ValueError("intentional error")
-            def on_error(self, error):
-                error_received.append(error)
-
-        @dataclass
-        class OKTask(Task):
-            needs_token: bool = False
-            done: bool = False
-            def execute(self, token_idx=None):
-                return "ok"
-            def on_result(self, result):
-                self.done = True
-
-        pool = TokenWorkerPool(["token1"])
-        pool.start()
-        try:
-            fail_task = FailTask()
-            ok_task = OKTask()
-            pool.submit(fail_task)
-            pool.submit(ok_task)
-            pool.wait_all_done(timeout=5.0)
-            pool.drain_results()
-            assert len(error_received) == 1
-            assert isinstance(error_received[0], ValueError)
-            assert ok_task.done is True
-        finally:
-            pool.shutdown()
-
-    def test_fatal_error_requeues_to_other_worker(self):
-        """FatalWorkerError 会让当前 worker 退出，并把任务回退给其他 worker。"""
-        from github_hot_projects.common.exceptions import FatalWorkerError
-        from github_hot_projects.tasks.task_base import Task
-        from github_hot_projects.tasks.worker_pool import TokenWorkerPool
-
-        execution_workers = []
-
-        @dataclass
-        class FatalOnceTask(Task):
-            needs_token: bool = True
-            attempts: int = 0
-            result_value: Any = None
-
-            def execute(self, token_idx=None):
-                execution_workers.append(token_idx)
-                self.attempts += 1
-                if self.attempts == 1:
-                    raise FatalWorkerError("token broken")
-                return token_idx
-
-            def on_result(self, result):
-                self.result_value = result
-
-        pool = TokenWorkerPool(["token1", "token2"])
-        pool.start()
-        try:
-            task = FatalOnceTask()
-            pool.submit(task)
-            assert pool.wait_all_done(timeout=5.0) is True
-            pool.drain_results()
-            assert task.attempts == 2
-            assert task.result_value is not None
-            assert execution_workers == [execution_workers[0], task.result_value]
-            assert execution_workers[0] != execution_workers[1]
-        finally:
-            pool.shutdown()
-
-    def test_shutdown_idempotent(self):
-        """多次 shutdown 不应报错。"""
-        from github_hot_projects.tasks.worker_pool import TokenWorkerPool
-        pool = TokenWorkerPool(["token1"])
-        pool.start()
-        pool.shutdown()
-        pool.shutdown()  # 第二次不应报错

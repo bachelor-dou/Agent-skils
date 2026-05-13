@@ -5,9 +5,19 @@
 """
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
+import time
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
+
+
+class TestAsyncWorkerCount:
+    def test_default_async_worker_count_matches_token_count(self):
+        """任务级 token 模式下，默认 worker 数应与 token 数一致。"""
+        from github_hot_projects.agent_tools import _default_async_worker_count
+
+        assert _default_async_worker_count(5) == 5
+        assert _default_async_worker_count(1) == 1
 
 
 class TestToolCheckRepoGrowth:
@@ -167,6 +177,71 @@ class TestToolBatchCheckGrowth:
         assert result["seeded_snapshot_count"] == 1
         assert result["db_updated"] is True
 
+    def test_growth_shared_client_stays_open_until_tasks_finish(self, mock_token_mgr):
+        from github_hot_projects.agent_tools import tool_batch_check_growth
+
+        repos = self._repo_input()
+        db = {"valid": True, "date": "2026-04-01", "projects": {}}
+        events = []
+
+        class DummyClient:
+            def __init__(self):
+                self.closed = False
+
+        client = DummyClient()
+
+        class DummyClientContext:
+            async def __aenter__(self):
+                events.append("enter")
+                return client
+
+            async def __aexit__(self, exc_type, exc, tb):
+                events.append("exit")
+                client.closed = True
+
+        class DummyGrowthTask:
+            def __init__(self):
+                self._async_http_client = None
+
+        class DummyDispatcher:
+            def __init__(self, *args, **kwargs):
+                self.tasks = []
+
+            async def start(self):
+                events.append("start")
+
+            async def submit(self, task):
+                self.tasks.append(task)
+                events.append("submit")
+
+            async def wait_all_done(self, timeout=None):
+                events.append("wait")
+                assert self.tasks
+                assert self.tasks[0]._async_http_client is client
+                assert client.closed is False
+                return True
+
+            async def drain_results(self):
+                events.append("drain")
+                return 0
+
+            async def shutdown(self):
+                events.append("shutdown")
+
+        def fake_submit(submit_collector, _token_mgr, _raw_repos, _db, _candidate_map, _growth_ctx):
+            submit_collector.submit(DummyGrowthTask())
+            return {}
+
+        with patch("github_hot_projects.agent_tools._submit_growth_tasks", side_effect=fake_submit):
+            with patch("github_hot_projects.agent_tools.AsyncTaskDispatcher", DummyDispatcher):
+                with patch(
+                    "github_hot_projects.agent_tools.build_github_async_client",
+                    return_value=DummyClientContext(),
+                ):
+                    tool_batch_check_growth(mock_token_mgr, repos, db)
+
+        assert events == ["start", "enter", "submit", "wait", "drain", "exit", "shutdown"]
+
 
 class TestToolRankCandidates:
     def test_rank_returns_dict(self, sample_candidates):
@@ -236,6 +311,102 @@ class TestToolFetchTrending:
             assert result["repos"][0]["full_name"] == "trending-org/trending-repo"
             assert "language" not in result
 
+    def test_trending_all_runs_period_tasks_and_merges_results(self):
+        """all 模式应按周期抓取后再去重汇总。"""
+        from github_hot_projects.agent_tools import tool_fetch_trending
+
+        def fake_fetch(since: str):
+            base = {
+                "full_name": "trending-org/trending-repo",
+                "star": 1000,
+                "forks": 100,
+                "description": f"desc-{since}",
+                "language": "Python",
+                "stars_today": {"daily": 10, "weekly": 20, "monthly": 30}[since],
+                "since": since,
+            }
+            return [base]
+
+        with patch("github_hot_projects.tasks.task.fetch_trending", side_effect=fake_fetch):
+            with patch(
+                "github_hot_projects.common.llm.batch_condense_descriptions",
+                side_effect=lambda repos, max_chars=70: [r.get("description", "") for r in repos],
+            ):
+                result = tool_fetch_trending(trending_range="all")
+
+        assert result["trending_range"] == "all"
+        assert result["periods"] == ["daily", "weekly", "monthly"]
+        assert len(result["repos"]) == 1
+        first = result["repos"][0]
+        assert first["periods"] == ["daily", "weekly", "monthly"]
+        assert first["stars_by_period"] == {"daily": 10, "weekly": 20, "monthly": 30}
+
+
+class TestToolSearchByKeywords:
+    def test_retry_preserves_success_pages_and_backfills_failed_pages(self, mock_token_mgr):
+        from github_hot_projects.agent_tools import tool_search_by_keywords
+        from github_hot_projects.common.exceptions import RateLimitError
+
+        calls = []
+        page2_attempts = [0]
+        token_mgr = MagicMock()
+        token_mgr.tokens = ["ghp_test_token_001", "ghp_test_token_002"]
+        token_mgr.mark_rate_limited = AsyncMock()
+
+        class DummyClientContext:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
+            calls.append((query, page, token_idx))
+            if page == 1:
+                return [{
+                    "full_name": "org/repo-1",
+                    "stargazers_count": 1500,
+                    "description": "repo1",
+                    "language": "Python",
+                    "created_at": "2026-04-01T00:00:00Z",
+                    "topics": ["ai"],
+                }]
+            if page == 2:
+                page2_attempts[0] += 1
+                if page2_attempts[0] == 1:
+                    raise RateLimitError(token_idx=token_idx, reset_time=time.time() + 60)
+                return [{
+                    "full_name": "org/repo-2",
+                    "stargazers_count": 1600,
+                    "description": "repo2",
+                    "language": "Go",
+                    "created_at": "2026-04-02T00:00:00Z",
+                    "topics": ["agent"],
+                }]
+            return []
+
+        with patch(
+            "github_hot_projects.agent_tools.SEARCH_KEYWORDS",
+            {"Test": ["test keyword"]},
+        ), patch(
+            "github_hot_projects.agent_tools.build_github_async_client",
+            return_value=DummyClientContext(),
+        ), patch(
+            "github_hot_projects.agent_tools._resolve_async_worker_count",
+            return_value=1,
+        ), patch(
+            "github_hot_projects.tasks.task.async_search_github_repos",
+            side_effect=fake_search,
+        ), patch("github_hot_projects.tasks.task.asyncio.sleep"):
+            result = tool_search_by_keywords(token_mgr)
+
+        assert result["total"] == 2
+        assert [repo["full_name"] for repo in result["repos"]] == ["org/repo-1", "org/repo-2"]
+        assert page2_attempts[0] == 2
+        assert [page for _, page, _ in calls].count(1) == 1
+        assert [page for _, page, _ in calls].count(2) == 2
+        token_mgr.mark_rate_limited.assert_awaited_once()
+
 
 class TestToolScanStarRange:
     def test_retries_failed_pages_only(self, mock_token_mgr):
@@ -244,7 +415,7 @@ class TestToolScanStarRange:
         calls = []
         page2_attempts = [0]
 
-        def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
+        async def fake_search(_token_mgr, query, token_idx, page=1, **kwargs):
             calls.append((query, page, token_idx, kwargs.get("worker_idx")))
             if page == 1:
                 return [{
@@ -268,8 +439,8 @@ class TestToolScanStarRange:
             return []
 
         with patch("github_hot_projects.agent_tools.auto_split_star_range", return_value=[(100, 200)]):
-            with patch("github_hot_projects.tasks.task.search_github_repos", side_effect=fake_search):
-                with patch("github_hot_projects.tasks.task.time.sleep"):
+            with patch("github_hot_projects.tasks.task.async_search_github_repos", side_effect=fake_search):
+                with patch("github_hot_projects.tasks.task.asyncio.sleep"):
                     result = tool_scan_star_range(mock_token_mgr, min_star=100, max_star=200)
 
         assert result["total"] == 2
@@ -378,8 +549,8 @@ class TestToolDescribeProject:
 
         assert "error" in result
 
-    def test_describe_without_token_mgr_keeps_legacy_path(self):
-        """未传 token_mgr 时兼容旧行为：直接调用 LLM。"""
+    def test_describe_without_token_mgr_uses_direct_llm_path(self):
+        """未传 token_mgr 时走直接 LLM 路径。"""
         from github_hot_projects.agent_tools import tool_describe_project
 
         db = {"projects": {"org/repo": {"star": 5000, "desc": ""}}}

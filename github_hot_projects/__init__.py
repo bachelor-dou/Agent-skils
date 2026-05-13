@@ -8,7 +8,7 @@ github-hot-projects — GitHub 热门项目发现工具
   common/                 — 基础设施子包
     config.py             — 全局配置（Token、阈值、路径、关键词）
     db.py                 — DB 读写（Github_DB.json）
-    token_manager.py      — GitHub Token 管理 + 请求头构建
+    async_token_pool.py   — GitHubTokenPool（统一 Token 生命周期 + 请求头构建）
     exceptions.py         — 自定义异常（限流、Token 失效等）
     github_api.py         — GitHub REST / GraphQL API 封装
     llm.py                — LLM 描述生成
@@ -23,7 +23,7 @@ github-hot-projects — GitHub 热门项目发现工具
   tasks/                  — 任务系统子包
     task_base.py          — Task 抽象基类
     task.py               — Task 子类（搜索/扫描/增长）+ 批量提交 + 断点续传
-    worker_pool.py        — TokenWorkerPool 线程池
+    async_worker_pool.py  — AsyncTaskDispatcher 异步调度器
 
   ranking.py              — 评分排序算法（comprehensive / hot_new）
   report.py               — Markdown 报告生成（LLM 描述 + 结构化卡片）

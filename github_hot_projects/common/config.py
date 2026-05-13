@@ -23,6 +23,46 @@ GITHUB_TOKENS: list[str] = (
     else []
 )
 
+
+def _parse_csv_env(name: str) -> list[str]:
+    """读取逗号分隔的环境变量，忽略空值。"""
+    value = os.environ.get(name, "")
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    """读取布尔环境变量。"""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ──────────────────────────────────────────────────────────────
+# API Server 安全配置
+# ──────────────────────────────────────────────────────────────
+# CORS 允许来源：生产环境请通过 CORS_ALLOWED_ORIGINS 配置明确域名
+# 例如：CORS_ALLOWED_ORIGINS="https://example.com,https://app.example.com"
+_DEFAULT_CORS_ALLOWED_ORIGINS = [
+    "http://localhost",
+    "http://localhost:3000",
+    "http://127.0.0.1",
+    "http://127.0.0.1:3000",
+]
+CORS_ALLOWED_ORIGINS: list[str] = _parse_csv_env("CORS_ALLOWED_ORIGINS") or _DEFAULT_CORS_ALLOWED_ORIGINS
+CORS_ALLOW_CREDENTIALS: bool = _parse_bool_env("CORS_ALLOW_CREDENTIALS", default=False)
+
+# IP 黑名单支持通过环境变量覆盖；未配置时使用内置默认值
+# 例如：SECURITY_IP_BLACKLIST="1.2.3.4,5.6.7.8"
+_DEFAULT_SECURITY_IP_BLACKLIST = [
+    "104.243.32.126",
+    "209.222.101.194",
+    "172.232.209.215",
+]
+SECURITY_IP_BLACKLIST: list[str] = _parse_csv_env("SECURITY_IP_BLACKLIST") or _DEFAULT_SECURITY_IP_BLACKLIST
+
 # ──────────────────────────────────────────────────────────────
 # LLM 双模型配置（兼容 OpenAI /v1/chat/completions 格式）
 #   主模型：高智能推理（Agent 核心）    辅助模型：低成本文本处理
@@ -74,8 +114,8 @@ DEFAULT_SCORE_MODE: str = "comprehensive"
 # 请求控制
 # ──────────────────────────────────────────────────────────────
 MAX_BINARY_SEARCH_DEPTH: int = 20      # 二分法查 stargazers 最大深度
-SEARCH_REQUEST_INTERVAL: float = 2.5   # Search API 请求最小间隔（秒）
-MAX_GRAPHQL_SAMPLING_BATCHES: int = 30  # GraphQL 采样外推最多翻页批次数（30×100≈3000 条）
+SEARCH_REQUEST_INTERVAL: float = 1.3  # Search API 请求最小间隔（秒）
+MAX_GRAPHQL_SAMPLING_BATCHES: int = 35  # GraphQL 采样外推最多翻页批次数（35×100≈3500 条）
 
 # ──────────────────────────────────────────────────────────────
 # 路径配置（基于包根目录 github_hot_projects/）
@@ -132,8 +172,12 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "model serving", "inference engine", "tensor parallel",
     ],
     "AI-Training-Finetune": [
-        "finetune llm", "lora", "rlhf", "post-training",
-        "pretraining framework", "dpo", "distillation", "alignment", "sft",
+        "finetune llm", "fine-tuning", "instruction tuning",
+        "supervised fine tuning", "lora", "qlora", "peft",
+        "rlhf", "post-training", "pretraining framework",
+        "continued pretraining", "dpo", "orpo", "reward model",
+        "distillation", "knowledge distillation", "model distillation",
+        "alignment", "sft",
     ],
     "AI-Infra": [
         "triton kernel", "cuda kernel", "ml compiler",

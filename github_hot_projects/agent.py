@@ -1,24 +1,19 @@
-"""
-ReAct Agent 核心
-================
-实现 Thought → Action → Observation 循环的自主推理 Agent。
+"""GitHub 热门项目 ReAct Agent。
 
-Agent 接收自然语言指令，通过 LLM 自主规划步骤，
-调用 Tool 执行操作，观察结果后决定下一步行动，
-直到得出最终回复。
+该模块承担两段式工作流：
+1. 路由阶段：识别意图、抽取参数、判断是否需要澄清。
+2. 执行阶段：驱动 ReAct 循环，自主选择 Tool 并汇总结果。
 
-架构分层：
-  - parsing/   — 输入解析层：意图识别、参数提取、Tool 参数规范化
-  - agent.py   — Agent 层：ReAct 循环、Tool 路由、状态管理
-    - scheduled_update.py — 批处理入口：内置 DiscoveryPipeline 编排
-
-核心类：
-  - HotProjectAgent: ReAct Agent 主体
-  - AgentState:      Agent 运行状态（会话历史、候选缓存、DB 等）
+核心对象：
+- PendingRequest: 路由阶段的待确认请求
+- ResolvedRequest: 合并默认参数后的可执行请求
+- AgentState: 会话级状态与缓存
+- HotProjectAgent: 对外提供 chat 接口的主体
 """
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 
 import requests
@@ -48,9 +43,15 @@ from .agent_tools import (
     trending_repo_to_search_repo,
 )
 from .common.db import load_db, save_db_desc_only, get_db_age_days
-from .common.token_manager import TokenManager
+from .common.async_token_pool import GitHubTokenPool
+from .agent_state import (
+    PendingRequest,
+    ResolvedRequest,
+    AgentState,
+    MAX_CONVERSATION_MESSAGES,
+    KEEP_RECENT_MESSAGES,
+)
 from .parsing.arg_validator import (
-    validate_tool_args,
     validate_tool_args_strict,
     log_validated_params,
 )
@@ -70,6 +71,9 @@ logger = logging.getLogger("discover_hot")
 
 # Agent 单轮最大 Tool 调用次数（防止无限循环）
 MAX_TOOL_CALLS_PER_TURN = 15
+
+# LLM 调用失败后的退避间隔（秒）
+LLM_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 
 # ──────────────────────────────────────────────────────────────
 # 工具名称索引：从 TOOL_SCHEMAS 提取，用于快速查找/校验工具名
@@ -203,7 +207,7 @@ INTENT_LABELS = {
     "unknown": "未确定请求",
 }
 
-# 仅对复杂榜单意图做工具约束；其他意图默认开放
+# 仅对榜单型意图做工具约束；其他意图默认开放
 CONSTRAINED_TOOLS_BY_INTENT: dict[str, set[str]] = {
     "comprehensive_ranking": {
         "search_by_keywords", "scan_star_range", "fetch_trending",
@@ -283,22 +287,22 @@ class PendingRequest:
 
     生命周期：
       1. 路由 LLM 解析用户消息 → 输出 PendingRequest
-      2. 若有歧义（ambiguous_fields 非空）→ 等待用户澄清
+      2. 若存在歧义、未解析约束或低置信度 → 等待用户澄清
       3. 用户确认后 → 转换为 ResolvedRequest（参数冻结）
 
     核心字段：
-      - turn_kind: 轮次类型（new_request/follow_up/fact_check/...）
+      - turn_kind: 轮次类型（new_request/request_modification/fact_check/...）
       - intent_family: 意图类型（comprehensive_ranking/keyword_ranking/...）
       - user_specified_params: 用户明确指定的参数
       - ambiguous_fields: 有歧义需要澄清的字段
-      - should_execute_now: 是否可以直接执行（无歧义时为 True）
+      - should_execute_now: 是否可以直接执行（无歧义且无未解析约束时为 True）
 
     注意：
       - 参数未合并默认值，只存储用户原始指定
       - 状态可变，等待用户澄清或确认
     """
-    turn_kind: str = "unknown"  # 轮次类型：new_query/follow_up/fact_check/clarification
-    intent_family: str = "unknown"  # 意图：comprehensive_ranking/keyword_ranking/repo_analysis 等
+    turn_kind: str = "unknown"  # 轮次类型：new_request/request_modification/fact_check 等
+    intent_family: str = "unknown"  # 意图：comprehensive_ranking/keyword_ranking/repo_info 等
     intent_label_zh: str = "未确定请求"  # 意图的中文显示名称，用于生成确认文本
     target_repo: str = ""  # 目标仓库，如 "facebook/react"
     user_specified_params: dict[str, object] = field(default_factory=dict)  # 用户明确指定的参数（growth_calc_days/language 等）
@@ -308,7 +312,7 @@ class PendingRequest:
     route_confidence: str = "medium"  # 路由置信度：high/medium/low
     confirmation_text_zh: str = ""  # 向用户展示的确认/澄清文本
     report_requested: bool = False  # 用户是否请求生成报告
-    should_execute_now: bool = False  # 是否可以立即执行（无歧义时为 True）
+    should_execute_now: bool = False  # 是否可以立即执行（无歧义且无未解析约束时为 True）
     must_call_tool_before_reply: bool = False  # 是否必须在回复前调用工具获取数据
     source_turn_id: int = 0  # 来源轮次 ID，用于追踪请求来源
 
@@ -414,10 +418,9 @@ SYSTEM_PROMPT = f"""你是GitHub热门项目发现助手。根据用户需求自
 规则：
 1. 涉及事实数据（star、增长、创建时间、Trending）时，不要编造，优先调用工具核查。
 2. 路由提示是“优先建议”，不是硬限制；如果证据不足或工具报错，可调整工具选择。
-3. 单仓库默认优先综合查询（describe_project + check_repo_growth）；用户明确“只看增长/只看介绍”时再单工具。
-4. growth_calc_days=增长统计窗口；days_since_created=创建时间窗口，两者可同时存在且互不覆盖。
-5. 工具返回参数错误时，先修正后重试一次；仍失败再向用户澄清。
-6. 用户做解释/比较/质疑追问时，可直接回答；必要时再做最小化取证。
+3. growth_calc_days=增长统计窗口；days_since_created=创建时间窗口，两者可同时存在且互不覆盖。
+4. 工具返回参数错误时，先修正后重试一次；仍失败再向用户澄清。
+5. 用户做解释/比较/质疑追问时，可直接回答；必要时再做最小化取证。
 
 """
 
@@ -433,7 +436,7 @@ class AgentState:
       - 路由状态：确认门控、已解析请求、活跃仓库等
     """
     # ─── 基础设施 ───
-    token_mgr: TokenManager = field(default_factory=TokenManager)
+    token_mgr: GitHubTokenPool = field(default_factory=GitHubTokenPool)
     db: dict = field(default_factory=dict)
     conversation: list[dict] = field(default_factory=list)
 
@@ -497,6 +500,16 @@ class HotProjectAgent:
             "content": SYSTEM_PROMPT,
         })
         logger.info("HotProjectAgent 初始化完成。")
+
+    @staticmethod
+    def _pending_needs_clarification(pending: PendingRequest) -> bool:
+        """统一判断待确认请求是否仍需用户补充信息。"""
+        return bool(
+            pending.ambiguous_fields
+            or pending.unresolved_constraints
+            or not pending.should_execute_now
+            or pending.route_confidence == "low"
+        )
 
     def chat(self, user_message: str) -> str:
         """
@@ -565,14 +578,14 @@ class HotProjectAgent:
                 content = message.get("content", "") or ""
 
                 # 子分支：违反执行契约 → 强制重试一次
-                if self._violates_execution_contract(content):
+                if self._violates_execution_contract():
                     if not contract_retry_used:
                         contract_retry_used = True
                         contract_hint = (
                             "[执行契约] 当前请求属于事实核查，必须先调用至少一个 Tool 获取事实，"
                             "再给出回复。不要直接输出等待文案或结论。"
                         )
-                        logger.warning("[Agent] 周中执行契约重试：本轮尚无 Tool 调用，触发强制二次规划。")
+                        logger.warning("[Agent] 执行契约重试：本轮尚无 Tool 调用，触发强制二次规划。")
                         continue
                     safe_reply = self._build_contract_fallback_reply()
                     self.state.conversation.append({"role": "assistant", "content": safe_reply})
@@ -727,11 +740,11 @@ class HotProjectAgent:
 
         裁剪规则：
           1. 无路由结果 → 开放全工具
-                    2. 仅对复杂榜单意图做工具约束
+                    2. 仅对榜单型意图做工具约束
                     3. 其他意图默认开放全工具
 
         目的：
-                    - 在复杂流程场景提供必要护栏
+                    - 在榜单构建场景提供必要护栏
                     - 在普通查询场景保留 ReAct 自主工具选择
         """
         resolved = self.state.last_confirmed_request
@@ -751,7 +764,7 @@ class HotProjectAgent:
         filtered = [TOOL_SCHEMA_BY_NAME[name] for name in ALL_TOOL_NAMES if name in allowed]
         return filtered or TOOL_SCHEMAS
 
-    def _violates_execution_contract(self, content: str) -> bool:
+    def _violates_execution_contract(self) -> bool:
         """
         执行契约检查：当前轮次是否违反"必须先调 Tool"的约束。
 
@@ -915,8 +928,10 @@ class HotProjectAgent:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        # ── 步骤3：重试循环（最多 3 次）──────────────────────────────────────────────────
-        for attempt in range(3):
+        # ── 步骤3：重试循环（指数退避）──────────────────────────────────────────────────
+        max_attempts = len(LLM_RETRY_BACKOFF_SECONDS)
+        for attempt in range(max_attempts):
+            should_retry = False
             try:
                 logger.info("%s 开始 LLM 调用: model=%s, attempt=%d", log_prefix, LLM_MODEL, attempt + 1)
                 resp = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=300)
@@ -930,49 +945,64 @@ class HotProjectAgent:
                             "[Agent] LLM 响应 JSON 解析失败: %s, body=%s",
                             e, resp.text[:500],
                         )
-                        continue
+                        should_retry = True
+                        data = None
 
-                    # 子分支：诊断日志（token 用量）
-                    choice = (data.get("choices") or [{}])[0]
-                    finish = choice.get("finish_reason", "unknown")
-                    usage = data.get("usage", {})
-                    detail = usage.get("completion_tokens_details", {})
-                    logger.info(
-                        "%s LLM 响应: finish=%s, prompt_tokens=%s, "
-                        "completion_tokens=%s, reasoning_tokens=%s",
-                        log_prefix,
-                        finish,
-                        usage.get("prompt_tokens"),
-                        usage.get("completion_tokens"),
-                        detail.get("reasoning_tokens"),
-                    )
-
-                    # 子分支：空响应检查（content + tool_calls 都为空）
-                    msg = choice.get("message", {})
-                    content = msg.get("content") or ""
-                    has_tools = bool(msg.get("tool_calls"))
-                    if not content and not has_tools:
-                        logger.warning(
-                            "%s LLM 返回空 content 且无 tool_calls "
-                            "(finish=%s, reasoning_tokens=%s), attempt=%d",
+                    if data is not None:
+                        # 子分支：诊断日志（token 用量）
+                        choice = (data.get("choices") or [{}])[0]
+                        finish = choice.get("finish_reason", "unknown")
+                        usage = data.get("usage", {})
+                        detail = usage.get("completion_tokens_details", {})
+                        logger.info(
+                            "%s LLM 响应: finish=%s, prompt_tokens=%s, "
+                            "completion_tokens=%s, reasoning_tokens=%s",
                             log_prefix,
                             finish,
+                            usage.get("prompt_tokens"),
+                            usage.get("completion_tokens"),
                             detail.get("reasoning_tokens"),
-                            attempt + 1,
                         )
-                        continue  # 重试，可能是 reasoning 耗尽 token
 
-                    return data
+                        # 子分支：空响应检查（content + tool_calls 都为空）
+                        msg = choice.get("message", {})
+                        content = msg.get("content") or ""
+                        has_tools = bool(msg.get("tool_calls"))
+                        if not content and not has_tools:
+                            logger.warning(
+                                "%s LLM 返回空 content 且无 tool_calls "
+                                "(finish=%s, reasoning_tokens=%s), attempt=%d",
+                                log_prefix,
+                                finish,
+                                detail.get("reasoning_tokens"),
+                                attempt + 1,
+                            )
+                            should_retry = True
+                        else:
+                            return data
 
                 # ── 分支3b：HTTP 非 200 → 记录警告并重试 ───────────────────────────────────
-                logger.warning(
-                    "LLM 调用失败: status=%s, body=%s, attempt=%d",
-                    resp.status_code, resp.text[:300], attempt + 1,
-                )
+                else:
+                    logger.warning(
+                        "LLM 调用失败: status=%s, body=%s, attempt=%d",
+                        resp.status_code, resp.text[:300], attempt + 1,
+                    )
+                    should_retry = True
 
             # ── 分支3c：请求异常 → 记录错误并重试 ─────────────────────────────────────────
             except requests.RequestException as e:
                 logger.error(f"LLM 请求异常: {e}, attempt={attempt + 1}")
+                should_retry = True
+
+            if should_retry and attempt < max_attempts - 1:
+                backoff = LLM_RETRY_BACKOFF_SECONDS[attempt]
+                logger.info(
+                    "%s LLM 调用退避重试: sleep=%.1fs, next_attempt=%d",
+                    log_prefix,
+                    backoff,
+                    attempt + 2,
+                )
+                time.sleep(backoff)
 
         # ── 步骤4：重试耗尽 → 返回 None ───────────────────────────────────────────────────
         return None
@@ -1007,15 +1037,15 @@ class HotProjectAgent:
         │                                                                            │
         │ 2. awaiting_confirmation=True 且用户回复确认词（"是"/"开始"等）              │
         │    ├─ pending_request 不存在 → 返回提示（状态异常）                          │
-        │    ├─ ambiguous_fields 非空 → 继续返回澄清文本（用户没解决歧义）              │
-        │    └─ 无歧义 → 转为 ResolvedRequest，放行执行                               │
+        │    ├─ 仍需澄清 → 继续返回澄清文本（用户没补齐关键信息）                      │
+        │    └─ 无待澄清项 → 转为 ResolvedRequest，放行执行                           │
         │                                                                            │
         │ 3. awaiting_confirmation=False 且用户回复确认词 → 返回提示（无待确认请求）   │
         │                                                                            │
         │ 4. 其他情况（新消息或澄清内容）                                              │
         │    ├─ 调用路由 LLM 解析 → PendingRequest                                   │
-        │    ├─ ambiguous_fields 非空 → awaiting=True，返回澄清文本                  │
-        │    └─ 无歧义 → 转为 ResolvedRequest，放行执行                               │
+        │    ├─ 仍需澄清 → awaiting=True，返回澄清文本                               │
+        │    └─ 可直接执行 → 转为 ResolvedRequest，放行执行                           │
         └────────────────────────────────────────────────────────────────────────────┘
         """
         text = (user_message or "").strip()
@@ -1036,10 +1066,10 @@ class HotProjectAgent:
                 self.state.awaiting_confirmation = False
                 return "请直接描述要查询的 GitHub 热门项目需求。", False
 
-            # 子分支2b：ambiguous_fields 非空 → 用户只回复了确认词，但没解决歧义
+            # 子分支2b：仍需澄清 → 用户只回复了确认词，但没补齐必要信息
             #           继续返回澄清文本，引导用户补充具体信息
             #           例如：系统问"榜单类型是综合榜还是新项目榜？"，用户只回复"开始"
-            if pending.ambiguous_fields:
+            if self._pending_needs_clarification(pending):
                 return self._render_clarification_message(pending), False
 
             # 子分支2c：无歧义 → 用户确认执行
@@ -1064,8 +1094,8 @@ class HotProjectAgent:
         self.state.pending_request = pending
         self.state.last_confirmed_request = None
 
-        # 子分支4a：有歧义、路由判定不可立即执行、或置信度低 → 拦截，等待用户澄清
-        if pending.ambiguous_fields or not pending.should_execute_now or pending.route_confidence == "low":
+        # 子分支4a：仍需澄清 → 拦截，等待用户补充信息
+        if self._pending_needs_clarification(pending):
             self.state.awaiting_confirmation = True
             return self._render_clarification_message(pending), False
 
@@ -1179,9 +1209,9 @@ class HotProjectAgent:
             messages=payload_messages,
             tools=None,
             temperature=0.1,
-            max_tokens=1024,
             log_prefix="[Agent-Route]",
-            enable_thinking=False,
+            max_tokens=1024,
+            enable_thinking=True,
         )
         fallback = self._default_confirmation_message()
         if response is None:
@@ -1655,30 +1685,34 @@ class HotProjectAgent:
     #
     # ────────────────────────────────────────────────────────────────────────────────────
 
-    def _merge_request_defaults_into_tool_args(self, name: str, args: dict) -> dict:
+    def _merge_request_defaults_into_tool_args(self, name: str, args: dict, explicit_keys: set[str] | None = None) -> dict:
         """
         将路由解析的参数注入到工具参数
 
         合入规则：
-          1. resolved_params → setdefault（不覆盖 LLM 已选）
+          1. resolved_params → 覆盖系统补入默认值，但不覆盖 LLM 显式传参
           2. 单仓库工具（check_repo_growth/describe_project/get_db_info）→ 注入 repo
           3. 榜单任务 fetch_trending → 强制 trending_range="all"
           4. rank_candidates → 根据 intent_family 设置 mode
 
         注意：
-          - 使用 setdefault，LLM 显式选择的参数优先级更高
+          - 严格校验会先补默认值，这里需要允许 confirmed request 覆盖这些默认值
+          - LLM 显式选择的参数优先级仍然最高
           - 硬编码工具名判断，扩展时需同步修改（架构改进点）
         """
         merged = dict(args)
+        explicit_keys = explicit_keys or set()
         resolved_request = self.state.last_confirmed_request
         if resolved_request is None:
             return merged
 
         for key, value in resolved_request.resolved_params.items():
-            merged.setdefault(key, value)
+            if key not in explicit_keys:
+                merged[key] = value
 
         if resolved_request.target_repo and name in {"check_repo_growth", "describe_project", "get_db_info"}:
-            merged.setdefault("repo", resolved_request.target_repo)
+            if "repo" not in explicit_keys:
+                merged["repo"] = resolved_request.target_repo
 
         # 榜单型任务：fetch_trending 使用 trending_range="all"
         if resolved_request.requires_full_collection() and name == "fetch_trending":
@@ -1686,7 +1720,8 @@ class HotProjectAgent:
 
         if name == "rank_candidates":
             mode = "hot_new" if resolved_request.intent_family == "hot_new_ranking" else "comprehensive"
-            merged.setdefault("mode", mode)
+            if "mode" not in explicit_keys:
+                merged["mode"] = mode
 
         return merged
 
@@ -1819,17 +1854,19 @@ class HotProjectAgent:
         # ── 步骤2：合并路由解析的默认参数 ───────────────────────────────────────────────
         #    将 resolved_params（榜单参数）注入到 strict_args
         #    使用 setdefault，LLM 显式选择的参数优先级更高
-        prepared_args = self._merge_request_defaults_into_tool_args(name, strict_args)
+        prepared_args = self._merge_request_defaults_into_tool_args(name, strict_args, explicit_keys=set(args))
         log_validated_params(name, args, strict_args, prepared_args)
 
-        # ── 步骤3：重置榜单构建缓存（新一轮开始时）─────────────────────────────────────
+        # ── 步骤3：判断是否需要重置缓存（新一轮开始时）─────────────────────────────────────
         self._maybe_reset_discovery_state(name, prepared_args)
 
         # ── 步骤4：Tool 路由分发 ─────────────────────────────────────────────────────────
 
-        # 分支4a：关键词搜索 → 更新 last_search_repos、seen_repos
-        if name == "search_by_keywords":
+        def _handle_search_by_keywords() -> dict:
+            # 读取关键参数（min_star 需要回写到状态，供后续报告复用）
             min_star = prepared_args.get("min_star", MIN_STAR)
+
+            # 调用关键词搜索工具；_raw_repos 仅用于内部状态，不回传给 LLM
             result = tool_search_by_keywords(
                 state.token_mgr,
                 categories=prepared_args.get("categories"),
@@ -1837,13 +1874,15 @@ class HotProjectAgent:
                 days_since_created=prepared_args.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
+
+            # 更新本轮缓存与去重集合
             state.last_search_repos = raw_repos
             state.seen_repos.update(r["full_name"] for r in raw_repos)
             state.last_min_star = min_star
             return result
 
-        # 分支4b：star 范围扫描 → 追加到 last_search_repos
-        elif name == "scan_star_range":
+        def _handle_scan_star_range() -> dict:
+            # 在星标区间内补充候选，按 seen_repos 去重
             result = tool_scan_star_range(
                 state.token_mgr,
                 min_star=prepared_args.get("min_star", MIN_STAR),
@@ -1852,14 +1891,17 @@ class HotProjectAgent:
                 days_since_created=prepared_args.get("days_since_created"),
             )
             raw_repos = result.pop("_raw_repos", [])
+
+            # 与关键词搜索结果合并，形成完整候选池
             state.last_search_repos.extend(raw_repos)
             return result
 
-        # 分支4c：单仓库增长核查 → 直接返回结果
-        elif name == "check_repo_growth":
+        def _handle_check_repo_growth() -> dict:
+            # 单仓库增长检测必须提供 repo
             repo = prepared_args.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
+
             return tool_check_repo_growth(
                 state.token_mgr,
                 repo=repo,
@@ -1867,9 +1909,8 @@ class HotProjectAgent:
                 growth_calc_days=prepared_args.get("growth_calc_days", GROWTH_CALC_DAYS),
             )
 
-        # 分支4d：批量增长计算 → 更新 last_candidates、持久化 desc
-        elif name == "batch_check_growth":
-            # 子分支：检查建议的候选收集工具（仅提示，不强制阻断）
+        def _handle_batch_check_growth() -> dict:
+            # 仅提示建议收集路径，不强制阻断执行
             suggested_tools = self._check_suggested_collection_tools(name)
             if suggested_tools:
                 suggested_text = "、".join(suggested_tools)
@@ -1878,23 +1919,25 @@ class HotProjectAgent:
                     suggested_text,
                 )
 
-            # 子分支：检查前置条件（需要 search 结果）
+            # 必须先有搜索候选，才能批量计算增长
             if not state.last_search_repos:
                 return {"error": "没有搜索结果，请先调用 search_by_keywords"}
 
-            # 子分支：提取参数并执行
+            # 读取批量增长计算参数
             growth_calc_days = prepared_args.get("growth_calc_days", GROWTH_CALC_DAYS)
             days_since_created = prepared_args.get("days_since_created")
             growth_threshold = prepared_args.get("growth_threshold", STAR_GROWTH_THRESHOLD)
             resolved_request = self.state.last_confirmed_request
 
-            # 子分支：window_specified 判断（用户是否显式指定窗口）
+            # 区分“显式指定窗口”与“默认窗口”，用于输出解释与兼容旧行为
             window_specified = "growth_calc_days" in args or (
                 resolved_request is not None and (
                     "growth_calc_days" in resolved_request.user_specified_params
                     or "growth_calc_days" in resolved_request.resolved_params
                 )
             )
+
+            # 执行批量增长检查并更新候选缓存
             result = tool_batch_check_growth(
                 state.token_mgr,
                 repos=state.last_search_repos,
@@ -1908,15 +1951,16 @@ class HotProjectAgent:
             state.last_candidate_days_since_created = days_since_created
             state.last_growth_calc_days = result.get("growth_calc_days", growth_calc_days)
             state.last_growth_threshold = growth_threshold
+
+            # 榜单请求仅持久化 desc 字段，避免不必要的全量写盘
             persistence_policy = self._persistence_policy_for_request()
             if result.get("db_updated", False) and persistence_policy == "desc_only":
                 changed = save_db_desc_only(state.db)
                 logger.info("[Agent] batch_check_growth 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
             return result
 
-        # 分支4e：候选排序 → 更新 last_ranked、last_mode
-        elif name == "rank_candidates":
-            # 子分支：检查建议的候选收集工具（仅提示）
+        def _handle_rank_candidates() -> dict:
+            # 与 batch_check_growth 一致：仅给出收集建议，不强制阻断
             suggested_tools = self._check_suggested_collection_tools(name)
             if suggested_tools:
                 suggested_text = "、".join(suggested_tools)
@@ -1925,11 +1969,11 @@ class HotProjectAgent:
                     suggested_text,
                 )
 
-            # 子分支：检查前置条件（需要 candidates）
+            # 排序前置条件：候选池必须存在
             if not state.last_candidates:
                 return {"error": "没有候选列表，请先调用 batch_check_growth"}
 
-            # 子分支：提取参数并执行
+            # 读取排序参数并执行排序
             mode = prepared_args.get("mode", "comprehensive")
             top_n = prepared_args.get("top_n", HOT_PROJECT_COUNT if mode == "comprehensive" else HOT_NEW_PROJECT_COUNT)
             days_since_created = prepared_args.get("days_since_created")
@@ -1941,24 +1985,26 @@ class HotProjectAgent:
                 days_since_created=days_since_created,
                 prefiltered_days_since_created=state.last_candidate_days_since_created,
             )
+
+            # 缓存有序元组，供 generate_report 直接复用
             state.last_ranked = result.pop("_ordered_tuples", [])
             state.last_mode = mode
             return result
 
-        # 分支4f：项目详情查询 → 直接返回
-        elif name == "describe_project":
+        def _handle_describe_project() -> dict:
+            # 项目解读必须明确目标仓库
             repo = prepared_args.get("repo")
             if not repo:
                 return {"error": "缺少必需参数 repo（格式: owner/repo）"}
+
             return tool_describe_project(repo=repo, db=state.db, token_mgr=state.token_mgr)
 
-        # 分支4g：报告生成 → 持久化 desc 字段
-        elif name == "generate_report":
-            # 子分支：检查前置条件（需要 ranked）
+        def _handle_generate_report() -> dict:
+            # 报告生成依赖已排序结果
             if not state.last_ranked:
                 return {"error": "没有排序结果，请先调用 rank_candidates"}
 
-            # 子分支：执行报告生成
+            # hot_new 模式下沿用候选阶段的创建时间窗口
             report_new_project_days = state.last_candidate_days_since_created if state.last_mode == "hot_new" else None
             result = tool_generate_report(
                 state.last_ranked,
@@ -1970,23 +2016,25 @@ class HotProjectAgent:
                 min_star=state.last_min_star,
             )
 
-            # 子分支：持久化 desc 字段
+            # 榜单请求仅落盘 desc 字段，和批量增长阶段保持一致
             persistence_policy = self._persistence_policy_for_request(mode=state.last_mode)
             if persistence_policy == "desc_only":
                 changed = save_db_desc_only(state.db)
                 logger.info("[Agent] generate_report 阶段仅持久化 desc 字段 (%d 个项目)。", changed)
             return result
 
-        # 分支4h：数据库信息查询 → 直接返回
-        elif name == "get_db_info":
+        def _handle_get_db_info() -> dict:
+            # 支持 repo 过滤；未传 repo 时返回数据库总体信息
             return tool_get_db_info(db=state.db, repo=prepared_args.get("repo"))
 
-        # 分支4i：Trending 获取 → 补充到 last_search_repos
-        elif name == "fetch_trending":
+        def _handle_fetch_trending() -> dict:
+            # 拉取 Trending 后转换为统一搜索候选格式
             result = tool_fetch_trending(
                 trending_range=prepared_args.get("trending_range", "weekly"),
             )
             raw_repos = result.pop("_raw_repos", [])
+
+            # 将 Trending 结果补充进候选池，并用 seen_repos 去重
             for r in raw_repos:
                 fn = r["full_name"]
                 if fn not in state.seen_repos:
@@ -1994,9 +2042,24 @@ class HotProjectAgent:
                     state.last_search_repos.append(trending_repo_to_search_repo(r))
             return result
 
-        # 分支4j：未知 Tool → 返回错误
-        else:
+        # Tool 名称到处理函数的单一分发表
+        TOOL_HANDLERS = {
+            "search_by_keywords": _handle_search_by_keywords,
+            "scan_star_range": _handle_scan_star_range,
+            "check_repo_growth": _handle_check_repo_growth,
+            "batch_check_growth": _handle_batch_check_growth,
+            "rank_candidates": _handle_rank_candidates,
+            "describe_project": _handle_describe_project,
+            "generate_report": _handle_generate_report,
+            "get_db_info": _handle_get_db_info,
+            "fetch_trending": _handle_fetch_trending,
+        }
+
+        # 查表执行，保持未知工具错误语义不变
+        handler = TOOL_HANDLERS.get(name)
+        if handler is None:
             return {"error": f"未知 Tool: {name}"}
+        return handler()
 
     def _maybe_reset_discovery_state(self, tool_name: str, args: dict) -> None:
         """
@@ -2028,7 +2091,7 @@ class HotProjectAgent:
         if self.state.discovery_turn_id == current_turn:
             return
 
-        # ── 分支3：重置缓存状态 ─────────────────────────────────────────────────────────
+        # 重置缓存状态 ─────────────────────────────────────────────────────────
         self.state.last_search_repos = []
         self.state.last_candidates = {}
         self.state.last_candidate_days_since_created = None
@@ -2044,10 +2107,10 @@ class HotProjectAgent:
         """
         将 Tool 结果序列化为 JSON 字符串（供 LLM 阅读）。
 
-        截断策略：
-          1. 正常长度 → 直接返回 JSON
-          2. 超长 → 智能截断（保留摘要字段，截取列表前 N 项）
-          3. 仍超长 → 硬截断
+                截断策略：
+                    1. 正常长度 → 直接返回 JSON
+                    2. 超长 → 智能截断（保留摘要字段，截取列表前 N 项）
+                    3. 仍超长 → 返回合法 JSON 包装，避免无效片段
 
         目的：
           - 防止 Tool 结果过大导致 LLM context 溢出
@@ -2078,8 +2141,32 @@ class HotProjectAgent:
             if len(s) <= max_len:
                 return s
 
-        # ── 步骤3：兜底硬截断 ───────────────────────────────────────────────────────────
-        return s[:max_len] + "\n...(结果已截断)"
+        # ── 步骤3：兜底为合法 JSON 包装，避免硬截断破坏格式 ─────────────────────────────
+        fallback = {
+            "truncated": True,
+            "reason": "result_too_large",
+            "original_length": len(result_str),
+            "preview": "",
+        }
+        preview_len = min(len(result_str), max_len)
+        while preview_len >= 0:
+            fallback["preview"] = result_str[:preview_len]
+            wrapped = json.dumps(fallback, ensure_ascii=False, default=str)
+            if len(wrapped) <= max_len:
+                return wrapped
+            if preview_len == 0:
+                break
+            preview_len = max(0, preview_len - max(32, preview_len // 5))
+
+        minimal_wrapped = json.dumps(
+            {"truncated": True, "reason": "result_too_large"},
+            ensure_ascii=False,
+            default=str,
+        )
+        if len(minimal_wrapped) <= max_len:
+            return minimal_wrapped
+
+        return '{"truncated":true}'
 
     def _compress_conversation(self) -> None:
         """

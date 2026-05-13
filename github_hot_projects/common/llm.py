@@ -13,7 +13,7 @@ import time
 import requests
 
 from .config import (
-    LLM_API_KEY, LLM_API_URL, LLM_MODEL,
+    LLM_API_KEY,
     LLM_LITE_API_KEY, LLM_LITE_API_URL, LLM_LITE_MODEL,
 )
 
@@ -90,7 +90,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
     Returns:
         LLM 生成的描述文本；失败 3 次后返回空字符串。
     """
-    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY:
+    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY or not LLM_API_KEY:
         logger.warning("LLM 未配置，跳过描述生成。")
         return ""
 
@@ -190,7 +190,7 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[
     Returns:
         与 repos 等长的浓缩描述列表；LLM 失败时回退截断原文。
     """
-    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY:
+    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY or not LLM_API_KEY:
         return [r.get("description", "")[:max_chars] for r in repos]
 
     if not repos:

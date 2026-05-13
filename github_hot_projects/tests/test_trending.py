@@ -58,12 +58,40 @@ class TestTrendingParser:
             assert repos[0]["full_name"] == "trending-org/trending-repo"
 
     def test_fetch_trending_network_error(self):
-        """网络失败应返回空列表。"""
+        """网络失败重试后仍失败，应返回空列表。"""
         import requests as req
-        with patch("github_hot_projects.github_trending.requests.get", side_effect=req.RequestException("timeout")):
-            from github_hot_projects.github_trending import fetch_trending
-            repos = fetch_trending()
-            assert repos == []
+        with patch(
+            "github_hot_projects.github_trending.requests.get",
+            side_effect=req.RequestException("timeout"),
+        ) as mock_get:
+            with patch("github_hot_projects.github_trending.time.sleep") as mock_sleep:
+                from github_hot_projects.github_trending import fetch_trending
+                repos = fetch_trending()
+                assert repos == []
+                assert mock_get.call_count == 3
+                assert mock_sleep.call_count == 2
+
+    def test_fetch_trending_retries_then_succeeds(self):
+        """瞬时网络失败后应重试并成功返回结果。"""
+        import requests as req
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = TRENDING_HTML_FIXTURE
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch(
+            "github_hot_projects.github_trending.requests.get",
+            side_effect=[req.RequestException("ssl eof"), mock_resp],
+        ) as mock_get:
+            with patch("github_hot_projects.github_trending.time.sleep") as mock_sleep:
+                from github_hot_projects.github_trending import fetch_trending
+                repos = fetch_trending(since="daily")
+
+        assert len(repos) == 2
+        assert repos[0]["full_name"] == "trending-org/trending-repo"
+        assert mock_get.call_count == 2
+        assert mock_sleep.call_count == 1
 
     def test_fetch_trending_invalid_since(self):
         """无效 since 参数应回退到默认 weekly。"""

@@ -24,27 +24,29 @@ Tool 列表：
   - report.py  — 报告生成
 """
 
+import asyncio
 import logging
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from .common.config import (
     DEFAULT_SCORE_MODE,
-    GITHUB_TOKENS,
     HOT_PROJECT_COUNT,
     HOT_NEW_PROJECT_COUNT,
     MIN_STAR,
     MAX_STAR,
-    DAYS_SINCE_CREATED,
     SEARCH_KEYWORDS,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
 )
-from .common.db import save_db, update_db_project
+from .common.db import update_db_project
+from .common.async_token_pool import AsyncTokenPool, GitHubTokenPool
 from .common.github_api import (
     auto_split_star_range,
+    build_github_async_client,
     fetch_repo_info,
     fetch_repo_readme_excerpt,
     fetch_repo_recent_commits,
@@ -56,17 +58,17 @@ from .growth_estimator import (
     estimate_star_growth_binary,
 )
 from .common.llm import batch_condense_descriptions, call_llm_describe
-from .common.token_manager import TokenManager
 from .parsing.arg_validator import validate_tool_args
 from .report import step3_generate_report
 from .ranking import step2_rank_and_select
 from .tasks import (
+    AsyncTaskDispatcher,
     KeywordSearchTask,
     ScanSegmentTask,
+    TrendingPeriodTask,
     _remove_checkpoint,
     _save_checkpoint,
     _submit_growth_tasks,
-    TokenWorkerPool,
 )
 
 logger = logging.getLogger("discover_hot")
@@ -96,6 +98,63 @@ def _resolve_future_or_default(label: str, future: Future, default):
     except Exception as e:
         logger.warning("describe_project 上下文抓取失败: %s, error=%s", label, e)
         return default
+
+
+def _default_async_worker_count(token_count: int) -> int:
+    """默认协程消费者数量：任务级 token 模式下与 token 数对齐。"""
+    return max(1, token_count)
+
+
+def _resolve_async_worker_count(token_mgr: GitHubTokenPool) -> int:
+    """兼容真实 token 池与测试 mock，解析调度器 worker 数。"""
+    token_count = getattr(token_mgr, "token_count", None)
+    if isinstance(token_count, int):
+        return _default_async_worker_count(token_count)
+    tokens = getattr(token_mgr, "tokens", [])
+    return _default_async_worker_count(len(tokens))
+
+
+def _resolve_dispatcher_token_pool(token_mgr: GitHubTokenPool) -> AsyncTokenPool:
+    """真实运行时复用 GitHubTokenPool；测试 mock 回退为临时 AsyncTokenPool。"""
+    if isinstance(token_mgr, AsyncTokenPool):
+        return token_mgr
+    return AsyncTokenPool(list(getattr(token_mgr, "tokens", [])))
+
+
+def _run_coroutine_sync(coro):
+    """在同步上下文执行协程；若当前线程已有事件循环则转到子线程执行。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, object] = {}
+    error: dict[str, BaseException] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - defensive passthrough
+            error["value"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if "value" in error:
+        raise error["value"]
+
+    return result.get("value")
+
+
+class _GrowthSubmitCollector:
+    """给 _submit_growth_tasks 用的适配器：先收集任务，再交给异步调度器提交。"""
+
+    def __init__(self) -> None:
+        self.tasks: list = []
+
+    def submit(self, task) -> None:
+        self.tasks.append(task)
 
 
 def trending_repo_to_search_repo(repo: dict) -> dict:
@@ -170,7 +229,7 @@ def _ensure_project_record(
 
 
 def tool_search_by_keywords(
-    token_mgr: TokenManager,
+    token_mgr: GitHubTokenPool,
     categories: list[str] | None = None,
     min_star: int = MIN_STAR,
     days_since_created: int | None = None,
@@ -178,10 +237,10 @@ def tool_search_by_keywords(
     """
     Tool 1: 按关键词类别搜索 GitHub 热门仓库（并行）。
 
-    使用 TokenWorkerPool + KeywordSearchTask 并行搜索。
+    使用 AsyncTaskDispatcher + KeywordSearchTask 并行搜索。
 
     Args:
-        token_mgr:        TokenManager 实例
+        token_mgr:        GitHubTokenPool 实例
         categories:       搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
         min_star:         项目最低 star 门槛
         days_since_created: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
@@ -221,28 +280,86 @@ def tool_search_by_keywords(
     raw_repos: dict[str, dict] = {}
     total_keywords = sum(len(kws) for kws in keywords_dict.values())
 
-    # ── 并行搜索：提交 KeywordSearchTask 到 Pool ──
-    pool = TokenWorkerPool(token_mgr.tokens)
-    pool.start()
-    try:
-        keyword_idx = 0
-        for category, keywords in keywords_dict.items():
-            for keyword in keywords:
-                keyword_idx += 1
-                pool.submit(KeywordSearchTask(
-                    _token_mgr=token_mgr,
-                    keyword=keyword,
-                    category=category,
-                    keyword_idx=keyword_idx,
-                    total_keywords=total_keywords,
-                    created_after=created_after,
-                    min_star=min_star,
-                    _raw_repos=raw_repos,
-                ))
-        pool.wait_all_done()
-        pool.drain_results()
-    finally:
-        pool.shutdown()
+    # ── 并行搜索：提交 KeywordSearchTask 到异步调度器 ──
+    async def _run_keyword_tasks() -> None:
+        async with build_github_async_client(timeout_seconds=60.0) as async_client:
+            dispatcher = AsyncTaskDispatcher(
+                token_pool=_resolve_dispatcher_token_pool(token_mgr),
+                worker_count=_resolve_async_worker_count(token_mgr),
+            )
+            await dispatcher.start()
+            try:
+                keyword_idx = 0
+                keyword_tasks: list[KeywordSearchTask] = []
+                for category, keywords in keywords_dict.items():
+                    for keyword in keywords:
+                        keyword_idx += 1
+                        task = KeywordSearchTask(
+                            _token_mgr=token_mgr,
+                            keyword=keyword,
+                            category=category,
+                            keyword_idx=keyword_idx,
+                            total_keywords=total_keywords,
+                            created_after=created_after,
+                            min_star=min_star,
+                            _async_http_client=async_client,
+                            _raw_repos=raw_repos,
+                        )
+                        keyword_tasks.append(task)
+                        await dispatcher.submit(task)
+                await dispatcher.wait_all_done()
+                await dispatcher.drain_results()
+
+                retry_tasks: list[KeywordSearchTask] = []
+                retried_pages = 0
+                for task in keyword_tasks:
+                    if not task.failed_pages:
+                        continue
+                    retried_pages += len(task.failed_pages)
+                    retry_task = KeywordSearchTask(
+                        _token_mgr=token_mgr,
+                        keyword=task.keyword,
+                        category=task.category,
+                        keyword_idx=task.keyword_idx,
+                        total_keywords=task.total_keywords,
+                        created_after=task.created_after,
+                        min_star=task.min_star,
+                        page_numbers=list(task.failed_pages),
+                        retry_round=1,
+                        _async_http_client=async_client,
+                        _raw_repos=raw_repos,
+                    )
+                    retry_tasks.append(retry_task)
+
+                if retry_tasks:
+                    logger.warning(
+                        f"关键词搜索发现 {retried_pages} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务。"
+                    )
+                    for task in retry_tasks:
+                        await dispatcher.submit(task)
+
+                    await dispatcher.wait_all_done()
+                    await dispatcher.drain_results()
+
+                    final_failed = [
+                        (task.keyword, task.category, page)
+                        for task in retry_tasks
+                        for page in task.failed_pages
+                    ]
+                    if final_failed:
+                        failed_preview = ", ".join(
+                            f"{keyword}/{category}/page={page}"
+                            for keyword, category, page in final_failed[:10]
+                        )
+                        if len(final_failed) > 10:
+                            failed_preview += ", ..."
+                        logger.error(
+                            f"关键词搜索补偿后仍有 {len(final_failed)} 个失败页，结果可能不完整: {failed_preview}"
+                        )
+            finally:
+                await dispatcher.shutdown()
+
+    _run_coroutine_sync(_run_keyword_tasks())
 
     # ── 转换为返回格式 ──
     repos: list[dict] = []
@@ -270,7 +387,7 @@ def tool_search_by_keywords(
 
 
 def tool_scan_star_range(
-    token_mgr: TokenManager,
+    token_mgr: GitHubTokenPool,
     min_star: int = MIN_STAR,
     max_star: int = MAX_STAR,
     seen_repos: set[str] | None = None,
@@ -279,7 +396,7 @@ def tool_scan_star_range(
     """
     Tool 2: 按 star 范围扫描仓库（并行）。
 
-    使用 TokenWorkerPool + ScanSegmentTask 并行扫描各子区间。
+    使用 AsyncTaskDispatcher + ScanSegmentTask 并行扫描各子区间。
 
     阶段隔离：
     Phase 0 — 串行：auto_split_star_range 递归分段（主线程优先 token_idx=0，限流时自动切换其他 token）
@@ -324,73 +441,84 @@ def tool_scan_star_range(
     )
     raw_repos: dict[str, dict] = {}
 
-    # ── Phase 1: 并行扫描各子区间 ──
-    pool = TokenWorkerPool(token_mgr.tokens)
-    pool.start()
-    try:
-        segment_tasks: list[ScanSegmentTask] = []
-        for seg_idx, (low, high) in enumerate(segments, 1):
-            task = ScanSegmentTask(
-                _token_mgr=token_mgr,
-                seg_idx=seg_idx,
-                low=low,
-                high=high,
-                total_segments=len(segments),
-                created_after=created_after,
-                min_star=min_star,
-                _raw_repos=raw_repos,
+    # ── Phase 1: 并行扫描各子区间（异步调度器）──
+    async def _run_scan_tasks() -> None:
+        async with build_github_async_client(timeout_seconds=60.0) as async_client:
+            dispatcher = AsyncTaskDispatcher(
+                token_pool=_resolve_dispatcher_token_pool(token_mgr),
+                worker_count=_resolve_async_worker_count(token_mgr),
             )
-            segment_tasks.append(task)
-            pool.submit(task)
-        pool.wait_all_done()
-        pool.drain_results()
+            await dispatcher.start()
+            try:
+                segment_tasks: list[ScanSegmentTask] = []
+                for seg_idx, (low, high) in enumerate(segments, 1):
+                    task = ScanSegmentTask(
+                        _token_mgr=token_mgr,
+                        seg_idx=seg_idx,
+                        low=low,
+                        high=high,
+                        total_segments=len(segments),
+                        created_after=created_after,
+                        min_star=min_star,
+                        _async_http_client=async_client,
+                        _raw_repos=raw_repos,
+                    )
+                    segment_tasks.append(task)
+                    await dispatcher.submit(task)
 
-        retry_tasks: list[ScanSegmentTask] = []
-        retried_pages = 0
-        for task in segment_tasks:
-            if not task.failed_pages:
-                continue
-            retried_pages += len(task.failed_pages)
-            retry_task = ScanSegmentTask(
-                _token_mgr=token_mgr,
-                seg_idx=task.seg_idx,
-                low=task.low,
-                high=task.high,
-                total_segments=task.total_segments,
-                created_after=task.created_after,
-                min_star=task.min_star,
-                page_numbers=list(task.failed_pages),
-                retry_round=1,
-                _raw_repos=raw_repos,
-            )
-            retry_tasks.append(retry_task)
+                await dispatcher.wait_all_done()
+                await dispatcher.drain_results()
 
-        if retry_tasks:
-            logger.warning(
-                f"区间扫描发现 {retried_pages} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务。"
-            )
-            for task in retry_tasks:
-                pool.submit(task)
-            pool.wait_all_done()
-            pool.drain_results()
+                retry_tasks: list[ScanSegmentTask] = []
+                retried_pages = 0
+                for task in segment_tasks:
+                    if not task.failed_pages:
+                        continue
+                    retried_pages += len(task.failed_pages)
+                    retry_task = ScanSegmentTask(
+                        _token_mgr=token_mgr,
+                        seg_idx=task.seg_idx,
+                        low=task.low,
+                        high=task.high,
+                        total_segments=task.total_segments,
+                        created_after=task.created_after,
+                        min_star=task.min_star,
+                        page_numbers=list(task.failed_pages),
+                        retry_round=1,
+                        _async_http_client=async_client,
+                        _raw_repos=raw_repos,
+                    )
+                    retry_tasks.append(retry_task)
 
-            final_failed = [
-                (task.low, task.high, page)
-                for task in retry_tasks
-                for page in task.failed_pages
-            ]
-            if final_failed:
-                failed_preview = ", ".join(
-                    f"stars:{low}..{high}/page={page}"
-                    for low, high, page in final_failed[:10]
-                )
-                if len(final_failed) > 10:
-                    failed_preview += ", ..."
-                logger.error(
-                    f"页级补偿后仍有 {len(final_failed)} 个失败页，结果可能不完整: {failed_preview}"
-                )
-    finally:
-        pool.shutdown()
+                if retry_tasks:
+                    logger.warning(
+                        f"区间扫描发现 {retried_pages} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务。"
+                    )
+                    for task in retry_tasks:
+                        await dispatcher.submit(task)
+
+                    await dispatcher.wait_all_done()
+                    await dispatcher.drain_results()
+
+                    final_failed = [
+                        (task.low, task.high, page)
+                        for task in retry_tasks
+                        for page in task.failed_pages
+                    ]
+                    if final_failed:
+                        failed_preview = ", ".join(
+                            f"stars:{low}..{high}/page={page}"
+                            for low, high, page in final_failed[:10]
+                        )
+                        if len(final_failed) > 10:
+                            failed_preview += ", ..."
+                        logger.error(
+                            f"页级补偿后仍有 {len(final_failed)} 个失败页，结果可能不完整: {failed_preview}"
+                        )
+            finally:
+                await dispatcher.shutdown()
+
+    _run_coroutine_sync(_run_scan_tasks())
 
     # ── 去重 + 转换返回格式 ──
     repos: list[dict] = []
@@ -418,7 +546,7 @@ def tool_scan_star_range(
 
 
 def tool_check_repo_growth(
-    token_mgr: TokenManager,
+    token_mgr: GitHubTokenPool,
     repo: str,
     db: dict | None = None,
     growth_calc_days: int = GROWTH_CALC_DAYS,
@@ -513,7 +641,7 @@ def tool_check_repo_growth(
 
 
 def tool_batch_check_growth(
-    token_mgr: TokenManager,
+    token_mgr: GitHubTokenPool,
     repos: list[dict],
     db: dict,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
@@ -525,7 +653,7 @@ def tool_batch_check_growth(
     """
     Tool 4: 批量计算仓库增长并筛选候选。
 
-    使用 TokenWorkerPool + CalcGrowthTask 并行计算。
+    使用 AsyncTaskDispatcher + CalcGrowthTask 并行计算。
     当 days_since_created 指定时，先按创建时间筛选新项目，只对新项目计算增长。
 
     增长计算策略：
@@ -660,38 +788,56 @@ def tool_batch_check_growth(
         raw_repos = filtered
 
     candidate_map: dict[str, dict] = {}
+    growth_ctx = {
+        "checkpoint": None,
+        "pending_created_at": {},
+        "db_projects": db.get("projects", {}),
+        "candidate_map": candidate_map,
+        "growth_threshold": growth_threshold,
+        "use_realtime_growth": use_realtime_growth,
+        "can_write_db": can_write_db,
+        "window_specified": window_specified,
+        "growth_calc_days": growth_calc_days,
+        "is_hot_new": is_hot_new,
+        "use_checkpoint": (not use_realtime_growth) and window_specified,
+        "unresolved_count": [0],
+        "checkpoint_dirty": [False],
+        "completed_since_save": [0],
+    }
 
-    pool = TokenWorkerPool(token_mgr.tokens)
-    pool.start()
-    try:
-        growth_ctx = {
-            "checkpoint": None,
-            "pending_created_at": {},
-            "db_projects": db.get("projects", {}),
-            "candidate_map": candidate_map,
-            "growth_threshold": growth_threshold,
-            "use_realtime_growth": use_realtime_growth,
-            "can_write_db": can_write_db,
-            "window_specified": window_specified,
-            "growth_calc_days": growth_calc_days,
-            "is_hot_new": is_hot_new,
-            "use_checkpoint": (not use_realtime_growth) and window_specified,
-            "unresolved_count": [0],
-            "checkpoint_dirty": [False],
-            "completed_since_save": [0],
-        }
-        checkpoint = _submit_growth_tasks(
-            pool, token_mgr, raw_repos, db, candidate_map, growth_ctx
+    async def _run_growth_tasks() -> None:
+        dispatcher = AsyncTaskDispatcher(
+            token_pool=_resolve_dispatcher_token_pool(token_mgr),
+            worker_count=_resolve_async_worker_count(token_mgr),
         )
-        pool.wait_all_done()
-        pool.drain_results()
+        await dispatcher.start()
+        try:
+            submit_collector = _GrowthSubmitCollector()
+            checkpoint = _submit_growth_tasks(
+                submit_collector, token_mgr, raw_repos, db, candidate_map, growth_ctx
+            )
 
-        if growth_ctx["checkpoint_dirty"][0]:
-            _save_checkpoint(checkpoint)
+            if submit_collector.tasks:
+                async with build_github_async_client(timeout_seconds=60.0) as async_client:
+                    for task in submit_collector.tasks:
+                        if hasattr(task, "_async_http_client"):
+                            task._async_http_client = async_client
+                        await dispatcher.submit(task)
 
-        _remove_checkpoint()
-    finally:
-        pool.shutdown()
+                    await dispatcher.wait_all_done()
+                    await dispatcher.drain_results()
+            else:
+                await dispatcher.wait_all_done()
+                await dispatcher.drain_results()
+
+            if growth_ctx["checkpoint_dirty"][0]:
+                _save_checkpoint(checkpoint)
+
+            _remove_checkpoint()
+        finally:
+            await dispatcher.shutdown()
+
+    _run_coroutine_sync(_run_growth_tasks())
 
     db_updated = bool(can_write_db)
     effective_time_window = growth_ctx.get("effective_growth_calc_days", growth_calc_days)
@@ -774,7 +920,7 @@ def tool_rank_candidates(
     }
 
 
-def tool_describe_project(repo: str, db: dict, token_mgr: TokenManager | None = None) -> dict:
+def tool_describe_project(repo: str, db: dict, token_mgr: GitHubTokenPool | None = None) -> dict:
     """
     Tool 6: 调用 LLM 为单个项目生成描述。
 
@@ -981,7 +1127,7 @@ def tool_fetch_trending(
       - 综合榜/新项目榜候选补充 → 使用 "all"
       - 用户指定"日榜/周榜/月榜" → 对应 "daily"/"weekly"/"monthly"
     """
-    from .github_trending import fetch_trending, fetch_trending_all
+    from .github_trending import TRENDING_PERIODS, fetch_trending, merge_trending_period_results
 
     validated = validate_tool_args(
         "fetch_trending",
@@ -995,7 +1141,27 @@ def tool_fetch_trending(
 
     if trending_range == "all":
         logger.info("[Tool fetch_trending] trending_range=all，抓取三档并去重")
-        repos = fetch_trending_all()
+        period_results: dict[str, list[dict]] = {}
+
+        async def _run_trending_tasks() -> None:
+            dispatcher = AsyncTaskDispatcher(
+                token_pool=None,
+                worker_count=len(TRENDING_PERIODS),
+            )
+            await dispatcher.start()
+            try:
+                for period in TRENDING_PERIODS:
+                    await dispatcher.submit(
+                        TrendingPeriodTask(period=period, _period_results=period_results)
+                    )
+                await dispatcher.wait_all_done()
+                await dispatcher.drain_results()
+            finally:
+                await dispatcher.shutdown()
+
+        _run_coroutine_sync(_run_trending_tasks())
+
+        repos = merge_trending_period_results(period_results)
         display_repos = [
             {
                 "full_name": r["full_name"],

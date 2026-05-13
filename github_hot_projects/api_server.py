@@ -49,7 +49,14 @@ import markdown
 import hashlib
 
 from .agent import HotProjectAgent
-from .common.config import DATA_DIR, LOG_DIR, REPORT_DIR
+from .common.config import (
+    DATA_DIR,
+    LOG_DIR,
+    REPORT_DIR,
+    CORS_ALLOWED_ORIGINS,
+    CORS_ALLOW_CREDENTIALS,
+    SECURITY_IP_BLACKLIST,
+)
 
 logger = logging.getLogger("discover_hot")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -171,7 +178,7 @@ def get_agent(session_id: str) -> HotProjectAgent:
         return agent
 
 
-# ── 全局 Tool 执行锁：防止多会话同时创建 TokenWorkerPool 导致 Token 竞争 ──
+# ── 全局 Tool 执行锁：防止多会话并发触发扫描导致 Token 竞争 ──
 _tool_execution_lock = threading.Lock()
 
 
@@ -534,12 +541,8 @@ async def lifespan(app: FastAPI):
 # 安全中间件：IP 黑名单 + 速率限制 + 敏感路径拦截
 # ══════════════════════════════════════════════════════════════
 
-# 已确认的恶意扫描 IP（从日志分析得出）
-_IP_BLACKLIST: set[str] = {
-    "104.243.32.126",
-    "209.222.101.194",
-    "172.232.209.215",
-}
+# 已确认的恶意扫描 IP（支持通过环境变量 SECURITY_IP_BLACKLIST 配置）
+_IP_BLACKLIST: set[str] = set(SECURITY_IP_BLACKLIST)
 
 # 敏感路径前缀 — 命中即返回 404，不暴露任何信息
 _BLOCKED_PATH_PREFIXES: tuple[str, ...] = (
@@ -625,11 +628,19 @@ app = FastAPI(
 if os.path.isdir(WEB_DIR):
     app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
 
+# 配置防护：CORS wildcard 与 credentials 不能同时开启
+_cors_allow_credentials = CORS_ALLOW_CREDENTIALS and "*" not in CORS_ALLOWED_ORIGINS
+if CORS_ALLOW_CREDENTIALS and "*" in CORS_ALLOWED_ORIGINS:
+    logger.warning(
+        "检测到 CORS_ALLOW_CREDENTIALS=true 且 allow_origins 包含 '*'，"
+        "已自动降级为 allow_credentials=false 以避免高风险配置。"
+    )
+
 # CORS 配置（允许前端跨域访问）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制为具体域名
-    allow_credentials=True,
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

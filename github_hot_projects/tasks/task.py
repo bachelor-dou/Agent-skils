@@ -1,28 +1,19 @@
 """
-Task 子类与数据收集辅助
-========================
-定义搜索 / 扫描 / 增长计算的 Task 子类，以及批量提交、断点续传等辅助函数。
+Task 子类定义
+==============
+定义搜索 / 扫描 / 增长计算相关的 Task 子类。
 
 Task 子类（继承 task_base.Task）由 agent_tools 中的 Tool 函数创建并提交到 Pool。
-
-包含：
-  - KeywordSearchTask   — 关键词搜索任务
-  - ScanSegmentTask     — Star 区间扫描任务
-  - CalcGrowthTask      — 增长计算任务
-  - _submit_growth_tasks — 批量增长计算入队
-  - _upsert_candidate    — 候选更新/插入
-  - checkpoint 函数      — 断点续传
+辅助函数（checkpoint/批量提交等）已拆分到 task_help.py。
 """
 
-import json
 import logging
-import os
+import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from typing import Any
 
 from ..common.config import (
-    CHECKPOINT_FILE_PATH,
     MIN_STAR,
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
@@ -30,104 +21,67 @@ from ..common.config import (
 )
 from ..common.db import (
     update_db_project,
-    is_project_same_batch,
-    get_db_age_days,
 )
-from ..common.github_api import search_github_repos
+from ..common.exceptions import RateLimitError, TokenInvalidError
+from ..common.github_api import search_github_repos, async_search_github_repos
+from ..github_trending import fetch_trending
 from ..growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
     estimate_star_growth_binary,
+    estimate_star_growth_binary_async,
 )
-from ..common.token_manager import TokenManager
 from .task_base import Task
-from .worker_pool import TokenWorkerPool
+from .task_help import (
+    _upsert_candidate,
+    _load_checkpoint,
+    _save_checkpoint,
+    _remove_checkpoint,
+    _submit_growth_tasks,
+)
 
 logger = logging.getLogger("discover_hot")
 
 CHECKPOINT_BATCH_SIZE = 10  # checkpoint 批量落盘阈值
 
 
-# ══════════════════════════════════════════════════════════════
-# 候选管理
-# ══════════════════════════════════════════════════════════════
+def _remaining_pages_from(pages: list[int], current_page: int) -> list[int]:
+    return [page for page in pages if page >= current_page]
 
 
-def _upsert_candidate(
-    candidate_map: dict[str, dict],
-    full_name: str,
-    growth: int,
-    current_star: int,
-    created_at: str = "",
-    source: str = "",
-) -> None:
-    """更新或插入候选（取更大的 growth 值），保留 created_at。"""
-    existing = candidate_map.get(full_name)
-    if existing:
-        if growth > existing["growth"]:
-            existing["growth"] = growth
-            existing["star"] = current_star
-        if created_at and not existing.get("created_at"):
-            existing["created_at"] = created_at
-    else:
-        candidate_map[full_name] = {
-            "growth": growth,
-            "star": current_star,
-            "created_at": created_at,
-        }
-        tag = f"({source})" if source else ""
-        logger.info(f"  [OK] 候选{tag}: {full_name} | growth={growth} | star={current_star}")
+def _record_token_issue(token_mgr: Any, token_idx: int | None, exc: Exception) -> None:
+    if token_idx is None or token_mgr is None:
+        return
+
+    if isinstance(exc, RateLimitError):
+        recorder = getattr(token_mgr, "record_rate_limited", None)
+        if callable(recorder):
+            recorder(token_idx, exc.reset_time, str(exc))
+        return
+
+    if isinstance(exc, TokenInvalidError):
+        recorder = getattr(token_mgr, "record_invalid", None)
+        if callable(recorder):
+            recorder(token_idx, str(exc))
 
 
-# ══════════════════════════════════════════════════════════════
-# 断点续传
-# ══════════════════════════════════════════════════════════════
+async def _record_token_issue_async(token_mgr: Any, token_idx: int | None, exc: Exception) -> None:
+    if token_idx is None or token_mgr is None:
+        return
 
+    if isinstance(exc, RateLimitError):
+        marker = getattr(token_mgr, "mark_rate_limited", None)
+        if callable(marker):
+            await marker(token_idx, exc.reset_time, str(exc))
+            return
+        _record_token_issue(token_mgr, token_idx, exc)
+        return
 
-def _load_checkpoint() -> dict:
-    """加载断点续传文件。返回 {full_name: {"growth": int, "star": int}} 或空字典。"""
-    if not os.path.exists(CHECKPOINT_FILE_PATH):
-        return {}
-    try:
-        with open(CHECKPOINT_FILE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        logger.info(f"检测到断点续传文件: {len(data)} 个已计算项目。")
-        return data
-    except (json.JSONDecodeError, IOError):
-        return {}
-
-
-def _save_checkpoint(completed: dict) -> None:
-    """增量保存已完成的增长计算结果到断点文件。"""
-    try:
-        temp_path = CHECKPOINT_FILE_PATH + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(completed, f, ensure_ascii=False)
-        os.replace(temp_path, CHECKPOINT_FILE_PATH)
-    except IOError as e:
-        logger.warning(f"断点文件保存失败: {e}")
-
-
-def _remove_checkpoint() -> None:
-    """流程完整成功后删除断点文件。"""
-    try:
-        if os.path.exists(CHECKPOINT_FILE_PATH):
-            os.remove(CHECKPOINT_FILE_PATH)
-    except IOError:
-        pass
-
-
-def _project_refresh_age_days(project: dict) -> int | None:
-    """返回仓库 refreshed_at 距今的天数（按 UTC 日期差），无有效值返回 None。"""
-    refreshed_at = project.get("refreshed_at", "")
-    if not refreshed_at:
-        return None
-    try:
-        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc
-        )
-        return (datetime.now(timezone.utc).date() - refresh_dt.date()).days
-    except ValueError:
-        return None
+    if isinstance(exc, TokenInvalidError):
+        marker = getattr(token_mgr, "mark_invalid", None)
+        if callable(marker):
+            await marker(token_idx, str(exc))
+            return
+        _record_token_issue(token_mgr, token_idx, exc)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -142,20 +96,26 @@ class KeywordSearchTask(Task):
     # 类常量：每个关键词搜索的最大页数
     MAX_PAGES: int = 3
 
-    needs_token: bool = True
+    needs_github_token: bool = True  # A模式: True（任务级持有）; B模式: 改回 False（请求级借还）
     keyword: str = ""
     category: str = ""
     keyword_idx: int = 0
     total_keywords: int = 0
     created_after: str = ""
     min_star: int = 0  # 最低 star 过滤阈值，0 则使用默认 MIN_STAR
+    page_numbers: list[int] | None = None
+    retry_round: int = 0
+    _async_http_client: Any = field(default=None, repr=False)
     _raw_repos: dict = field(default=None, repr=False)
+    failed_pages: list[int] = field(default_factory=list, init=False, repr=False)
 
     def execute(self, token_idx: int | None) -> list[dict]:
-        worker_suffix = f", worker={token_idx}" if token_idx is not None else ""
+        self.failed_pages = []
+        retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
+        page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
         logger.info(
             f"[{self.keyword_idx}/{self.total_keywords}] 搜索: "
-            f"'{self.keyword}' (类别: {self.category}{worker_suffix})"
+            f"'{self.keyword}' (类别: {self.category}{retry_suffix}{page_suffix})"
         )
         collected: list[dict] = []
         star_threshold = self.min_star if self.min_star else MIN_STAR
@@ -163,15 +123,40 @@ class KeywordSearchTask(Task):
         if self.created_after:
             query = f"{query} created:>={self.created_after}"
 
-        for page in range(1, self.MAX_PAGES + 1):
-            items = search_github_repos(
-                self._token_mgr, query, token_idx, page=page,
-                min_star=star_threshold, worker_idx=token_idx
-            )
+        pages = self.page_numbers if self.page_numbers is not None else list(range(1, self.MAX_PAGES + 1))
+        stop_on_empty = self.page_numbers is None
+
+        for page in pages:
+            try:
+                items = search_github_repos(
+                    self._token_mgr,
+                    query,
+                    token_idx,
+                    page=page,
+                    min_star=star_threshold,
+                )
+            except (RateLimitError, TokenInvalidError) as exc:
+                _record_token_issue(self._token_mgr, token_idx, exc)
+                remaining_pages = _remaining_pages_from(pages, page)
+                self.failed_pages.extend(remaining_pages)
+                logger.warning(
+                    f"[{self.keyword_idx}/{self.total_keywords}] 搜索: '{self.keyword}' "
+                    f"(类别: {self.category}), page={page} 命中 {exc.__class__.__name__}，"
+                    f"剩余页转入补偿: {remaining_pages}。"
+                )
+                return collected
             if items is None:
+                self.failed_pages.append(page)
+                failure_action = "加入补偿队列" if self.retry_round == 0 else "补偿后仍失败"
+                logger.warning(
+                    f"[{self.keyword_idx}/{self.total_keywords}] 搜索: '{self.keyword}' "
+                    f"(类别: {self.category}), page={page} 连续失败，{failure_action}。"
+                )
                 continue
             if not items:
-                break
+                if stop_on_empty:
+                    break
+                continue
             for repo_item in items:
                 full_name = repo_item.get("full_name", "")
                 if not full_name:
@@ -183,6 +168,80 @@ class KeywordSearchTask(Task):
                     "created_at": repo_item.get("created_at", ""),
                 })
             time.sleep(SEARCH_REQUEST_INTERVAL)
+
+        return collected
+
+    async def execute_async(self, token_idx: int | None) -> list[dict]:
+        self.failed_pages = []
+        token_suffix = f", token={token_idx}" if token_idx is not None else ""
+        retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
+        page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
+        logger.info(
+            f"[{self.keyword_idx}/{self.total_keywords}] 搜索: "
+            f"'{self.keyword}' (类别: {self.category}{token_suffix}{retry_suffix}{page_suffix})"
+        )
+        collected: list[dict] = []
+        star_threshold = self.min_star if self.min_star else MIN_STAR
+        query = self.keyword
+        if self.created_after:
+            query = f"{query} created:>={self.created_after}"
+
+        pages = self.page_numbers if self.page_numbers is not None else list(range(1, self.MAX_PAGES + 1))
+        stop_on_empty = self.page_numbers is None
+
+        for page in pages:
+            try:
+                # A模式：任务级 token 持有。
+                items = await async_search_github_repos(
+                    self._token_mgr,
+                    query,
+                    token_idx,
+                    page=page,
+                    min_star=star_threshold,
+                    client=self._async_http_client,
+                )
+            except (RateLimitError, TokenInvalidError) as exc:
+                await _record_token_issue_async(self._token_mgr, token_idx, exc)
+                remaining_pages = _remaining_pages_from(pages, page)
+                self.failed_pages.extend(remaining_pages)
+                logger.warning(
+                    f"[{self.keyword_idx}/{self.total_keywords}] 搜索: '{self.keyword}' "
+                    f"(类别: {self.category}{token_suffix}), page={page} 命中 {exc.__class__.__name__}，"
+                    f"剩余页转入补偿: {remaining_pages}。"
+                )
+                return collected
+            # // B模式：请求级 token 借还备份。
+            # // items = await async_search_github_repos(
+            # //     self._token_mgr,
+            # //     query,
+            # //     None,
+            # //     page=page,
+            # //     min_star=star_threshold,
+            # //     client=self._async_http_client,
+            # // )
+            if items is None:
+                self.failed_pages.append(page)
+                failure_action = "加入补偿队列" if self.retry_round == 0 else "补偿后仍失败"
+                logger.warning(
+                    f"[{self.keyword_idx}/{self.total_keywords}] 搜索: '{self.keyword}' "
+                    f"(类别: {self.category}{token_suffix}), page={page} 连续失败，{failure_action}。"
+                )
+                continue
+            if not items:
+                if stop_on_empty:
+                    break
+                continue
+            for repo_item in items:
+                full_name = repo_item.get("full_name", "")
+                if not full_name:
+                    continue
+                collected.append({
+                    "full_name": full_name,
+                    "star": repo_item.get("stargazers_count", 0),
+                    "repo_item": repo_item,
+                    "created_at": repo_item.get("created_at", ""),
+                })
+            await asyncio.sleep(SEARCH_REQUEST_INTERVAL)
 
         return collected
 
@@ -206,7 +265,7 @@ class KeywordSearchTask(Task):
 class ScanSegmentTask(Task):
     """Star 区间扫描任务：扫描单个子区间的多页结果。"""
 
-    needs_token: bool = True
+    needs_github_token: bool = True  # A模式: True（任务级持有）; B模式: 改回 False（请求级借还）
     seg_idx: int = 0
     low: int = 0
     high: int = 0
@@ -215,6 +274,7 @@ class ScanSegmentTask(Task):
     min_star: int = 0  # 最低 star 过滤阈值，0 则使用默认 MIN_STAR
     page_numbers: list[int] | None = None
     retry_round: int = 0
+    _async_http_client: Any = field(default=None, repr=False)
     _raw_repos: dict = field(default=None, repr=False)
     failed_pages: list[int] = field(default_factory=list, init=False, repr=False)
 
@@ -223,12 +283,11 @@ class ScanSegmentTask(Task):
         query = f"stars:{self.low}..{self.high}"
         if self.created_after:
             query = f"{query} created:>={self.created_after}"
-        worker_suffix = f" (worker={token_idx})" if token_idx is not None else ""
         retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
         page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
         logger.info(
             f"  子区间 {self.seg_idx}/{self.total_segments}: "
-            f"{query}{worker_suffix}{retry_suffix}{page_suffix}"
+            f"{query}{retry_suffix}{page_suffix}"
         )
         collected: list[dict] = []
         star_threshold = self.min_star if self.min_star else MIN_STAR
@@ -236,17 +295,33 @@ class ScanSegmentTask(Task):
         stop_on_empty = self.page_numbers is None
 
         for page in pages:
-            items = search_github_repos(
-                self._token_mgr, query, token_idx,
-                page=page, sort="updated", min_star=0, worker_idx=token_idx,
-            )
+            try:
+                items = search_github_repos(
+                    self._token_mgr,
+                    query,
+                    token_idx,
+                    page=page,
+                    sort="updated",
+                    min_star=0,
+                )
+            except (RateLimitError, TokenInvalidError) as exc:
+                _record_token_issue(self._token_mgr, token_idx, exc)
+                remaining_pages = _remaining_pages_from(pages, page)
+                self.failed_pages.extend(remaining_pages)
+                token_suffix = f", token={token_idx}" if token_idx is not None else ""
+                logger.warning(
+                    f"  子区间 {self.seg_idx}/{self.total_segments}: {query}, "
+                    f"page={page}{token_suffix} 命中 {exc.__class__.__name__}，"
+                    f"剩余页转入补偿: {remaining_pages}。"
+                )
+                return collected
             if items is None:
                 self.failed_pages.append(page)
-                worker_suffix = f", worker={token_idx}" if token_idx is not None else ""
+                token_suffix = f", token={token_idx}" if token_idx is not None else ""
                 failure_action = "加入补偿队列" if self.retry_round == 0 else "补偿后仍失败"
                 logger.warning(
                     f"  子区间 {self.seg_idx}/{self.total_segments}: {query}, "
-                    f"page={page}{worker_suffix} 连续失败，{failure_action}。"
+                    f"page={page}{token_suffix} 连续失败，{failure_action}。"
                 )
                 continue
             if not items:
@@ -270,6 +345,86 @@ class ScanSegmentTask(Task):
 
         return collected
 
+    async def execute_async(self, token_idx: int | None) -> list[dict]:
+        self.failed_pages = []
+        query = f"stars:{self.low}..{self.high}"
+        if self.created_after:
+            query = f"{query} created:>={self.created_after}"
+        token_suffix = f" (token={token_idx})" if token_idx is not None else ""
+        retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
+        page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
+        logger.info(
+            f"  子区间 {self.seg_idx}/{self.total_segments}: "
+            f"{query}{token_suffix}{retry_suffix}{page_suffix}"
+        )
+        collected: list[dict] = []
+        star_threshold = self.min_star if self.min_star else MIN_STAR
+        pages = self.page_numbers if self.page_numbers is not None else list(range(1, 11))
+        stop_on_empty = self.page_numbers is None
+
+        for page in pages:
+            try:
+                # A模式：任务级 token 持有。
+                items = await async_search_github_repos(
+                    self._token_mgr,
+                    query,
+                    token_idx,
+                    page=page,
+                    sort="updated",
+                    min_star=0,
+                    client=self._async_http_client,
+                )
+            except (RateLimitError, TokenInvalidError) as exc:
+                await _record_token_issue_async(self._token_mgr, token_idx, exc)
+                remaining_pages = _remaining_pages_from(pages, page)
+                self.failed_pages.extend(remaining_pages)
+                token_suffix = f", token={token_idx}" if token_idx is not None else ""
+                logger.warning(
+                    f"  子区间 {self.seg_idx}/{self.total_segments}: {query}, "
+                    f"page={page}{token_suffix} 命中 {exc.__class__.__name__}，"
+                    f"剩余页转入补偿: {remaining_pages}。"
+                )
+                return collected
+            # // B模式：请求级 token 借还备份。
+            # // items = await async_search_github_repos(
+            # //     self._token_mgr,
+            # //     query,
+            # //     None,
+            # //     page=page,
+            # //     sort="updated",
+            # //     min_star=0,
+            # //     client=self._async_http_client,
+            # // )
+            if items is None:
+                self.failed_pages.append(page)
+                token_suffix = f", token={token_idx}" if token_idx is not None else ""
+                failure_action = "加入补偿队列" if self.retry_round == 0 else "补偿后仍失败"
+                logger.warning(
+                    f"  子区间 {self.seg_idx}/{self.total_segments}: {query}, "
+                    f"page={page}{token_suffix} 连续失败，{failure_action}。"
+                )
+                continue
+            if not items:
+                if stop_on_empty:
+                    break
+                continue
+            for repo_item in items:
+                full_name = repo_item.get("full_name", "")
+                if not full_name:
+                    continue
+                current_star = repo_item.get("stargazers_count", 0)
+                if current_star < star_threshold:
+                    continue
+                collected.append({
+                    "full_name": full_name,
+                    "star": current_star,
+                    "repo_item": repo_item,
+                    "created_at": repo_item.get("created_at", ""),
+                })
+            await asyncio.sleep(SEARCH_REQUEST_INTERVAL)
+
+        return collected
+
     def on_result(self, result: list[dict]) -> None:
         if not result or self._raw_repos is None:
             return
@@ -289,6 +444,26 @@ class ScanSegmentTask(Task):
 
 
 @dataclass
+class TrendingPeriodTask(Task):
+    """Trending 单周期抓取任务：抓取一个 since 周期的榜单。"""
+
+    period: str = "weekly"
+    _period_results: dict[str, list[dict]] | None = field(default=None, repr=False)
+
+    def execute(self, token_idx: int | None) -> tuple[str, list[dict]]:
+        return self.period, fetch_trending(since=self.period)
+
+    def on_result(self, result: tuple[str, list[dict]]) -> None:
+        if self._period_results is None:
+            return
+        period, repos = result
+        self._period_results[period] = repos
+
+    def __str__(self) -> str:
+        return f"TrendingPeriod({self.period})"
+
+
+@dataclass
 class CalcGrowthTask(Task):
     """
     增长计算任务：计算单个仓库的窗口期 star 增长。
@@ -298,10 +473,11 @@ class CalcGrowthTask(Task):
       checkpoint_dirty (list[bool]), completed_since_save (list[int])
     """
 
-    needs_token: bool = True
+    needs_github_token: bool = True  # A模式: True（任务级持有）; B模式: 改回 False（请求级借还）
     full_name: str = ""
     current_star: int = 0
     repo_item: dict = field(default_factory=dict)
+    _async_http_client: Any = field(default=None, repr=False)
     _ctx: dict = field(default=None, repr=False)
 
     def execute(self, token_idx: int | None) -> tuple[str, int, int]:
@@ -323,6 +499,44 @@ class CalcGrowthTask(Task):
         if growth >= 0 and growth > self.current_star:
             growth = self.current_star
         return self.full_name, growth, self.current_star
+
+    async def execute_async(self, token_idx: int | None) -> tuple[str, int, int]:
+        parts = self.full_name.split("/", 1)
+        if len(parts) != 2:
+            return self.full_name, -1, self.current_star
+        owner, repo_name = parts
+        logger.info(
+            f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
+        )
+        growth_calc_days = GROWTH_CALC_DAYS
+        if self._ctx is not None:
+            growth_calc_days = self._ctx.get("growth_calc_days", GROWTH_CALC_DAYS)
+        # ── A模式（当前启用）：任务级 token 持有，token_idx 由 worker 分配，整个任务期间持有同一 token ──
+        growth = await estimate_star_growth_binary_async(
+            self._token_mgr,
+            owner,
+            repo_name,
+            self.current_star,
+            token_idx=token_idx,
+            growth_calc_days=growth_calc_days,
+            client=self._async_http_client,
+        )
+        # ── B模式（已禁用）：请求级借还，token_idx 置为 None，由增长链路内部的异步 helper 自行管理 token ──
+        # growth = await estimate_star_growth_binary_async(
+        #     self._token_mgr,
+        #     owner,
+        #     repo_name,
+        #     self.current_star,
+        #     token_idx=None,
+        #     growth_calc_days=growth_calc_days,
+        #     client=self._async_http_client,
+        # )
+        if growth >= 0 and growth > self.current_star:
+            growth = self.current_star
+        return self.full_name, growth, self.current_star
+
+    def idempotency_key(self) -> str:
+        return f"calc-growth:{self.full_name}"
 
     def on_result(self, result: tuple[str, int, int]) -> None:
         if self._ctx is None:
@@ -383,143 +597,3 @@ class CalcGrowthTask(Task):
 
     def __str__(self) -> str:
         return f"CalcGrowth({self.full_name})"
-
-
-# ══════════════════════════════════════════════════════════════
-# 批量增长计算入队
-# ══════════════════════════════════════════════════════════════
-
-
-def _submit_growth_tasks(
-    pool: TokenWorkerPool,
-    token_mgr: TokenManager,
-    raw_repos: dict[str, dict],
-    db: dict,
-    candidate_map: dict[str, dict],
-    growth_ctx: dict,
-) -> dict:
-    """
-    批量增长计算入队：默认先走 checkpoint/DB 差值，再将剩余提交为 CalcGrowthTask。
-
-    growth_ctx 由调用方创建并传入（包含 checkpoint, pending_created_at, db_projects 等共享状态）。
-    返回 checkpoint dict。
-    """
-    db_projects = db.get("projects", {})
-    growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
-    use_realtime_growth = bool(growth_ctx.get("use_realtime_growth", False))
-    can_write_db = bool(growth_ctx.get("can_write_db", False))
-    use_checkpoint = bool(growth_ctx.get("use_checkpoint", not use_realtime_growth))
-
-    checkpoint = {} if not use_checkpoint else _load_checkpoint()
-    growth_ctx["checkpoint"] = checkpoint
-
-    pending = {
-        fn: info for fn, info in raw_repos.items()
-        if fn not in candidate_map
-    }
-
-    resumed_count = 0
-    if use_checkpoint:
-        # 从 checkpoint 恢复
-        for fn in list(pending.keys()):
-            if fn in checkpoint:
-                cp = checkpoint[fn]
-                growth = cp["growth"]
-                # 跳过上轮标记为 unresolved 的仓库（不重复估算，直接从 pending 移除）
-                if growth == "unresolved":
-                    del pending[fn]
-                    resumed_count += 1
-                    continue
-                current_star = cp["star"]
-                created_at = pending[fn].get("created_at", "")
-                if growth >= growth_threshold:
-                    _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
-                del pending[fn]
-                resumed_count += 1
-
-        if resumed_count:
-            logger.info(f"断点续传: 恢复 {resumed_count} 个已计算项目。")
-
-    # DB 差值法：主线程直接处理（模式感知）
-    checkpoint_dirty = False
-    db_count = 0
-
-    time_window = growth_ctx.get("growth_calc_days", GROWTH_CALC_DAYS)
-    window_specified = bool(growth_ctx.get("window_specified", True))
-    is_hot_new = bool(growth_ctx.get("is_hot_new", False))
-    db_age = get_db_age_days(db)
-
-    # 综合榜未指定窗口时，自动采用 DB 年龄窗口
-    if not is_hot_new and not window_specified:
-        if db_age is not None and db_age > 0:
-            time_window = db_age
-            growth_ctx["growth_calc_days"] = time_window
-            logger.info(f"综合榜未指定窗口：本轮自动采用 DB 年龄窗口 {time_window} 天。")
-
-    growth_ctx["effective_growth_calc_days"] = time_window
-
-    # 判断能否走 DB 差值
-    if is_hot_new:
-        # 新项目榜：始终实时计算，不走 DB 差值
-        can_use_db_diff = False
-    else:
-        # 综合榜：根据窗口匹配判断
-        if window_specified:
-            can_use_db_diff = bool(
-                db.get("valid", False)
-                and db_age is not None
-                and db_age == time_window
-            )
-        else:
-            can_use_db_diff = bool(db.get("valid", False))
-
-    # 只在允许 DB 差值且非实时模式时，才尝试走 DB 差值
-    if can_use_db_diff and not use_realtime_growth:
-        for full_name in list(pending.keys()):
-            info = pending[full_name]
-            current_star = info["star"]
-            created_at = info.get("created_at", "")
-
-            if full_name in db_projects:
-                project_age = _project_refresh_age_days(db_projects[full_name])
-                project_ok = (
-                    project_age == time_window
-                    and is_project_same_batch(db_projects[full_name], db)
-                )
-
-                if project_ok:
-                    saved_star = db_projects[full_name].get("star", 0)
-                    growth = current_star - saved_star
-                    checkpoint[full_name] = {"growth": growth, "star": current_star}
-                    checkpoint_dirty = True
-                    db_count += 1
-                    if growth >= growth_threshold:
-                        _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
-                    del pending[full_name]
-
-    if use_realtime_growth:
-        logger.info("实时计算模式：跳过 checkpoint 和 DB 差值，全部走实时增长估算。")
-
-    if use_checkpoint and checkpoint_dirty:
-        _save_checkpoint(checkpoint)
-
-    # 非 DB 差值：提交 CalcGrowthTask 到池子
-    pending_created_at = growth_ctx["pending_created_at"]
-    for full_name, info in pending.items():
-        pending_created_at[full_name] = info.get("created_at", "")
-        pool.submit(CalcGrowthTask(
-            _token_mgr=token_mgr,
-            full_name=full_name,
-            current_star=info["star"],
-            repo_item=info["repo_item"],
-            _ctx=growth_ctx,
-        ))
-
-    db_age_info = f"(距上次更新≈{db_age}天)" if db_age is not None else ""
-    logger.info(
-        f"批量增长计算: {len(pending)} 个任务入队 "
-        f"(DB差值{db_age_info} {db_count}, 续传 {resumed_count}, "
-        f"跳过已入选 {len(raw_repos) - len(pending) - db_count - resumed_count})"
-    )
-
-    return checkpoint

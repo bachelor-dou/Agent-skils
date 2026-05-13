@@ -721,11 +721,12 @@ class TestAgentStateHelpers:
 
         payload = {"repos": [{"repo": f"org/repo-{i}"} for i in range(100)]}
         result = HotProjectAgent._serialize_result(payload, max_len=400)
+        parsed = json.loads(result)
 
-        assert "_repos_note" in result
-        assert "结果已截断" in result or "已截取前" in result
+        assert isinstance(parsed, dict)
+        assert "_repos_note" in parsed or parsed.get("truncated") is True
 
-    def test_build_route_pending_request_disables_thinking(self):
+    def test_build_route_pending_request_enables_thinking(self):
         from github_hot_projects.agent import HotProjectAgent
 
         agent = HotProjectAgent()
@@ -758,7 +759,7 @@ class TestAgentStateHelpers:
 
         assert pending.intent_family == "comprehensive_ranking"
         assert pending.should_execute_now is True
-        assert mock_request.call_args.kwargs["enable_thinking"] is False
+        assert mock_request.call_args.kwargs["enable_thinking"] is True
         assert mock_request.call_args.kwargs["max_tokens"] == 1024
 
     def test_build_route_pending_request_parses_structured_pending_request(self):
@@ -938,47 +939,36 @@ class TestValidateToolArgs:
         assert result["min_star"] == MIN_STAR
         assert "days_since_created" not in result
 
-    def test_coerces_out_of_range_int(self):
+    def test_rank_candidates_validation_normalizes_defaults_and_coercions(self):
+        from github_hot_projects.parsing.arg_validator import validate_tool_args
+        from github_hot_projects.common.config import HOT_NEW_PROJECT_COUNT, DAYS_SINCE_CREATED, HOT_PROJECT_COUNT
+
+        cases = [
+            ({"top_n": 500}, {"top_n": 200}, []),
+            ({"mode": "invalid"}, {"mode": "comprehensive", "top_n": HOT_PROJECT_COUNT}, ["days_since_created"]),
+            ({"mode": "hot_new"}, {"top_n": HOT_NEW_PROJECT_COUNT, "days_since_created": DAYS_SINCE_CREATED}, []),
+            ({"mode": "comprehensive"}, {"top_n": HOT_PROJECT_COUNT}, ["days_since_created"]),
+        ]
+
+        for input_args, expected, absent_keys in cases:
+            result = validate_tool_args("rank_candidates", input_args)
+            for key, value in expected.items():
+                assert result[key] == value
+            for key in absent_keys:
+                assert key not in result
+
+    def test_fetch_trending_validation_normalizes_params(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
 
-        result = validate_tool_args("rank_candidates", {"top_n": 500})
-        assert result["top_n"] == 200
+        cases = [
+            ({"trending_range": "daily", "language": "python"}, "daily"),
+            ({"trending_range": "invalid_value"}, "weekly"),
+        ]
 
-    def test_coerces_invalid_enum(self):
-        from github_hot_projects.parsing.arg_validator import validate_tool_args
-
-        result = validate_tool_args("rank_candidates", {"mode": "invalid"})
-        assert result["mode"] == "comprehensive"
-
-    def test_strips_unknown_params(self):
-        from github_hot_projects.parsing.arg_validator import validate_tool_args
-
-        result = validate_tool_args("fetch_trending", {"trending_range": "daily", "language": "python"})
-        assert "language" not in result
-        assert result["trending_range"] == "daily"
-
-    def test_default_by_mode_hot_new(self):
-        from github_hot_projects.parsing.arg_validator import validate_tool_args
-        from github_hot_projects.common.config import HOT_NEW_PROJECT_COUNT, DAYS_SINCE_CREATED
-
-        result = validate_tool_args("rank_candidates", {"mode": "hot_new"})
-        assert result["top_n"] == HOT_NEW_PROJECT_COUNT
-        assert result["days_since_created"] == DAYS_SINCE_CREATED
-
-    def test_default_by_mode_comprehensive(self):
-        from github_hot_projects.parsing.arg_validator import validate_tool_args
-        from github_hot_projects.common.config import HOT_PROJECT_COUNT
-
-        result = validate_tool_args("rank_candidates", {"mode": "comprehensive"})
-        assert result["top_n"] == HOT_PROJECT_COUNT
-        assert "days_since_created" not in result
-
-    def test_enum_coercion_trending_range(self):
-        from github_hot_projects.parsing.arg_validator import validate_tool_args
-
-        result = validate_tool_args("fetch_trending", {"trending_range": "invalid_value"})
-        # Should fall back to default
-        assert result["trending_range"] == "weekly"
+        for input_args, expected_range in cases:
+            result = validate_tool_args("fetch_trending", input_args)
+            assert result["trending_range"] == expected_range
+            assert "language" not in result
 
     def test_preserves_required_str(self):
         from github_hot_projects.parsing.arg_validator import validate_tool_args
@@ -1054,159 +1044,113 @@ class TestConfirmedRequestExecution:
         assert mock_batch.call_args.kwargs["days_since_created"] == 30
         assert mock_batch.call_args.kwargs["growth_threshold"] == 400
 
-    def test_log_execution_overview_prints_summary_snapshot(self):
-        """日志应包含单条参数总览，hot_new 模式应为 desc_only 策略。"""
+    def test_log_execution_overview_includes_ranking_snapshot(self):
+        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+        cases = [
+            (
+                7,
+                ResolvedRequest(
+                    intent_family="hot_new_ranking",
+                    intent_label_zh="新项目热榜",
+                    resolved_params={
+                        "mode": "hot_new",
+                        "growth_calc_days": 10,
+                        "days_since_created": 30,
+                    },
+                    user_specified_params={"growth_calc_days": 10, "days_since_created": 30},
+                    defaulted_params={"mode": "hot_new"},
+                    report_requested=True,
+                ),
+                ['"growth_calc_days": 10', "desc_only"],
+            ),
+            (
+                9,
+                ResolvedRequest(
+                    intent_family="comprehensive_ranking",
+                    intent_label_zh="综合热榜",
+                    resolved_params={"mode": "comprehensive", "trending_range": "all"},
+                    user_specified_params={"mode": "comprehensive"},
+                ),
+                ['"trending_range": "all"', "desc_only"],
+            ),
+        ]
+
+        for current_turn, resolved_request, expected_fragments in cases:
+            agent = HotProjectAgent()
+            agent.state.current_user_turn = current_turn
+            agent.state.last_confirmed_request = resolved_request
+
+            with patch("github_hot_projects.agent.logger.info") as mock_info:
+                agent._log_execution_overview()
+
+            merged_logs = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in mock_info.call_args_list
+            )
+            assert "运行参数总览" in merged_logs
+            for fragment in expected_fragments:
+                assert fragment in merged_logs
+
+    def test_ranking_modes_write_desc_only(self):
         from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
 
-        agent = HotProjectAgent()
-        agent.state.current_user_turn = 7
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="hot_new_ranking",
-            intent_label_zh="新项目热榜",
-            resolved_params={
-                "mode": "hot_new",
-                "growth_calc_days": 10,
-                "days_since_created": 30,
-            },
-            user_specified_params={"growth_calc_days": 10, "days_since_created": 30},
-            defaulted_params={"mode": "hot_new"},
-            report_requested=True,
-        )
+        batch_cases = [
+            (
+                ResolvedRequest(
+                    intent_family="hot_new_ranking",
+                    intent_label_zh="新项目热榜",
+                    resolved_params={"mode": "hot_new", "days_since_created": 30},
+                ),
+                {"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 10, "db_updated": True},
+            ),
+            (
+                ResolvedRequest(
+                    intent_family="comprehensive_ranking",
+                    intent_label_zh="综合热榜",
+                    resolved_params={"mode": "comprehensive", "growth_calc_days": 7},
+                ),
+                {"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 7, "db_updated": True},
+            ),
+        ]
 
-        with patch("github_hot_projects.agent.logger.info") as mock_info:
-            agent._log_execution_overview()
+        for resolved_request, batch_result in batch_cases:
+            agent = HotProjectAgent()
+            agent.state.last_confirmed_request = resolved_request
+            agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
+            agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
 
-        merged_logs = "\n".join(
-            " ".join(str(arg) for arg in call.args)
-            for call in mock_info.call_args_list
-        )
-        assert "运行参数总览" in merged_logs
-        assert "desc_only" in merged_logs
-        assert '"growth_calc_days": 10' in merged_logs
+            with patch(
+                "github_hot_projects.agent.tool_batch_check_growth",
+                return_value=batch_result,
+            ):
+                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                    agent._execute_tool("batch_check_growth", {})
 
-    def test_log_execution_overview_shows_trending_range_all(self):
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
+            mock_desc_save.assert_called_once_with(agent.state.db)
 
-        agent = HotProjectAgent()
-        agent.state.current_user_turn = 9
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="comprehensive_ranking",
-            intent_label_zh="综合热榜",
-            resolved_params={
-                "mode": "comprehensive",
-                "trending_range": "all",
-            },
-            user_specified_params={"mode": "comprehensive"},
-        )
+        report_cases = [
+            ("hot_new", None),
+            (
+                "comprehensive",
+                ResolvedRequest(
+                    intent_family="comprehensive_ranking",
+                    intent_label_zh="综合热榜",
+                    resolved_params={"mode": "comprehensive"},
+                ),
+            ),
+        ]
 
-        with patch("github_hot_projects.agent.logger.info") as mock_info:
-            agent._log_execution_overview()
+        for mode, resolved_request in report_cases:
+            agent = HotProjectAgent()
+            agent.state.last_mode = mode
+            agent.state.last_ranked = [("org/repo", {"growth": 100, "star": 200})]
+            agent.state.last_confirmed_request = resolved_request
 
-        merged_logs = "\n".join(
-            " ".join(str(arg) for arg in call.args)
-            for call in mock_info.call_args_list
-        )
-        assert '"trending_range": "all"' in merged_logs
+            with patch(
+                "github_hot_projects.agent.tool_generate_report",
+                return_value={"report_path": "reports/now.md"},
+            ):
+                with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
+                    agent._execute_tool("generate_report", {})
 
-    def test_batch_check_growth_hot_new_persists_desc_only(self):
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
-
-        agent = HotProjectAgent()
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="hot_new_ranking",
-            intent_label_zh="新项目热榜",
-            resolved_params={"mode": "hot_new", "days_since_created": 30},
-        )
-        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
-        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
-
-        with patch(
-            "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 10, "db_updated": True},
-        ):
-            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                agent._execute_tool("batch_check_growth", {})
-
-        mock_desc_save.assert_called_once_with(agent.state.db)
-
-    def test_generate_report_hot_new_persists_desc_only(self):
-        from github_hot_projects.agent import HotProjectAgent
-
-        agent = HotProjectAgent()
-        agent.state.last_mode = "hot_new"
-        agent.state.last_ranked = [("org/repo", {"growth": 100, "star": 200})]
-
-        with patch(
-            "github_hot_projects.agent.tool_generate_report",
-            return_value={"report_path": "reports/now.md"},
-        ):
-            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                agent._execute_tool("generate_report", {})
-
-        mock_desc_save.assert_called_once_with(agent.state.db)
-
-    def test_generate_report_comprehensive_writes_desc_only(self):
-        """comprehensive 模式应只写 desc_only（full DB 写入由定时脚本负责）。"""
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
-
-        agent = HotProjectAgent()
-        agent.state.last_mode = "comprehensive"
-        agent.state.last_ranked = [("org/repo", {"growth": 100, "star": 200})]
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="comprehensive_ranking",
-            intent_label_zh="综合热榜",
-            resolved_params={"mode": "comprehensive"},
-        )
-
-        with patch(
-            "github_hot_projects.agent.tool_generate_report",
-            return_value={"report_path": "reports/now.md"},
-        ):
-            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                agent._execute_tool("generate_report", {})
-
-        mock_desc_save.assert_called_once()
-
-    def test_batch_check_growth_comprehensive_writes_desc_only(self):
-        """comprehensive 模式应只写 desc_only（full DB 写入由定时脚本负责）。"""
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
-
-        agent = HotProjectAgent()
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="comprehensive_ranking",
-            intent_label_zh="综合热榜",
-            resolved_params={"mode": "comprehensive", "growth_calc_days": 7},
-        )
-        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
-        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
-
-        with patch(
-            "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 7, "db_updated": True},
-        ):
-            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                agent._execute_tool("batch_check_growth", {})
-
-        mock_desc_save.assert_called_once()
-
-    def test_batch_check_growth_hot_new_writes_desc_only(self):
-        """hot_new 模式应只写 desc_only。"""
-        from github_hot_projects.agent import HotProjectAgent, ResolvedRequest
-
-        agent = HotProjectAgent()
-        agent.state.last_confirmed_request = ResolvedRequest(
-            intent_family="hot_new_ranking",
-            intent_label_zh="新项目热榜",
-            resolved_params={"mode": "hot_new", "days_since_created": 10},
-        )
-        agent.state.current_turn_tools = {"search_by_keywords", "scan_star_range", "fetch_trending"}
-        agent.state.last_search_repos = [{"full_name": "org/repo", "star": 1}]
-
-        with patch(
-            "github_hot_projects.agent.tool_batch_check_growth",
-            return_value={"candidates": {"org/repo": {"growth": 500}}, "growth_calc_days": 7, "db_updated": True},
-        ):
-            with patch("github_hot_projects.agent.save_db_desc_only", return_value=1) as mock_desc_save:
-                agent._execute_tool("batch_check_growth", {})
-
-        mock_desc_save.assert_called_once()
+            mock_desc_save.assert_called_once_with(agent.state.db)

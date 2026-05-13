@@ -5,7 +5,7 @@
 无需 LLM 对话，直接执行内置 DiscoveryPipeline 编排流程。
 
 用法：
-    python scheduled_update.py [--top-n 100] [--growth-calc-days 7]
+    python scheduled_update.py --top-n 100 --growth-calc-days 7
 """
 # ============================================================
 # 部署为定时任务（cron）
@@ -15,10 +15,10 @@
 #    cd /root/code/Agent-skils/github_hot_projects
 #    python scheduled_update.py --top-n 100
 #
-# 2. 编辑 crontab（每周五 23:00 自动执行）：
+# 2. 编辑 crontab（每周日 00:36 自动执行）：
 #    crontab -e
 #    添加以下行：
-#    0 23 * * 5 source ~/.bashrc && cd /root/code/Agent-skils/github_hot_projects && /usr/bin/python3 scheduled_update.py --top-n 100 --growth-calc-days 7
+#    36 0 * * 7 source ~/.bashrc && cd /root/code/Agent-skils/github_hot_projects && /usr/bin/python3 scheduled_update.py --top-n 100 --growth-calc-days 7
 #
 # 3. 或使用 systemd timer：
 #    sudo cp scheduled_update.service /etc/systemd/system/
@@ -44,7 +44,7 @@ from github_hot_projects.common.config import (
     GROWTH_CALC_DAYS,
 )
 from github_hot_projects.common.db import load_db, save_db
-from github_hot_projects.common.token_manager import TokenManager
+from github_hot_projects.common.async_token_pool import GitHubTokenPool
 from github_hot_projects.agent_tools import (
     tool_batch_check_growth,
     tool_fetch_trending,
@@ -79,6 +79,9 @@ def setup_logging() -> str:
         ],
         force=True,
     )
+    # httpx/httpcore 会在 INFO 级别输出每条 HTTP 请求，定时日志里只保留业务日志。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     return log_path
 
 
@@ -91,7 +94,7 @@ class DiscoveryPipeline:
     用于定时任务场景：search -> scan -> trending -> growth -> rank -> report。
     """
 
-    def __init__(self, token_mgr: TokenManager, db: dict) -> None:
+    def __init__(self, token_mgr: GitHubTokenPool, db: dict) -> None:
         self.token_mgr = token_mgr
         self.db = db
 
@@ -445,7 +448,7 @@ def run_update(
     growth_calc_days: int = GROWTH_CALC_DAYS,
 ) -> None:
     """执行完整的搜索→增长→排名→报告流程（委托给 DiscoveryPipeline）。"""
-    token_mgr = TokenManager()
+    token_mgr = GitHubTokenPool()
     db = load_db()
 
     # 保存旧 DB 快照用于对比
