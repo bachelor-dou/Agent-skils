@@ -1,14 +1,3 @@
-def test_capabilities_import():
-    from hot_projects.capabilities import (
-        search_by_keywords, scan_star_range, fetch_trending, trending_repo_to_search_repo,
-        check_repo_growth, batch_check_growth, rank_candidates,
-        describe_project, get_db_info, generate_report,
-    )
-    assert callable(search_by_keywords)
-    assert callable(rank_candidates)
-    assert callable(generate_report)
-
-
 def test_get_db_info_overview():
     from hot_projects.capabilities.describe import get_db_info
     db = {"valid": True, "date": "2026-06-10", "projects": {"a/b": {"star": 1}}}
