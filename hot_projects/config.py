@@ -68,19 +68,21 @@ SECURITY_IP_BLACKLIST: list[str] = _parse_csv_env("SECURITY_IP_BLACKLIST") or _D
 #   逐调用回退：每次先调方案 A，失败再回退方案 B。
 #   两方案可配置不同平台、账号、模型与参数风格（azure / openai）。
 # ──────────────────────────────────────────────────────────────
+# URL、后端类型、模型名均固定在此；仅 KEY 从环境变量读取（export LLM_A_KEY / LLM_B_KEY）。
+
 # ===== LLM 方案 A（主力）: Azure OpenAI =====
-LLM_A_BACKEND = os.environ.get("LLM_A_BACKEND", "azure")
-LLM_A_URL = os.environ.get("LLM_A_URL", "https://ceshi-001.openai.azure.com/openai/v1/chat/completions?api-version=preview")
+LLM_A_BACKEND = "azure"
+LLM_A_URL = "https://ceshi-001.openai.azure.com/openai/v1/chat/completions?api-version=preview"
+LLM_A_MODEL = "gpt-5.4"
+LLM_A_LITE_MODEL = "gpt-5.4-mini"
 LLM_A_KEY = os.environ.get("LLM_A_KEY", "")
-LLM_A_MODEL = os.environ.get("LLM_A_MODEL", "gpt-5.4")
-LLM_A_LITE_MODEL = os.environ.get("LLM_A_LITE_MODEL", "gpt-5.4-mini")
 
 # ===== LLM 方案 B（备选）: SiliconFlow =====
-LLM_B_BACKEND = os.environ.get("LLM_B_BACKEND", "openai")
-LLM_B_URL = os.environ.get("LLM_B_URL", "https://api.siliconflow.cn/v1/chat/completions")
+LLM_B_BACKEND = "openai"
+LLM_B_URL = "https://api.siliconflow.cn/v1/chat/completions"
+LLM_B_MODEL = "Pro/zai-org/GLM-5"
+LLM_B_LITE_MODEL = "Qwen/Qwen3.5-35B-A3B"
 LLM_B_KEY = os.environ.get("LLM_B_KEY", "")
-LLM_B_MODEL = os.environ.get("LLM_B_MODEL", "Pro/zai-org/GLM-5")
-LLM_B_LITE_MODEL = os.environ.get("LLM_B_LITE_MODEL", "Qwen/Qwen3.5-35B-A3B")
 
 # ──────────────────────────────────────────────────────────────
 # 阈值与数量
