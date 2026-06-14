@@ -346,3 +346,112 @@ TOOL_SCHEMAS = [
         },
     },
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# Agent 暴露层工具：复合榜单工具 + 原子工具
+#   - 参数校验项并入 TOOL_PARAM_SCHEMA（供 validate_tool_args_strict 按 agent 工具名校验）
+#   - LLM function-calling schema 见 AGENT_TOOL_SCHEMAS（供工具注册表）
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+_RANK_COMMON_PARAMS = {
+    "categories": {"type": "list_str", "default": None},
+    "min_star": {"type": "int", "min": 1, "default": MIN_STAR},
+    "growth_calc_days": {"type": "int", "min": 1, "default": None},
+    "growth_threshold": {"type": "int", "min": 0, "default": STAR_GROWTH_THRESHOLD},
+}
+
+TOOL_PARAM_SCHEMA.update({
+    "comprehensive_ranking": {
+        **_RANK_COMMON_PARAMS,
+        "max_star": {"type": "int", "min": 1, "default": MAX_STAR},
+        "top_n": {"type": "int", "min": 1, "max": 200, "default": HOT_PROJECT_COUNT},
+    },
+    "hot_new_ranking": {
+        **_RANK_COMMON_PARAMS,
+        "max_star": {"type": "int", "min": 1, "default": MAX_STAR},
+        "days_since_created": {"type": "int", "min": 1, "default": DAYS_SINCE_CREATED},
+        "top_n": {"type": "int", "min": 1, "max": 200, "default": HOT_NEW_PROJECT_COUNT},
+    },
+    "keyword_ranking": {
+        **_RANK_COMMON_PARAMS,
+        "top_n": {"type": "int", "min": 1, "max": 200, "default": HOT_PROJECT_COUNT},
+    },
+    "repo_growth": {
+        "repo": {"type": "str"},
+        "growth_calc_days": {"type": "int", "min": 1, "default": GROWTH_CALC_DAYS},
+    },
+    "describe_project": {"repo": {"type": "str"}},
+    "get_db_info": {"repo": {"type": "str", "default": None}},
+    "fetch_trending": {
+        "trending_range": {"type": "enum", "choices": ["daily", "weekly", "monthly"], "default": "weekly"},
+    },
+})
+
+
+def _fn(name, description, properties, required=None):
+    fn = {"name": name, "description": description,
+          "parameters": {"type": "object", "properties": properties}}
+    if required:
+        fn["parameters"]["required"] = required
+    return {"type": "function", "function": fn}
+
+
+_categories_prop = {
+    "type": "array", "items": {"type": "string"},
+    "description": f"搜索类别，可选: {list(SEARCH_KEYWORDS.keys())}；不传=全部类别。",
+}
+_min_star_prop = {"type": "integer", "description": f"最低 star 门槛，默认{MIN_STAR}"}
+_growth_calc_days_prop = {"type": "integer", "description": "增长统计窗口（天）；不传则综合/关键词榜用 DB 年龄窗口。与创建时间窗口独立。"}
+_growth_threshold_prop = {"type": "integer", "description": f"增长入选阈值，默认{STAR_GROWTH_THRESHOLD}"}
+
+AGENT_TOOL_SCHEMAS = [
+    _fn("comprehensive_ranking",
+        "【综合热榜·昂贵】跑完整发现流程(搜索+扫描+Trending→增长→排序→报告)输出综合 Top N。执行前请先回显参数并等用户确认『开始』。",
+        {
+            "categories": _categories_prop,
+            "min_star": _min_star_prop,
+            "max_star": {"type": "integer", "description": f"星段扫描上限，默认{MAX_STAR}"},
+            "growth_calc_days": _growth_calc_days_prop,
+            "growth_threshold": _growth_threshold_prop,
+            "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_PROJECT_COUNT}"},
+        }),
+    _fn("hot_new_ranking",
+        "【新项目热榜·昂贵】只看近 days_since_created 天内创建的新项目，按增长排序。执行前先回显参数等用户确认『开始』。",
+        {
+            "categories": _categories_prop,
+            "min_star": _min_star_prop,
+            "max_star": {"type": "integer", "description": f"星段扫描上限，默认{MAX_STAR}"},
+            "days_since_created": {"type": "integer", "description": f"新项目创建时间窗口（天），默认{DAYS_SINCE_CREATED}"},
+            "growth_calc_days": _growth_calc_days_prop,
+            "growth_threshold": _growth_threshold_prop,
+            "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_NEW_PROJECT_COUNT}"},
+        }),
+    _fn("keyword_ranking",
+        "【关键词热榜·昂贵】只按关键词类别搜索→增长→排序（不做星段扫描/Trending）。执行前先回显参数等用户确认『开始』。",
+        {
+            "categories": _categories_prop,
+            "min_star": _min_star_prop,
+            "growth_calc_days": _growth_calc_days_prop,
+            "growth_threshold": _growth_threshold_prop,
+            "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_PROJECT_COUNT}"},
+        }),
+    _fn("repo_growth",
+        "【单仓库增长】查单个仓库近期 star 增长。若精确仓库查不到，会返回相似候选供用户选择。",
+        {
+            "repo": {"type": "string", "description": "owner/repo，如 vllm-project/vllm；只给名字或拼错也可，会模糊匹配。"},
+            "growth_calc_days": {"type": "integer", "description": f"增长统计窗口（天），默认{GROWTH_CALC_DAYS}"},
+        },
+        required=["repo"]),
+    _fn("describe_project",
+        "【项目介绍】生成单个仓库的中文功能介绍。精确查不到会返回相似候选供选择。",
+        {"repo": {"type": "string", "description": "owner/repo；只给名字或拼错也可，会模糊匹配。"}},
+        required=["repo"]),
+    _fn("get_db_info",
+        "【数据库查询】查本地 DB 概览或指定仓库缓存信息（不联网）。",
+        {"repo": {"type": "string", "description": "可选，查特定仓库；不传返回概览。"}}),
+    _fn("fetch_trending",
+        "【Trending】获取 GitHub Trending 列表。",
+        {"trending_range": {"type": "string", "enum": ["daily", "weekly", "monthly"],
+                            "description": "daily/weekly(默认)/monthly", "default": "weekly"}}),
+]
