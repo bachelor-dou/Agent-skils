@@ -143,9 +143,9 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     "AI-Agent": [
         "ai agent", "agent framework", "multi-agent", "agent sdk",
         "coding agent", "browser-use", "computer-use", "web agent",
-        "ai tools", "autonomous agent", "task agent",
-        "agent orchestration", "ai assistant", "tool calling",
-        "function calling llm",
+        "autonomous agent", "agent orchestration", "ai assistant",
+        "tool calling", "function calling llm", "deep research agent",
+        "voice agent",
     ],
     "AI-MCP": [
         "mcp server", "mcp client", "model context protocol", "mcp sdk",
@@ -154,8 +154,7 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     "AI-Skill-Prompt-Workflow": [
         "ai skill", "agent skill", "ai plugin", "prompt engineering",
         "prompt library", "prompt tool", "ai workflow",
-        "workflow automation", "langgraph", "ai orchestration",
-        "ai automation", "llm chain", "ai pipeline",
+        "workflow automation", "langgraph", "llm chain",
     ],
     "AI-CLI-DevTool": [
         "ai cli", "ai terminal", "ai devtool", "coding assistant",
@@ -165,7 +164,7 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     "AI-LLM-Core": [
         "large language model", "llm framework", "llm sdk",
         "transformer model", "open source llm", "llm api",
-        "chat model", "language model", "foundation model", "llm runtime",
+        "foundation model",
     ],
     "AI-RAG": [
         "rag", "retrieval augmented", "vector database",
@@ -178,12 +177,9 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "model serving", "inference engine", "tensor parallel",
     ],
     "AI-Training-Finetune": [
-        "finetune llm", "fine-tuning", "instruction tuning",
-        "supervised fine tuning", "lora", "qlora", "peft",
-        "rlhf", "post-training", "pretraining framework",
-        "continued pretraining", "dpo", "orpo", "reward model",
-        "distillation", "knowledge distillation", "model distillation",
-        "alignment", "sft",
+        "fine-tuning", "instruction tuning", "lora", "qlora", "peft",
+        "rlhf", "dpo", "sft", "reward model", "distillation",
+        "alignment", "pretraining framework",
     ],
     "AI-Infra": [
         "triton kernel", "cuda kernel", "ml compiler",
@@ -278,5 +274,53 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "video processing", "audio processing", "ffmpeg",
         "video editor", "audio editor", "media player",
         "streaming media", "video codec", "audio codec",
+    ],
+    # ─── AI 应用层补充 ───
+    "AI-App-Chatbot": [
+        "chatbot", "chatgpt", "ai chat", "llm app", "ai webui",
+        "openai compatible", "ai gateway", "llm proxy",
+    ],
+    # ─── 经典 ML / 深度学习（非 LLM）───
+    "ML-DeepLearning": [
+        "pytorch", "tensorflow", "jax", "scikit-learn", "keras",
+        "deep learning", "machine learning framework", "onnx",
+        "reinforcement learning",
+    ],
+    "Computer-Vision": [
+        "computer vision", "object detection", "ocr", "opencv",
+        "image segmentation", "pose estimation", "face recognition",
+    ],
+    # ─── 移动 / 桌面 / 跨端 ───
+    "Mobile": [
+        "android", "ios", "swift", "kotlin", "jetpack compose", "swiftui",
+    ],
+    "Desktop": [
+        "tauri", "qt framework", "gtk", "wails", "desktop app",
+    ],
+    # ─── 自托管 / Homelab ───
+    "Self-Hosted": [
+        "self-hosted", "home assistant", "media server", "dashboard",
+        "home automation",
+    ],
+    # ─── 爬虫 / 自动化 ───
+    "Scraping-Automation": [
+        "web scraping", "crawler", "playwright", "browser automation", "rpa",
+    ],
+    # ─── 代理 / 网关 / 网络 ───
+    "Proxy-Gateway": [
+        "nginx", "caddy", "traefik", "api gateway", "reverse proxy",
+        "load balancer",
+    ],
+    # ─── 文档 / 静态站点 ───
+    "Docs-StaticSite": [
+        "static site generator", "hugo", "docusaurus", "mkdocs", "documentation",
+    ],
+    # ─── 测试 / QA ───
+    "Testing-QA": [
+        "testing framework", "cypress", "selenium", "e2e testing", "test automation",
+    ],
+    # ─── 机器人 / IoT / 嵌入式 ───
+    "Robotics-IoT": [
+        "ros", "esp32", "arduino", "raspberry pi", "embedded", "firmware",
     ],
 }
