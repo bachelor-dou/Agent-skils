@@ -43,8 +43,14 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
 # ──────────────────────────────────────────────────────────────
 # API Server 安全配置
 # ──────────────────────────────────────────────────────────────
-# CORS 允许来源：生产环境请通过 CORS_ALLOWED_ORIGINS 配置明确域名
-# 例如：CORS_ALLOWED_ORIGINS="https://example.com,https://app.example.com"
+# 这三项配合 api_server.py 的 SecurityMiddleware 工作，对每个进入的 HTTP 请求做：
+#   IP 黑名单拦截 → 敏感路径拦截 → 速率限制 → 请求日志。
+# 本节定义其中的「CORS 白名单」与「IP 黑名单」。
+
+# 【CORS 白名单】允许哪些前端域名跨域调用本 API。
+#   - 浏览器跨域请求才受此限制；非浏览器客户端（curl/脚本）不受影响。
+#   - 生产环境务必通过环境变量 CORS_ALLOWED_ORIGINS 指定明确域名，不要用 "*"。
+#   - 例如：CORS_ALLOWED_ORIGINS="https://example.com,https://app.example.com"
 _DEFAULT_CORS_ALLOWED_ORIGINS = [
     "http://localhost",
     "http://localhost:3000",
@@ -54,8 +60,12 @@ _DEFAULT_CORS_ALLOWED_ORIGINS = [
 CORS_ALLOWED_ORIGINS: list[str] = _parse_csv_env("CORS_ALLOWED_ORIGINS") or _DEFAULT_CORS_ALLOWED_ORIGINS
 CORS_ALLOW_CREDENTIALS: bool = _parse_bool_env("CORS_ALLOW_CREDENTIALS", default=False)
 
-# IP 黑名单支持通过环境变量覆盖；未配置时使用内置默认值
-# 例如：SECURITY_IP_BLACKLIST="1.2.3.4,5.6.7.8"
+# 【IP 黑名单】名单内的来源 IP 一律禁止访问本服务，命中即直接返回 403 Forbidden。
+#   - 用途：屏蔽已确认的恶意扫描器 / 攻击源 IP（下方内置的几个就是历史抓到的扫描 IP）。
+#   - 匹配的是请求方真实 IP（支持反向代理的 X-Forwarded-For）。
+#   - 可通过环境变量 SECURITY_IP_BLACKLIST 覆盖；未配置时使用内置默认值。
+#   - 例如追加封禁：SECURITY_IP_BLACKLIST="1.2.3.4,5.6.7.8"
+#   - 注意：这是「黑名单」（默认放行、命中才拒绝），不是「白名单」（默认拒绝、命中才放行）。
 _DEFAULT_SECURITY_IP_BLACKLIST = [
     "104.243.32.126",
     "209.222.101.194",
