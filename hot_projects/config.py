@@ -85,22 +85,6 @@ LLM_B_LITE_MODEL = "Qwen/Qwen3.5-35B-A3B"
 LLM_B_KEY = os.environ.get("LLM_B_KEY", "")
 
 # ──────────────────────────────────────────────────────────────
-# 本地密钥覆盖：secrets_local.py（已 gitignore，不入库）。
-#   存在且非空时优先于环境变量，便于本地直接填 key、无需改 .bashrc。
-# ──────────────────────────────────────────────────────────────
-try:
-    from . import secrets_local as _secrets_local
-except ImportError:
-    _secrets_local = None
-
-if _secrets_local is not None:
-    LLM_A_KEY = getattr(_secrets_local, "LLM_A_KEY", "") or LLM_A_KEY
-    LLM_B_KEY = getattr(_secrets_local, "LLM_B_KEY", "") or LLM_B_KEY
-    _gh_local = getattr(_secrets_local, "GITHUB_TOKENS", "") or ""
-    if _gh_local:
-        GITHUB_TOKENS = [t.strip() for t in _gh_local.split(",") if t.strip()]
-
-# ──────────────────────────────────────────────────────────────
 # 阈值与数量
 # ──────────────────────────────────────────────────────────────
 STAR_GROWTH_THRESHOLD: int = 800       # 窗口期 star 增长阈值
