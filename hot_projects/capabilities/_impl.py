@@ -1083,11 +1083,12 @@ def tool_generate_report(
     growth_calc_days: int = GROWTH_CALC_DAYS,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
     min_star: int = MIN_STAR,
+    token_mgr=None,
 ) -> dict:
     """
     Tool 7: 生成完整 Markdown 报告。
 
-    调用 report.step3_generate_report 生成报告。
+    调用 report.step3_generate_report 生成报告。token_mgr 提供时对无描述项目抓 README 兜底。
     """
     report_path = step3_generate_report(
         top_projects,
@@ -1097,6 +1098,7 @@ def tool_generate_report(
         growth_calc_days=growth_calc_days,
         growth_threshold=growth_threshold,
         min_star=min_star,
+        token_mgr=token_mgr,
     )
     return {"report_path": report_path, "project_count": len(top_projects)}
 

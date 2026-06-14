@@ -127,6 +127,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
             days_since_created=days_since if rank_mode == "hot_new" else None,
             growth_calc_days=effective_window, growth_threshold=threshold,
             min_star=params["min_star"],
+            token_mgr=getattr(provider, "token_mgr", None),
         )
         result["report_path"] = report_path
     return result

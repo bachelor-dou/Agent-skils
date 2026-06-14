@@ -31,6 +31,7 @@ from .config import (
     GROWTH_CALC_DAYS,
 )
 from .infra.llm import call_llm_describe
+from .providers.github.api import fetch_repo_readme_excerpt, fetch_repo_recent_commits
 
 logger = logging.getLogger("discover_hot")
 
@@ -264,8 +265,13 @@ def step3_generate_report(
     growth_calc_days: int = GROWTH_CALC_DAYS,
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
     min_star: int = MIN_STAR,
+    token_mgr=None,
 ) -> str:
-    """为 Top N 项目生成 LLM 描述并输出 Markdown 报告。"""
+    """为 Top N 项目生成 LLM 描述并输出 Markdown 报告。
+
+    token_mgr 提供时，对没有现成描述的项目实时抓取 README 摘要/近期提交作为兜底，
+    让 LLM 基于真实内容总结（而非凭名字猜测，避免幻觉）；抓不到才退化为"信息不足"。
+    """
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
@@ -296,7 +302,21 @@ def step3_generate_report(
         logger.info(f"报告生成: 需要生成完整描述 {len(need_llm)} 个项目，按顺序调用 LLM...")
         for idx, full_name, html_url, saved in need_llm:
             logger.info(f"[{idx}/{len(top_projects)}] LLM 生成完整描述: {full_name}")
-            desc = call_llm_describe(full_name, saved, html_url, detail_level="detailed")
+            # 兜底：DB 里没有描述内容时，实时抓 README/提交，给 LLM 真实素材（不抓就只有元数据）
+            repo_info = dict(saved)
+            parts = full_name.split("/", 1)
+            if token_mgr is not None and len(parts) == 2:
+                owner, repo_name = parts
+                try:
+                    readme = fetch_repo_readme_excerpt(token_mgr, owner, repo_name, 0)
+                    if readme.get("text"):
+                        repo_info["readme_excerpt"] = readme["text"]
+                    commits = fetch_repo_recent_commits(token_mgr, owner, repo_name, 0, 10)
+                    if commits:
+                        repo_info["recent_commits"] = commits
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("报告兜底抓取 README/提交失败: %s, %s", full_name, exc)
+            desc = call_llm_describe(full_name, repo_info, html_url, detail_level="detailed")
             if desc:
                 desc_results[full_name] = desc
                 if full_name in db_projects:
