@@ -7,6 +7,13 @@ search_by_keywords / scan_star_range / repo_growth / batch_growth / fetch_trendi
 
 from ..base import Provider, Repo
 from .api import search_github_repos, fetch_repo_info
+from ...capabilities import (
+    search_by_keywords as _search_by_keywords,
+    scan_star_range as _scan_star_range,
+    fetch_trending as _fetch_trending,
+    check_repo_growth as _check_repo_growth,
+    batch_check_growth as _batch_check_growth,
+)
 
 
 class GitHubProvider(Provider):
@@ -26,18 +33,25 @@ class GitHubProvider(Provider):
         item = fetch_repo_info(self.token_mgr, parts[0], parts[1], token_idx=0)
         return Repo.from_github(item) if item else None
 
-    # ── 以下在 Phase 3 接线 capabilities ──
     def search_by_keywords(self, categories, min_star, days_since_created) -> dict:
-        raise NotImplementedError
+        return _search_by_keywords(
+            self.token_mgr, categories=categories, min_star=min_star,
+            days_since_created=days_since_created,
+        )
 
     def scan_star_range(self, min_star, max_star, seen_repos, days_since_created) -> dict:
-        raise NotImplementedError
+        return _scan_star_range(
+            self.token_mgr, min_star=min_star, max_star=max_star,
+            seen_repos=seen_repos, days_since_created=days_since_created,
+        )
 
     def repo_growth(self, repo: str, growth_calc_days: int) -> dict:
-        raise NotImplementedError
+        return _check_repo_growth(
+            self.token_mgr, repo=repo, db=None, growth_calc_days=growth_calc_days,
+        )
 
     def batch_growth(self, repos, db, **kwargs) -> dict:
-        raise NotImplementedError
+        return _batch_check_growth(self.token_mgr, repos, db, **kwargs)
 
     def fetch_trending(self, trending_range: str) -> dict:
-        raise NotImplementedError
+        return _fetch_trending(trending_range=trending_range)
