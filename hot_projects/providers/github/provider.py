@@ -1,0 +1,43 @@
+"""GitHubProvider：把 GitHub 下层实现封装为统一 Provider 接口。
+
+本类是 GitHub 专属细节的边界：编排层只通过 Provider 接口与 Repo 交互。
+search_by_keywords / scan_star_range / repo_growth / batch_growth / fetch_trending
+在 Phase 3 接线到 capabilities 纯函数。
+"""
+
+from ..base import Provider, Repo
+from .api import search_github_repos, fetch_repo_info
+
+
+class GitHubProvider(Provider):
+    def __init__(self, token_mgr):
+        self.token_mgr = token_mgr
+
+    def search_similar(self, name: str, limit: int = 5) -> list[Repo]:
+        items = search_github_repos(
+            self.token_mgr, name, token_idx=0, page=1, per_page=limit, min_star=0
+        ) or []
+        return [Repo.from_github(it) for it in items[:limit]]
+
+    def repo_info(self, repo: str) -> Repo | None:
+        parts = repo.split("/", 1)
+        if len(parts) != 2:
+            return None
+        item = fetch_repo_info(self.token_mgr, parts[0], parts[1], token_idx=0)
+        return Repo.from_github(item) if item else None
+
+    # ── 以下在 Phase 3 接线 capabilities ──
+    def search_by_keywords(self, categories, min_star, days_since_created) -> dict:
+        raise NotImplementedError
+
+    def scan_star_range(self, min_star, max_star, seen_repos, days_since_created) -> dict:
+        raise NotImplementedError
+
+    def repo_growth(self, repo: str, growth_calc_days: int) -> dict:
+        raise NotImplementedError
+
+    def batch_growth(self, repos, db, **kwargs) -> dict:
+        raise NotImplementedError
+
+    def fetch_trending(self, trending_range: str) -> dict:
+        raise NotImplementedError
