@@ -372,6 +372,8 @@ def run_update(
     growth_calc_days: int = GROWTH_CALC_DAYS,
 ) -> None:
     """执行完整的搜索→增长→排名→报告流程（委托给 DiscoveryPipeline）。"""
+    # 定时窗口规则：取 max(指定值, 默认窗口)——指定值大于默认才覆盖，否则用默认。
+    growth_calc_days = max(growth_calc_days, GROWTH_CALC_DAYS)
     token_mgr = GitHubTokenPool()
     db = load_db()
 

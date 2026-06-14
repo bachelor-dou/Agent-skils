@@ -690,14 +690,12 @@ def tool_batch_check_growth(
     # force_refresh 不在 schema 中，由定时脚本内部传递，跳过验证
     window_specified = bool(window_specified)
 
-    # 新项目榜始终实时计算；综合榜根据窗口匹配决定
+    # 新项目榜始终实时计算；综合榜按「项目级差值判定」逐项决定走差值还是实时，
+    # 不再被 force_refresh 全局强制实时（定时任务也可对匹配项目走差值，详见 _submit_growth_tasks）。
     is_hot_new = days_since_created is not None
-    if is_hot_new:
-        use_realtime_growth = True  # 新项目榜：始终实时
-    else:
-        use_realtime_growth = force_refresh or (window_specified and growth_calc_days != GROWTH_CALC_DAYS)
+    use_realtime_growth = is_hot_new
 
-    # DB写入权限：只有用户说"强制刷新"才允许写
+    # DB写入权限：只有定时刷新模式（force_refresh）才写 DB 快照；Agent/其他通道一律不写。
     can_write_db = force_refresh
 
     # 构建 raw_repos 格式
@@ -749,6 +747,18 @@ def tool_batch_check_growth(
     if api_fetched_count:
         logger.info(f"created_at 补全: API 获取 {api_fetched_count} 个")
 
+    # ── 在 seeding 覆盖前，捕获旧快照（star + refreshed_at）供 DB 差值使用 ──
+    # 差值 = current_star − 旧star，且需用旧 refreshed_at 判断窗口匹配；
+    # 下面的 seeding 会把快照刷成当前值，因此必须先在这里留底。
+    prev_snapshot: dict[str, dict] = {}
+    for fn in raw_repos:
+        proj = db_projects.get(fn)
+        if isinstance(proj, dict) and "star" in proj:
+            prev_snapshot[fn] = {
+                "star": proj.get("star"),
+                "refreshed_at": proj.get("refreshed_at", ""),
+            }
+
     seeded_count = 0
     if can_write_db:
         for fn, info in raw_repos.items():
@@ -799,7 +809,9 @@ def tool_batch_check_growth(
         "window_specified": window_specified,
         "growth_calc_days": growth_calc_days,
         "is_hot_new": is_hot_new,
-        "use_checkpoint": (not use_realtime_growth) and window_specified,
+        "prev_snapshot": prev_snapshot,
+        # checkpoint 仅用于定时长跑（force_refresh）断点续传；Agent 不碰 checkpoint 文件。
+        "use_checkpoint": can_write_db and not is_hot_new,
         "unresolved_count": [0],
         "checkpoint_dirty": [False],
         "completed_since_save": [0],

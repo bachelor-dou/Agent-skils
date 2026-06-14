@@ -351,6 +351,33 @@ def is_project_diff_eligible(
         return False
 
 
+def is_project_window_match(
+    refreshed_at: str,
+    growth_calc_days: int,
+    tolerance_hours: float,
+) -> bool:
+    """判断某项目快照的年龄是否 ≈ 计算窗口（用于 DB 差值有效性）。
+
+    项目年龄 = now − refreshed_at；当 |项目年龄 − growth_calc_days| ≤ tolerance_hours 时，
+    current_star − DB旧star 才是有效的「近 growth_calc_days 天增长」。
+
+    Args:
+        refreshed_at: 项目快照时间（"YYYY-MM-DDTHH:MM:SSZ"）。
+        growth_calc_days: 本次计算窗口（天）。
+        tolerance_hours: 允许的最大偏差（小时）。
+    """
+    if not refreshed_at:
+        return False
+    try:
+        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return False
+    age_seconds = (_utc_now() - refresh_dt).total_seconds()
+    return abs(age_seconds - growth_calc_days * 86400) <= tolerance_hours * 3600
+
+
 def is_project_same_batch(
     project: dict,
     db: dict,

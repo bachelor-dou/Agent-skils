@@ -97,14 +97,17 @@ LLM_B_KEY = os.environ.get("LLM_B_KEY", "")
 # ──────────────────────────────────────────────────────────────
 # 阈值与数量
 # ──────────────────────────────────────────────────────────────
-STAR_GROWTH_THRESHOLD: int = 800       # 窗口期 star 增长阈值
+STAR_GROWTH_THRESHOLD: int = 1000       # 窗口期 star 增长阈值
 MIN_STAR: int = 1200                   # 项目最低 star 门槛（关键词搜索 + 范围扫描下界）
 MAX_STAR: int = 45000                  # 范围扫描上限
-HOT_PROJECT_COUNT: int = 100           # 综合热门项目默认输出数量（上限，有几个出几个）
+HOT_PROJECT_COUNT: int = 120           # 综合热门项目默认输出数量（上限，有几个出几个）
 HOT_NEW_PROJECT_COUNT: int = 20        # 新项目榜默认输出数量（未指定 top_n 时使用）
 GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
 DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
 DATA_EXPIRE_DAYS: int = GROWTH_CALC_DAYS + 1  # DB 数据过期判定天数（必须 > GROWTH_CALC_DAYS）
+# DB 差值法：项目 refreshed_at 年龄与计算窗口的最大允许偏差（小时）。
+# 仅当 |项目年龄 − 计算窗口| ≤ 该值时，current_star − DB旧star 才被视为有效的窗口期增长。
+DB_DIFF_TOLERANCE_HOURS: int = 5
 
 # ──────────────────────────────────────────────────────────────
 # 评分模式

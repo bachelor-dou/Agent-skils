@@ -4,6 +4,7 @@
 返回相似候选给 LLM，由 LLM 询问用户选择正确的 owner/repo。
 """
 
+from ..config import GROWTH_CALC_DAYS
 from ..capabilities.describe import get_db_info as _get_db_info, describe_project as _describe_project
 
 
@@ -27,7 +28,7 @@ def repo_growth_handler(ctx, args: dict) -> dict:
     if ctx.provider.repo_info(repo) is None:
         return _disambig(ctx, repo)
     ctx.state.active_repo = repo
-    return ctx.provider.repo_growth(repo, growth_calc_days=args.get("growth_calc_days", 7))
+    return ctx.provider.repo_growth(repo, growth_calc_days=args.get("growth_calc_days", GROWTH_CALC_DAYS))
 
 
 def describe_project_handler(ctx, args: dict) -> dict:

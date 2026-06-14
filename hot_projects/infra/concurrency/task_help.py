@@ -11,17 +11,17 @@ Task 辅助函数
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any
 
 from ...config import (
     CHECKPOINT_FILE_PATH,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
+    DB_DIFF_TOLERANCE_HOURS,
 )
 from ..db import (
-    is_project_same_batch,
     get_db_age_days,
+    is_project_window_match,
 )
 from ...providers.github.token_pool import GitHubTokenPool
 
@@ -85,20 +85,6 @@ def _remove_checkpoint() -> None:
             os.remove(CHECKPOINT_FILE_PATH)
     except IOError:
         pass
-
-
-def _project_refresh_age_days(project: dict) -> int | None:
-    """返回仓库 refreshed_at 距今的天数（按 UTC 日期差），无有效值返回 None。"""
-    refreshed_at = project.get("refreshed_at", "")
-    if not refreshed_at:
-        return None
-    try:
-        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc
-        )
-        return (datetime.now(timezone.utc).date() - refresh_dt.date()).days
-    except ValueError:
-        return None
 
 
 def _submit_growth_tasks(
@@ -171,47 +157,42 @@ def _submit_growth_tasks(
 
     growth_ctx["effective_growth_calc_days"] = time_window
 
-    # 判断能否走 DB 差值
-    if is_hot_new:
-        # 新项目榜：始终实时计算，不走 DB 差值
-        can_use_db_diff = False
-    else:
-        # 综合榜：根据窗口匹配判断
-        if window_specified:
-            can_use_db_diff = bool(
-                db.get("valid", False)
-                and db_age is not None
-                and db_age == time_window
-            )
-        else:
-            can_use_db_diff = bool(db.get("valid", False))
+    # ── DB 差值（两层判定）──
+    # 第一层（计算窗口 time_window）已在上方确定（Agent 未指定=DB年龄/指定=用户值；
+    # 定时=调用方传入并已取 max(指定,默认)）。
+    # 第二层（项目级）：项目在 DB 里 + |项目年龄 − time_window| ≤ 容差(5h) → 走差值，
+    # 用 seeding 覆盖前捕获的旧快照(prev_snapshot) 计算 current_star − 旧star。
+    # 新项目榜(is_hot_new) 与 DB 整体失效时，不走差值，全部实时。
+    prev_snapshot = growth_ctx.get("prev_snapshot", {}) or {}
+    allow_diff = (not is_hot_new) and bool(db.get("valid", False))
 
-    # 只在允许 DB 差值且非实时模式时，才尝试走 DB 差值
-    if can_use_db_diff and not use_realtime_growth:
+    if allow_diff:
         for full_name in list(pending.keys()):
+            prev = prev_snapshot.get(full_name)
+            if not prev:
+                continue
+            saved_star = prev.get("star")
+            if saved_star is None:
+                continue
+            if not is_project_window_match(
+                prev.get("refreshed_at", ""), time_window, DB_DIFF_TOLERANCE_HOURS
+            ):
+                continue
+
             info = pending[full_name]
             current_star = info["star"]
             created_at = info.get("created_at", "")
-
-            if full_name in db_projects:
-                project_age = _project_refresh_age_days(db_projects[full_name])
-                project_ok = (
-                    project_age == time_window
-                    and is_project_same_batch(db_projects[full_name], db)
-                )
-
-                if project_ok:
-                    saved_star = db_projects[full_name].get("star", 0)
-                    growth = current_star - saved_star
-                    checkpoint[full_name] = {"growth": growth, "star": current_star}
-                    checkpoint_dirty = True
-                    db_count += 1
-                    if growth >= growth_threshold:
-                        _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
-                    del pending[full_name]
+            growth = current_star - saved_star
+            if use_checkpoint:
+                checkpoint[full_name] = {"growth": growth, "star": current_star}
+                checkpoint_dirty = True
+            db_count += 1
+            if growth >= growth_threshold:
+                _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
+            del pending[full_name]
 
     if use_realtime_growth:
-        logger.info("实时计算模式：跳过 checkpoint 和 DB 差值，全部走实时增长估算。")
+        logger.info("新项目榜：跳过 DB 差值，全部走实时增长估算。")
 
     if use_checkpoint and checkpoint_dirty:
         _save_checkpoint(checkpoint)

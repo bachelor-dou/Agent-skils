@@ -6,6 +6,7 @@ Agent 复合工具与 scheduled_update 共用本流水线（单一实现）。
 
 import logging
 
+from ..config import GROWTH_CALC_DAYS, STAR_GROWTH_THRESHOLD
 from ..ranking import step2_rank_and_select
 from ..report import step3_generate_report
 from ..infra.db import get_db_age_days
@@ -75,7 +76,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         age = get_db_age_days(db)
         if db.get("valid") and age and age > 0:
             growth_calc_days = age
-    effective_window = growth_calc_days or 7
+    effective_window = growth_calc_days or GROWTH_CALC_DAYS
     days_since = params.get("days_since_created")
 
     # ── 2) growth_calc（昂贵）──
@@ -91,7 +92,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     effective_window = growth.get("growth_calc_days", effective_window)
 
     # ── 3) threshold（廉价过滤）──
-    threshold = params.get("growth_threshold", 800)
+    threshold = params.get("growth_threshold", STAR_GROWTH_THRESHOLD)
     thr_sig = {**growth_sig, "growth_threshold": threshold}
     candidates = cache.get("threshold", thr_sig)
     if candidates is None:
