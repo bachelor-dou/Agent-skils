@@ -14,6 +14,10 @@ logs/
 !github_hot_projects/requirements.txt
 github_hot_projects/.pipeline_checkpoint.json
 github_hot_projects/report
+# hot_projects 运行时产物（数据/报告/断点，不入库）
+hot_projects/Github_DB.json
+hot_projects/.pipeline_checkpoint.json
+hot_projects/report/
 # Environment
 .env
 .venv/
