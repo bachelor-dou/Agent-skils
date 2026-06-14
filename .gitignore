@@ -18,6 +18,9 @@ github_hot_projects/report
 .env
 .venv/
 venv/
+# 本地密钥（绝不提交）
+secrets_local.py
+**/secrets_local.py
 
 # IDE
 .idea/
