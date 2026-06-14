@@ -1,16 +1,6 @@
 (function setupChatFavoritesModule(global) {
-  function escapeHtml(text) {
-    return String(text)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/\"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
-  function buildRepoUrl(repo) {
-    return "https://github.com/" + encodeURIComponent(repo).replace(/%2F/g, "/");
-  }
+  const escapeHtml = global.HotCommon.escapeHtml;
+  const buildRepoUrl = global.HotCommon.buildRepoUrl;
 
   function normalizeFavoriteEntry(item) {
     if (typeof item === "string") {
