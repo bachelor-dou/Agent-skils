@@ -8,18 +8,32 @@ LLM 调用模块
 """
 
 import logging
-import time
 
-import requests
-
-from ..config import (
-    LLM_B_KEY as LLM_API_KEY,
-    LLM_B_KEY as LLM_LITE_API_KEY,
-    LLM_B_URL as LLM_LITE_API_URL,
-    LLM_B_LITE_MODEL as LLM_LITE_MODEL,
-)
+from .. import config as cfg
+from .llm_client import client_from_config
 
 logger = logging.getLogger("discover_hot")
+
+_client = None
+
+
+def _get_client():
+    """惰性构造共享 LLMClient（A/B 双后端）。"""
+    global _client
+    if _client is None:
+        _client = client_from_config()
+    return _client
+
+
+def _llm_configured() -> bool:
+    """A 或 B 任一方案配置了 key 即视为可用。"""
+    return bool(cfg.LLM_A_KEY or cfg.LLM_B_KEY)
+
+
+def _extract_content(data: dict | None) -> str:
+    if not data:
+        return ""
+    return ((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -92,7 +106,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
     Returns:
         LLM 生成的描述文本；失败 3 次后返回空字符串。
     """
-    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY or not LLM_API_KEY:
+    if not _llm_configured():
         logger.warning("LLM 未配置，跳过描述生成。")
         return ""
 
@@ -139,45 +153,19 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
         )
     prompt += "\n".join(info_parts) + "\n"
 
-    headers = {
-        "Authorization": f"Bearer {LLM_LITE_API_KEY}",
-        "Content-Type": "application/json",
-    }
     max_tokens = 2048 if detail_level == "detailed" else 1536
-    payload = {
-        "model": LLM_LITE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": max_tokens,
-        "enable_thinking": False,
-    }
+    data = _get_client().chat(
+        [{"role": "user", "content": prompt}],
+        lite=True,
+        max_tokens=max_tokens,
+        temperature=0.2,
+        enable_thinking=False,
+    )
+    content = _extract_content(data)
+    if content:
+        return content
 
-    for attempt in range(3):
-        try:
-            resp = requests.post(LLM_LITE_API_URL, headers=headers, json=payload, timeout=300)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    choices = data.get("choices", [])
-                    if not choices:
-                        logger.warning(f"LLM 返回无 choices: {repo_name}")
-                        continue
-                    content = choices[0].get("message", {}).get("content", "")
-                except (ValueError, KeyError, IndexError) as e:
-                    logger.warning(f"LLM 响应解析失败: {repo_name}, {e}")
-                    continue
-                if content.strip():
-                    return content.strip()
-            else:
-                logger.warning(
-                    f"LLM 调用失败: {repo_name}, status={resp.status_code}, "
-                    f"attempt={attempt + 1}/3"
-                )
-        except requests.RequestException as e:
-            logger.error(f"LLM 请求异常: {repo_name}, attempt={attempt + 1}/3", exc_info=True)
-        time.sleep(2)
-
-    logger.warning(f"LLM 3 次重试均失败，跳过描述: {repo_name}")
+    logger.warning(f"LLM 描述生成失败（A/B 均失败），跳过描述: {repo_name}")
     return ""
 
 
@@ -192,7 +180,7 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[
     Returns:
         与 repos 等长的浓缩描述列表；LLM 失败时回退截断原文。
     """
-    if not LLM_LITE_API_URL or not LLM_LITE_API_KEY or not LLM_API_KEY:
+    if not _llm_configured():
         return [r.get("description", "")[:max_chars] for r in repos]
 
     if not repos:
@@ -212,52 +200,35 @@ def batch_condense_descriptions(repos: list[dict], max_chars: int = 70) -> list[
         + "\n".join(lines) + "\n"
     )
 
-    headers = {
-        "Authorization": f"Bearer {LLM_LITE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": LLM_LITE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 2048,
-        "enable_thinking": False,
-    }
-
     import re
-    for attempt in range(2):
-        try:
-            resp = requests.post(LLM_LITE_API_URL, headers=headers, json=payload, timeout=120)
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get("choices", [])
-                if choices:
-                    content = choices[0].get("message", {}).get("content", "")
-                    if content.strip():
-                        # 解析 "序号. 描述" 格式
-                        result = [""] * len(repos)
-                        for line in content.strip().splitlines():
-                            m = re.match(r"(\d+)\.\s*(.+)", line.strip())
-                            if m:
-                                idx = int(m.group(1)) - 1
-                                if 0 <= idx < len(repos):
-                                    result[idx] = m.group(2).strip()[:max_chars]
-                        # 检查是否大部分都解析成功
-                        filled = sum(1 for r in result if r)
-                        if filled >= len(repos) * 0.5:
-                            # 补全未解析的
-                            for i, r in enumerate(result):
-                                if not r:
-                                    result[i] = repos[i].get("description", "")[:max_chars]
-                            logger.info(
-                                f"LLM 批量浓缩项目简介完成: 成功解析 {filled}/{len(repos)} 条，"
-                                "未解析项已回退为原描述截断"
-                            )
-                            return result
-            logger.warning(f"LLM 批量浓缩失败: status={resp.status_code}, attempt={attempt+1}")
-        except requests.RequestException as e:
-            logger.error(f"LLM 批量浓缩请求异常: attempt={attempt+1}, {e}")
-        time.sleep(1)
+
+    data = _get_client().chat(
+        [{"role": "user", "content": prompt}],
+        lite=True,
+        max_tokens=2048,
+        temperature=0.1,
+        enable_thinking=False,
+    )
+    content = _extract_content(data)
+    if content:
+        # 解析 "序号. 描述" 格式
+        result = [""] * len(repos)
+        for line in content.splitlines():
+            m = re.match(r"(\d+)\.\s*(.+)", line.strip())
+            if m:
+                idx = int(m.group(1)) - 1
+                if 0 <= idx < len(repos):
+                    result[idx] = m.group(2).strip()[:max_chars]
+        filled = sum(1 for r in result if r)
+        if filled >= len(repos) * 0.5:
+            for i, r in enumerate(result):
+                if not r:
+                    result[i] = repos[i].get("description", "")[:max_chars]
+            logger.info(
+                f"LLM 批量浓缩项目简介完成: 成功解析 {filled}/{len(repos)} 条，"
+                "未解析项已回退为原描述截断"
+            )
+            return result
 
     logger.warning("LLM 批量浓缩失败，回退截断")
     return [r.get("description", "")[:max_chars] for r in repos]
