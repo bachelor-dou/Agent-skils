@@ -54,7 +54,19 @@ def main() -> None:
     print("=" * 60)
     print()
 
-    agent = build_agent()
+    try:
+        agent = build_agent()
+    except SystemExit:
+        print("启动失败：未配置 GitHub Token。请先设置环境变量后重试：")
+        print("  export GITHUB_TOKENS='ghp_xxx,ghp_yyy'")
+        print("  export LLM_A_KEY='你的 Azure key'   # 主力 LLM")
+        print("  export LLM_B_KEY='你的 SiliconFlow key'  # 选填，回退用")
+        print(f"详情见日志: {log_path}")
+        return
+
+    if not (os.environ.get("LLM_A_KEY") or os.environ.get("LLM_B_KEY")):
+        print("提示：未检测到 LLM_A_KEY / LLM_B_KEY，涉及增长描述/对话推理会失败。")
+        print("  export LLM_A_KEY='你的 Azure key'\n")
 
     while True:
         try:
