@@ -72,6 +72,23 @@ def test_threshold_500_includes_more(monkeypatch):
     assert out_lo["candidates_count"] == 1
 
 
+def test_progress_cb_emits_monotonic_to_100(monkeypatch):
+    _patch_rank(monkeypatch)
+    p = FakeProvider()
+    db = {"valid": False, "projects": {}}
+    events = []
+    run_ranking(p, mode="comprehensive",
+                params={"min_star": 1200, "max_star": 45000, "growth_calc_days": 7,
+                        "growth_threshold": 800, "top_n": 10},
+                db=db, cache=RankingCache(), do_report=False,
+                progress_cb=lambda pct, label: events.append((pct, label)))
+    pcts = [pct for pct, _ in events]
+    assert pcts, "应至少回传一次进度"
+    assert pcts == sorted(pcts), "进度百分比应单调不降"
+    assert pcts[-1] == 100, "最终应回传 100%"
+    assert all(0 <= pct <= 100 for pct in pcts)
+
+
 def test_keyword_mode_skips_scan_and_trending(monkeypatch):
     _patch_rank(monkeypatch)
     p = FakeProvider()

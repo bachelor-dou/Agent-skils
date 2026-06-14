@@ -933,6 +933,54 @@ textarea:focus {
   }
 }
 
+.agent-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 210px;
+}
+
+.agent-progress__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.agent-progress__pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.agent-progress__track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(23, 50, 77, 0.12);
+  overflow: hidden;
+}
+
+.agent-progress__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), #b9611d);
+  transition: width 0.4s ease;
+}
+
+.agent-progress[data-state="indeterminate"] .agent-progress__fill {
+  width: 40%;
+  animation: agentProgressIndet 1.2s ease-in-out infinite;
+}
+
+@keyframes agentProgressIndet {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
 @keyframes dots {
   0% { content: ""; }
   25% { content: "."; }

@@ -33,10 +33,10 @@ class GitHubProvider(Provider):
         item = fetch_repo_info(self.token_mgr, parts[0], parts[1], token_idx=0)
         return Repo.from_github(item) if item else None
 
-    def search_by_keywords(self, categories, min_star, days_since_created) -> dict:
+    def search_by_keywords(self, categories, min_star, days_since_created, keywords=None) -> dict:
         return _search_by_keywords(
             self.token_mgr, categories=categories, min_star=min_star,
-            days_since_created=days_since_created,
+            days_since_created=days_since_created, keywords=keywords,
         )
 
     def scan_star_range(self, min_star, max_star, seen_repos, days_since_created) -> dict:

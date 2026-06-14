@@ -1,4 +1,4 @@
-import hot_projects.report as R
+import hot_projects.capabilities.report as R
 
 
 def test_report_fetches_readme_when_no_desc(tmp_path, monkeypatch):

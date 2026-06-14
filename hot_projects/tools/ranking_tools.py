@@ -41,6 +41,7 @@ def make_ranking_handler(mode: str):
         result = run_ranking(
             ctx.provider, mode=mode, params=params, db=ctx.db,
             cache=ctx.state.ranking_cache, do_report=True, force_refresh=False,
+            progress_cb=getattr(ctx, "progress_cb", None),
         )
         # Agent 路径：仅持久化 desc 字段
         save_db_desc_only(ctx.db)

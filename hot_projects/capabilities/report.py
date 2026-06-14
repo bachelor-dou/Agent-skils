@@ -23,15 +23,15 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-from .config import (
+from ..config import (
     MIN_STAR,
     DAYS_SINCE_CREATED,
     REPORT_DIR,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
 )
-from .infra.llm import call_llm_describe
-from .providers.github.api import fetch_repo_readme_excerpt, fetch_repo_recent_commits
+from ..infra.llm import call_llm_describe
+from ..providers.github.api import fetch_repo_readme_excerpt, fetch_repo_recent_commits
 
 logger = logging.getLogger("discover_hot")
 
@@ -266,14 +266,18 @@ def step3_generate_report(
     growth_threshold: int = STAR_GROWTH_THRESHOLD,
     min_star: int = MIN_STAR,
     token_mgr=None,
+    progress_cb=None,
+    topic: str | None = None,
 ) -> str:
     """为 Top N 项目生成 LLM 描述并输出 Markdown 报告。
 
     token_mgr 提供时，对没有现成描述的项目实时抓取 README 摘要/近期提交作为兜底，
     让 LLM 基于真实内容总结（而非凭名字猜测，避免幻觉）；抓不到才退化为"信息不足"。
+    topic：关键词榜的方向简称（10 字以内），仅用于标题点明搜索方向。
     """
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    topic = (topic or "").strip()[:10] or None
     suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
     if mode == "comprehensive" and growth_calc_days != GROWTH_CALC_DAYS:
         suffix = f"{suffix}_{growth_calc_days}d" if suffix else f"_{growth_calc_days}d"
@@ -283,6 +287,8 @@ def step3_generate_report(
         title_prefix = f"{title_prefix}（近{days_since_created}天）"
     if mode == "hot_new" and growth_calc_days != GROWTH_CALC_DAYS:
         suffix = f"{suffix}_win{growth_calc_days}d"
+    if topic:
+        title_prefix = f"{title_prefix}｜方向：{topic}"
     report_path = os.path.join(REPORT_DIR, f"{today}{suffix}.md")
     db_projects = db.get("projects", {})
 
@@ -299,9 +305,12 @@ def step3_generate_report(
             need_llm.append((idx + 1, full_name, html_url, saved))
 
     if need_llm:
-        logger.info(f"报告生成: 需要生成完整描述 {len(need_llm)} 个项目，按顺序调用 LLM...")
-        for idx, full_name, html_url, saved in need_llm:
+        total_llm = len(need_llm)
+        logger.info(f"报告生成: 需要生成完整描述 {total_llm} 个项目，按顺序调用 LLM...")
+        for done, (idx, full_name, html_url, saved) in enumerate(need_llm, 1):
             logger.info(f"[{idx}/{len(top_projects)}] LLM 生成完整描述: {full_name}")
+            if progress_cb is not None:
+                progress_cb((done - 1) / total_llm, f"生成报告 {done}/{total_llm}")
             # 兜底：DB 里没有描述内容时，实时抓 README/提交，给 LLM 真实素材（不抓就只有元数据）
             repo_info = dict(saved)
             parts = full_name.split("/", 1)

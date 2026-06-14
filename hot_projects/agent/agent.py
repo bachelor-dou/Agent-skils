@@ -24,6 +24,7 @@ class ToolContext:
     state: AgentState
     provider: object
     db: dict
+    progress_cb: object = None
 
 
 class HotProjectAgent:
@@ -34,10 +35,12 @@ class HotProjectAgent:
         self.ctx = ToolContext(state=self.state, provider=provider, db=db)
         self.state.conversation.append({"role": "system", "content": SYSTEM_PROMPT})
 
-    def chat(self, user_message: str) -> str:
+    def chat(self, user_message: str, progress_cb=None) -> str:
         if len(user_message) > 2000:
             return "消息过长（超过 2000 字符），请缩短后重试。"
 
+        # 进度回调（仅 WS 路径传入）：榜单复合工具执行期间逐阶段回传百分比
+        self.ctx.progress_cb = progress_cb
         self._maybe_compress()
         self.state.conversation.append({"role": "user", "content": user_message})
 
@@ -106,12 +109,12 @@ class HotProjectAgent:
         summary = self._summarize(old)
         if summary:
             self.state.conversation_summary = summary
-        merged_system = {
-            "role": "system",
-            "content": (system.get("content") or SYSTEM_PROMPT).split("\n\n[对话历史摘要]", 1)[0]
-            + (f"\n\n[对话历史摘要]\n{self.state.conversation_summary}" if self.state.conversation_summary else ""),
-        }
-        self.state.conversation = [merged_system] + recent
+        # 前缀缓存友好：system[0] 保持字节不变（稳定前缀）；摘要作为其后的独立消息。
+        rebuilt = [system if system.get("role") == "system" else {"role": "system", "content": SYSTEM_PROMPT}]
+        if self.state.conversation_summary:
+            rebuilt.append({"role": "user", "content": f"[对话历史摘要]\n{self.state.conversation_summary}"})
+        rebuilt += recent
+        self.state.conversation = rebuilt
         logger.info("[Agent] 对话历史已压缩: %d 旧消息 → 摘要，保留 %d 条。", len(old), len(recent))
 
     def _summarize(self, old_msgs: list[dict]) -> str:

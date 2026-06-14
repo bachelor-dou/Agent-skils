@@ -1,12 +1,10 @@
 """
-评分排序（执行层 · 评分组件）
+评分排序（capabilities · 评分组件）
 ================================
 对候选仓库进行评分排序，支持两种模式。
 
 架构定位：
-  执行层独立组件，由 agent_tools.tool_rank_candidates() 调用。
-
-原 scorer.py，重命名为 ranking.py 以更准确反映职责。
+  capabilities 层底层组件，由 _impl.tool_rank_candidates() 调用。
 
 评分模式：
   1. comprehensive（综合排名）
@@ -25,7 +23,7 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from .config import (
+from ..config import (
     DEFAULT_SCORE_MODE,
     DAYS_SINCE_CREATED,
 )

@@ -36,7 +36,7 @@ export LLM_B_KEY="<siliconflow-key>"
 |------|------|
 | `python -m hot_projects.agent_cli` | 终端对话（REPL，调试最方便） |
 | `python -m hot_projects` | Web/API 服务（默认 8000 端口） |
-| `python -m hot_projects.scheduled_update --top-n 100` | 定时批处理（搜索→增长→排名→报告） |
+| `python -m hot_projects.cron_scheduled_update --top-n 100` | 定时批处理（搜索→增长→排名→报告） |
 
 后台运行 Web 服务：
 
@@ -100,7 +100,7 @@ hot_projects/
 ├── providers/    Provider 接口 + 归一化 Repo 模型；providers/github/ 为 GitHub 实现
 ├── infra/        LLM 双后端客户端 + db + 并发调度框架
 ├── config.py     全局配置（阈值/关键词/路径/安全/LLM）
-└── 入口: agent_cli / scheduled_update / api_server / __main__
+└── 入口: agent_cli / cron_scheduled_update / api_server / __main__
 ```
 
 设计要点：榜单的工具调用顺序内聚在「复合工具」内部，顶层 ReAct 只负责选工具，无白名单/无前置硬校验/无状态机。多平台可通过新增 Provider 扩展。

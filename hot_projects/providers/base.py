@@ -41,8 +41,8 @@ class Provider(ABC):
     """平台数据源接口。编排层只依赖本接口与 Repo。"""
 
     @abstractmethod
-    def search_by_keywords(self, categories, min_star, days_since_created) -> dict:
-        """按关键词类别搜索；返回含 `_raw_repos` 的结果 dict。"""
+    def search_by_keywords(self, categories, min_star, days_since_created, keywords=None) -> dict:
+        """按关键词搜索（预设类别 + LLM 补充的 keywords 取并集）；返回含 `_raw_repos` 的结果 dict。"""
 
     @abstractmethod
     def scan_star_range(self, min_star, max_star, seen_repos, days_since_created) -> dict:

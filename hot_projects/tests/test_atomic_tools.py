@@ -20,6 +20,7 @@ class _Prov:
         return {"trending_range": trending_range, "repos": []}
 
     def search_similar(self, name, limit=5):
+        self.last_query = name
         return self._similar
 
 
@@ -46,6 +47,34 @@ def test_miss_returns_candidates():
     out = repo_growth_handler(ctx, {"repo": "vllm"})
     assert out.get("disambiguation") is True
     assert "x/vllm" in [c["full_name"] for c in out["candidates"]]
+
+
+def test_bare_single_candidate_auto_resolves():
+    ctx = _Ctx(_Prov(info=None, similar=[Repo("vllm-project/vllm", 5000)]))
+    out = repo_growth_handler(ctx, {"repo": "vllm"})
+    assert out["growth"] == 123
+    assert ctx.state.active_repo == "vllm-project/vllm"
+
+
+def test_bare_exact_name_match_auto_resolves():
+    ctx = _Ctx(_Prov(info=None, similar=[Repo("vllm-project/vllm", 5000), Repo("foo/other", 10)]))
+    out = repo_growth_handler(ctx, {"repo": "vllm"})
+    assert out["growth"] == 123
+    assert ctx.state.active_repo == "vllm-project/vllm"
+
+
+def test_ownerrepo_typo_searches_by_repo_part():
+    prov = _Prov(info=None, similar=[Repo("vllm-project/vllm", 5000)])
+    ctx = _Ctx(prov)
+    out = repo_growth_handler(ctx, {"repo": "acme/vllm"})
+    assert prov.last_query == "vllm"
+    assert out["growth"] == 123
+
+
+def test_description_ambiguous_returns_candidates():
+    ctx = _Ctx(_Prov(info=None, similar=[Repo("a/vectordb", 30), Repo("b/qdrant", 20)]))
+    out = describe_project_handler(ctx, {"repo": "rust 向量数据库"})
+    assert out.get("disambiguation") is True
 
 
 def test_miss_no_similar_returns_error():

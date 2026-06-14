@@ -30,6 +30,8 @@ import logging.handlers
 import os
 import glob
 import time
+import json
+import queue as _queue
 import asyncio
 import threading
 import collections
@@ -803,7 +805,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
     await websocket.accept()
     logger.info("WebSocket 已连接: %s", session_id)
 
-    # 推送断开期间缓存的待发回复
+    # 推送断开期间缓存的待发回复（纯文本：前端按非信封消息当最终回复处理）
     with _pending_replies_lock:
         pending = _pending_replies.pop(session_id, [])
     for reply in pending:
@@ -811,12 +813,11 @@ async def ws_chat(websocket: WebSocket, session_id: str):
             await websocket.send_text(reply)
             logger.info("WebSocket 推送待发回复: session=%s, reply_len=%s", session_id, len(reply))
         except Exception:
-            # 推送失败时放回缓冲
             with _pending_replies_lock:
                 _pending_replies.setdefault(session_id, []).append(reply)
             break
 
-    def _chat_with_lock(message: str) -> str:
+    def _chat_with_lock(message: str, progress_cb) -> str:
         agent = get_agent(session_id)
         logger.info("WebSocket 尝试获取执行锁: session=%s", session_id)
         acquired = _tool_execution_lock.acquire(timeout=90)
@@ -825,7 +826,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
             return "系统繁忙，请稍后重试。"
         logger.info("WebSocket 已获取执行锁: session=%s", session_id)
         try:
-            return agent.chat(message)
+            return agent.chat(message, progress_cb=progress_cb)
         finally:
             _tool_execution_lock.release()
             logger.info("WebSocket 已释放执行锁: session=%s", session_id)
@@ -834,24 +835,91 @@ async def ws_chat(websocket: WebSocket, session_id: str):
         while True:
             data = await websocket.receive_text()
             logger.info("WebSocket 收到消息: session=%s, message=%s", session_id, data[:120])
-            try:
-                reply = await asyncio.to_thread(_chat_with_lock, data)
-            except SystemExit:
-                reply = "未配置任何 GitHub Token，当前只能预览页面与报告渲染效果。请先设置 GITHUB_TOKENS 环境变量后再发起 Agent 对话。"
-            except Exception as e:
-                logger.error("WebSocket Agent 执行异常: session=%s, error=%s", session_id, e)
-                reply = f"处理消息时出现错误：{e}"
-            logger.info("WebSocket 回复完成: session=%s, reply_len=%s", session_id, len(reply or ""))
-            try:
-                await websocket.send_text(reply)
-            except Exception:
-                # WebSocket 已断开，缓存回复供重连后推送
-                logger.info("WebSocket 发送失败，缓存待发回复: session=%s", session_id)
-                with _pending_replies_lock:
-                    _pending_replies.setdefault(session_id, []).append(reply)
-                break
+            reply = await _run_chat_with_progress(websocket, session_id, data, _chat_with_lock)
+            if reply is None:
+                break  # WS 断开且最终回复已缓存
     except WebSocketDisconnect:
         logger.info(f"WebSocket 断开: {session_id}")
+
+
+# 执行期间无新进度时的心跳间隔（秒），防止反代/网关掐断空闲连接
+_WS_HEARTBEAT_SECONDS = 15
+# 进度队列轮询间隔（秒）
+_WS_POLL_SECONDS = 0.2
+
+
+async def _run_chat_with_progress(websocket, session_id, message, chat_fn):
+    """在线程里跑 agent.chat，同时把进度/心跳实时推给前端，最后发最终回复。
+
+    返回最终回复文本；若 WS 期间断开且回复已缓存到待发缓冲，返回 None。
+    """
+    progress_queue: _queue.Queue = _queue.Queue()
+    _DONE = object()
+    holder: dict[str, str] = {}
+
+    def progress_cb(percent: int, label: str) -> None:
+        progress_queue.put({"type": "progress", "percent": percent, "label": label})
+
+    def worker() -> None:
+        try:
+            holder["reply"] = chat_fn(message, progress_cb)
+        except SystemExit:
+            holder["reply"] = ("未配置任何 GitHub Token，当前只能预览页面与报告渲染效果。"
+                               "请先设置 GITHUB_TOKENS 环境变量后再发起 Agent 对话。")
+        except Exception as e:  # noqa: BLE001
+            logger.error("WebSocket Agent 执行异常: session=%s, error=%s", session_id, e)
+            holder["reply"] = f"处理消息时出现错误：{e}"
+        finally:
+            progress_queue.put(_DONE)
+
+    worker_task = asyncio.create_task(asyncio.to_thread(worker))
+    ws_alive = True
+    last_send = time.time()
+
+    while True:
+        drained_done = False
+        try:
+            while True:
+                item = progress_queue.get_nowait()
+                if item is _DONE:
+                    drained_done = True
+                    break
+                if ws_alive:
+                    try:
+                        await websocket.send_text(json.dumps(item, ensure_ascii=False))
+                        last_send = time.time()
+                    except Exception:
+                        ws_alive = False  # 前端断开，停止推送，但等 worker 跑完
+        except _queue.Empty:
+            pass
+
+        if drained_done:
+            break
+
+        if ws_alive and time.time() - last_send >= _WS_HEARTBEAT_SECONDS:
+            try:
+                await websocket.send_text(json.dumps({"type": "heartbeat"}))
+                last_send = time.time()
+            except Exception:
+                ws_alive = False
+        await asyncio.sleep(_WS_POLL_SECONDS)
+
+    await worker_task
+    reply = holder.get("reply", "")
+    logger.info("WebSocket 回复完成: session=%s, reply_len=%s", session_id, len(reply or ""))
+
+    if ws_alive:
+        try:
+            await websocket.send_text(json.dumps({"type": "reply", "reply": reply}, ensure_ascii=False))
+            return reply
+        except Exception:
+            ws_alive = False
+
+    # WS 已断开：缓存纯文本回复，供重连后推送
+    logger.info("WebSocket 发送失败，缓存待发回复: session=%s", session_id)
+    with _pending_replies_lock:
+        _pending_replies.setdefault(session_id, []).append(reply)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════

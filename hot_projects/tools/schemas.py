@@ -375,6 +375,8 @@ TOOL_PARAM_SCHEMA.update({
     },
     "keyword_ranking": {
         **_RANK_COMMON_PARAMS,
+        "keywords": {"type": "list_str", "default": None},
+        "topic": {"type": "str", "default": None},
         "top_n": {"type": "int", "min": 1, "max": 200, "default": HOT_PROJECT_COUNT},
     },
     "repo_growth": {
@@ -428,8 +430,18 @@ AGENT_TOOL_SCHEMAS = [
             "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_NEW_PROJECT_COUNT}"},
         }),
     _fn("keyword_ranking",
-        "【关键词热榜·昂贵】只按关键词类别搜索→增长→排序（不做星段扫描/Trending）。执行前先回显参数等用户确认『开始』。",
+        "【关键词热榜·昂贵】按关键词搜索→增长→排序（不做星段扫描/Trending）。"
+        "根据用户自然语言：从系统提示里的「关键词类别参考」挑出相关关键词，并补充未覆盖到的英文搜索词，一起传入 keywords；"
+        "也可用 categories 选整组。执行前先回显参数等用户确认『开始』。",
         {
+            "keywords": {
+                "type": "array", "items": {"type": "string"},
+                "description": "要搜索的具体英文关键词列表（从类别参考里挑 + 你的补充），如 [\"vector database\",\"voice assistant llm\"]。",
+            },
+            "topic": {
+                "type": "string",
+                "description": "本次搜索方向的简短中文概括，10 个字以内，用于报告标题点明方向，如『向量数据库与RAG』『AI语音助手』。",
+            },
             "categories": _categories_prop,
             "min_star": _min_star_prop,
             "growth_calc_days": _growth_calc_days_prop,
@@ -439,13 +451,13 @@ AGENT_TOOL_SCHEMAS = [
     _fn("repo_growth",
         "【单仓库增长】查单个仓库近期 star 增长。若精确仓库查不到，会返回相似候选供用户选择。",
         {
-            "repo": {"type": "string", "description": "owner/repo，如 vllm-project/vllm；只给名字或拼错也可，会模糊匹配。"},
+            "repo": {"type": "string", "description": "owner/repo（如 vllm-project/vllm）；也可只给项目名、拼错、或一句描述，会自动检索匹配，有歧义时返回候选。"},
             "growth_calc_days": {"type": "integer", "description": f"增长统计窗口（天），默认{GROWTH_CALC_DAYS}"},
         },
         required=["repo"]),
     _fn("describe_project",
         "【项目介绍】生成单个仓库的中文功能介绍。精确查不到会返回相似候选供选择。",
-        {"repo": {"type": "string", "description": "owner/repo；只给名字或拼错也可，会模糊匹配。"}},
+        {"repo": {"type": "string", "description": "owner/repo；也可只给项目名、拼错、或一句描述，会自动检索匹配，有歧义时返回候选。"}},
         required=["repo"]),
     _fn("get_db_info",
         "【数据库查询】查本地 DB 概览或指定仓库缓存信息（不联网）。",

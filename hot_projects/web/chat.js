@@ -612,6 +612,51 @@
       return addMessage("agent", "正在处理", { asHtml: false, typing: true });
     }
 
+    // 带进度条的"正在处理"气泡：默认流动动画（indeterminate）；收到真实百分比后切为确定态。
+    // 返回 { item, onProgress }
+    function addPendingProgress() {
+      const item = addMessage("agent", "", { asHtml: true, typing: true });
+      const body = item.lastElementChild;
+      body.className = "md-body";
+      body.innerHTML =
+        '<div class="agent-progress" data-state="indeterminate">' +
+          '<div class="agent-progress__head">' +
+            '<span class="agent-progress__label">正在处理…</span>' +
+            '<span class="agent-progress__pct"></span>' +
+          '</div>' +
+          '<div class="agent-progress__track"><div class="agent-progress__fill"></div></div>' +
+        '</div>';
+      const wrap = body.querySelector(".agent-progress");
+      const fill = body.querySelector(".agent-progress__fill");
+      const labelEl = body.querySelector(".agent-progress__label");
+      const pctEl = body.querySelector(".agent-progress__pct");
+
+      function onProgress(percent, label) {
+        if (typeof percent === "number" && isFinite(percent)) {
+          const p = Math.max(0, Math.min(100, Math.round(percent)));
+          wrap.setAttribute("data-state", "determinate");
+          fill.style.width = p + "%";
+          pctEl.textContent = p + "%";
+        }
+        if (label) {
+          labelEl.textContent = label;
+        }
+      }
+
+      return { item, onProgress };
+    }
+
+    // 渲染一条非应答（重连推送 / 服务端主动消息）的 Agent 回复
+    function renderUnsolicited(displayText) {
+      addMessage("agent", "", { asHtml: true, typing: false });
+      const msg = messagesEl.lastElementChild;
+      const body = msg.lastElementChild;
+      body.className = "md-body";
+      body.innerHTML = enhanceReply(displayText);
+      chatHistory.push({ role: "agent", content: body.innerHTML, isHtml: true });
+      saveChatHistory();
+    }
+
     function updateTypingIndicator(el, finalText) {
       const body = el.lastElementChild;
       body.className = "md-body";
@@ -637,11 +682,11 @@
       autoResize();
       setSending(true);
 
-      const pending = addMessage("agent", "正在处理", { asHtml: false });
-      pending.querySelector("div:last-child").classList.add("typing");
+      const pendingObj = addPendingProgress();
+      const pending = pendingObj.item;
 
       try {
-        const reply = socketReady ? await sendViaWebSocket(message) : await sendViaHttp(message);
+        const reply = socketReady ? await sendViaWebSocket(message, pendingObj.onProgress) : await sendViaHttp(message);
         updateTypingIndicator(pending, reply);
         await loadReports();
       } catch (error) {
@@ -746,24 +791,46 @@
         updateConnectionStatus("已连接", "connected");
       });
 
-      // 处理服务端待发缓冲区中的回复（重连后自动推送）
+      // 消息分发：progress/heartbeat/reply 信封 + 兼容纯文本回复（重连推送）
       socket.addEventListener("message", (event) => {
         if (currentSessionId !== sessionId) return;
         markSessionActive(currentSessionId);
-        const normalizedText = normalizeAgentReplyText(event.data);
-        if (resolveActiveRequest(normalizedText)) {
-          return;
+
+        let envelope = null;
+        try {
+          envelope = JSON.parse(event.data);
+        } catch (_error) {
+          envelope = null;
         }
 
-        const displayText = normalizedText;
+        if (envelope && typeof envelope === "object" && typeof envelope.type === "string") {
+          if (envelope.type === "heartbeat") {
+            return; // 保活帧，忽略
+          }
+          if (envelope.type === "progress") {
+            if (activeRequest && typeof activeRequest.onProgress === "function") {
+              activeRequest.onProgress(envelope.percent, envelope.label);
+            }
+            return;
+          }
+          if (envelope.type === "reply") {
+            const replyText = normalizeAgentReplyText(envelope.reply || "");
+            if (resolveActiveRequest(replyText)) return;
+            renderUnsolicited(replyText);
+            return;
+          }
+          if (envelope.type === "error") {
+            const errMessage = envelope.error || "未知错误";
+            if (rejectActiveRequest(new Error(errMessage))) return;
+            renderUnsolicited("请求失败：" + errMessage);
+            return;
+          }
+        }
 
-        addMessage("agent", "", { asHtml: true, typing: false });
-        const msg = messagesEl.lastElementChild;
-        const body = msg.lastElementChild;
-        body.className = "md-body";
-        body.innerHTML = enhanceReply(displayText);
-        chatHistory.push({ role: "agent", content: body.innerHTML, isHtml: true });
-        saveChatHistory();
+        // 非信封消息（重连后推送的纯文本回复）：当作最终回复
+        const normalizedText = normalizeAgentReplyText(event.data);
+        if (resolveActiveRequest(normalizedText)) return;
+        renderUnsolicited(normalizedText);
       });
 
       socket.addEventListener("close", (event) => {
@@ -790,7 +857,7 @@
       });
     }
 
-    function sendViaWebSocket(message) {
+    function sendViaWebSocket(message, onProgress) {
       return new Promise((resolve, reject) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
           sendViaHttp(message).then(resolve).catch(reject);
@@ -803,7 +870,7 @@
         }
 
         const requestSocket = socket;
-        activeRequest = { resolve, reject, socket: requestSocket };
+        activeRequest = { resolve, reject, socket: requestSocket, onProgress };
         requestSocket._hasActiveRequest = true;
 
         try {

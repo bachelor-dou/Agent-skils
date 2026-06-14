@@ -4,8 +4,8 @@ Agent Tool 定义（执行层 · 工具中枢）
 9 个 Tool 函数（TOOL_SCHEMAS 已集中到 parsing/schema.py）。
 
 架构定位：
-  执行层核心，连接 Agent 层与各独立执行组件（ranking/report/growth/trending/tasks）。
-    agent.py / scheduled_update.py → 【agent_tools.py】→ ranking.py / report.py / growth_estimator.py / ...
+  capabilities 层核心实现，连接上层（pipeline / tools / cron_scheduled_update）与各执行组件（scoring/report/growth/trending）。
+    pipeline / tools → 【capabilities._impl】→ scoring.py / report.py / growth / trending / ...
 
 Tool 列表：
   1. search_by_keywords    — 按关键词类别搜索热门仓库
@@ -41,6 +41,7 @@ from ..config import (
     SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
+    MAX_DYNAMIC_SEARCH_KEYWORDS,
 )
 from ..infra.db import update_db_project
 from ..providers.github.token_pool import AsyncTokenPool, GitHubTokenPool
@@ -59,8 +60,8 @@ from ..providers.github.growth_estimator import (
 )
 from ..infra.llm import batch_condense_descriptions, call_llm_describe
 from ..tools.arg_validator import validate_tool_args
-from ..report import step3_generate_report
-from ..ranking import step2_rank_and_select
+from .report import step3_generate_report
+from .scoring import step2_rank_and_select
 from ..infra.concurrency import (
     AsyncTaskDispatcher,
     KeywordSearchTask,
@@ -233,21 +234,25 @@ def tool_search_by_keywords(
     categories: list[str] | None = None,
     min_star: int = MIN_STAR,
     days_since_created: int | None = None,
+    keywords: list[str] | None = None,
 ) -> dict:
     """
-    Tool 1: 按关键词类别搜索 GitHub 热门仓库（并行）。
+    Tool 1: 按关键词搜索 GitHub 热门仓库（并行）。
 
     使用 AsyncTaskDispatcher + KeywordSearchTask 并行搜索。
 
+    搜索词来源（取并集、去重）：
+      - categories: 预设类别（如 ["AI-Agent","AI-RAG"]）对应的整组关键词；
+      - keywords:   LLM 根据用户自然语言挑选/补充的具体搜索词（数量受
+                    MAX_DYNAMIC_SEARCH_KEYWORDS 限制，控制 Search 配额）；
+      - 两者都未提供时，默认搜索全部预设类别。
+
     Args:
         token_mgr:        GitHubTokenPool 实例
-        categories:       搜索类别列表（如 ["AI-Agent", "AI-RAG"]），None 则搜索全部
+        categories:       预设类别列表；None 表示不按类别选
         min_star:         项目最低 star 门槛
-        days_since_created: 新项目判定窗口（天），指定后在搜索查询中加入 created:>=date 过滤
-
-    Returns:
-        {"repos": [{"full_name": ..., "star": ..., "description": ...}, ...],
-         "total": int, "categories_searched": list}
+        days_since_created: 新项目判定窗口（天），指定后查询加 created:>=date 过滤
+        keywords:         显式搜索词列表（LLM 补充）
     """
     from datetime import timedelta
 
@@ -263,13 +268,40 @@ def tool_search_by_keywords(
     min_star = validated.get("min_star", MIN_STAR)
     days_since_created = validated.get("days_since_created")
 
+    # 显式关键词：去空格、去重（大小写不敏感）、限量
+    explicit: list[str] = []
+    seen_terms: set[str] = set()
+    for kw in (keywords or []):
+        if not isinstance(kw, str):
+            continue
+        term = kw.strip()
+        key = term.lower()
+        if term and key not in seen_terms:
+            seen_terms.add(key)
+            explicit.append(term)
+    explicit = explicit[:MAX_DYNAMIC_SEARCH_KEYWORDS]
+
+    # 预设来源：选了类别用对应组；否则——有显式词则只搜显式词，无则搜全部类别
     if categories:
-        keywords_dict = {k: v for k, v in SEARCH_KEYWORDS.items() if k in categories}
-        if not keywords_dict:
+        base_dict = {k: v for k, v in SEARCH_KEYWORDS.items() if k in categories}
+        if not base_dict and not explicit:
             return {"repos": [], "total": 0, "categories_searched": [],
                     "error": f"未找到匹配类别，可用类别: {list(SEARCH_KEYWORDS.keys())}"}
+    elif explicit:
+        base_dict = {}
     else:
-        keywords_dict = SEARCH_KEYWORDS
+        base_dict = SEARCH_KEYWORDS
+
+    # 扁平化为 (keyword, category)，跨组去重
+    search_terms: list[tuple[str, str]] = []
+    for cat, kws in base_dict.items():
+        for kw in kws:
+            key = kw.strip().lower()
+            if key and key not in seen_terms:
+                seen_terms.add(key)
+                search_terms.append((kw, cat))
+    for term in explicit:
+        search_terms.append((term, "custom"))
 
     # 新项目模式：计算创建时间截止日期
     created_after = ""
@@ -278,7 +310,7 @@ def tool_search_by_keywords(
         created_after = cutoff.strftime("%Y-%m-%d")
 
     raw_repos: dict[str, dict] = {}
-    total_keywords = sum(len(kws) for kws in keywords_dict.values())
+    total_keywords = len(search_terms)
 
     # ── 并行搜索：提交 KeywordSearchTask 到异步调度器 ──
     async def _run_keyword_tasks() -> None:
@@ -291,22 +323,21 @@ def tool_search_by_keywords(
             try:
                 keyword_idx = 0
                 keyword_tasks: list[KeywordSearchTask] = []
-                for category, keywords in keywords_dict.items():
-                    for keyword in keywords:
-                        keyword_idx += 1
-                        task = KeywordSearchTask(
-                            _token_mgr=token_mgr,
-                            keyword=keyword,
-                            category=category,
-                            keyword_idx=keyword_idx,
-                            total_keywords=total_keywords,
-                            created_after=created_after,
-                            min_star=min_star,
-                            _async_http_client=async_client,
-                            _raw_repos=raw_repos,
-                        )
-                        keyword_tasks.append(task)
-                        await dispatcher.submit(task)
+                for keyword, category in search_terms:
+                    keyword_idx += 1
+                    task = KeywordSearchTask(
+                        _token_mgr=token_mgr,
+                        keyword=keyword,
+                        category=category,
+                        keyword_idx=keyword_idx,
+                        total_keywords=total_keywords,
+                        created_after=created_after,
+                        min_star=min_star,
+                        _async_http_client=async_client,
+                        _raw_repos=raw_repos,
+                    )
+                    keyword_tasks.append(task)
+                    await dispatcher.submit(task)
                 await dispatcher.wait_all_done()
                 await dispatcher.drain_results()
 
@@ -381,7 +412,8 @@ def tool_search_by_keywords(
     return {
         "repos": display_repos,
         "total": len(repos),
-        "categories_searched": list(keywords_dict.keys()),
+        "categories_searched": sorted({cat for _, cat in search_terms}),
+        "keywords_searched": total_keywords,
         "_raw_repos": repos,
     }
 

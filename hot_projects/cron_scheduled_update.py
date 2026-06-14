@@ -5,25 +5,20 @@
 无需 LLM 对话，直接执行内置 DiscoveryPipeline 编排流程。
 
 用法：
-    python scheduled_update.py --top-n 100 --growth-calc-days 7
+    python -m hot_projects.cron_scheduled_update --top-n 100 --growth-calc-days 7
 """
 # ============================================================
 # 部署为定时任务（cron）
 # ============================================================
 #
 # 1. 手动运行测试：
-#    cd /root/code/Agent-skils/github_hot_projects
-#    python scheduled_update.py --top-n 100
+#    cd /root/code/Agent-skils
+#    python -m hot_projects.cron_scheduled_update --top-n 100
 #
 # 2. 编辑 crontab（每周日 00:36 自动执行）：
 #    crontab -e
 #    添加以下行：
-#    36 0 * * 7 source ~/.bashrc && cd /root/code/Agent-skils/github_hot_projects && /usr/bin/python3 scheduled_update.py --top-n 100 --growth-calc-days 7
-#
-# 3. 或使用 systemd timer：
-#    sudo cp scheduled_update.service /etc/systemd/system/
-#    sudo cp scheduled_update.timer   /etc/systemd/system/
-#    sudo systemctl enable --now scheduled_update.timer
+#    36 0 * * 7 . /root/.hot_projects.env && cd /root/code/Agent-skils && /usr/bin/python3 -m hot_projects.cron_scheduled_update --top-n 100 --growth-calc-days 7
 #
 # 日志：logs/scheduled-YYYY-MM-DD.log
 # ============================================================
