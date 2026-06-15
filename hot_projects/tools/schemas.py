@@ -440,7 +440,7 @@ AGENT_TOOL_SCHEMAS = [
             },
             "topic": {
                 "type": "string",
-                "description": "本次搜索方向的简短中文概括，10 个字以内，用于报告标题点明方向，如『向量数据库与RAG』『AI语音助手』。",
+                "description": "本次搜索方向的简短中文概括，6 个字以内，用于报告标题点明方向，如『向量数据库』『AI语音助手』。",
             },
             "categories": _categories_prop,
             "min_star": _min_star_prop,

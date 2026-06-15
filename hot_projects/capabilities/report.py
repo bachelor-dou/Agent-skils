@@ -273,11 +273,11 @@ def step3_generate_report(
 
     token_mgr 提供时，对没有现成描述的项目实时抓取 README 摘要/近期提交作为兜底，
     让 LLM 基于真实内容总结（而非凭名字猜测，避免幻觉）；抓不到才退化为"信息不足"。
-    topic：关键词榜的方向简称（10 字以内），仅用于标题点明搜索方向。
+    topic：关键词榜的方向简称（6 字以内），仅用于标题点明搜索方向。
     """
     os.makedirs(REPORT_DIR, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    topic = (topic or "").strip()[:10] or None
+    topic = (topic or "").strip()[:6] or None
     suffix, title_prefix = _MODE_META.get(mode, ("", "GitHub 热门项目"))
     if mode == "comprehensive" and growth_calc_days != GROWTH_CALC_DAYS:
         suffix = f"{suffix}_{growth_calc_days}d" if suffix else f"_{growth_calc_days}d"
