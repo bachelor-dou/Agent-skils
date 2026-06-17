@@ -87,7 +87,12 @@ vllm 怎么样                       → 名字不全/拼错会返回相似候�
 |------|------|
 | 报告 | `hot_projects/report/YYYY-MM-DD*.md` |
 | 数据库 | `hot_projects/Github_DB.json`（运行时生成，已 gitignore） |
-| 日志 | `hot_projects/logs/agent-YYYY-MM-DD.log` / `server.log` |
+| 定时任务主日志 | `hot_projects/logs/cron-YYYY-MM-DD.log` |
+| 定时任务调试日志 | `hot_projects/logs/debug/cron-YYYY-MM-DD.debug.log` |
+| CLI / Web 日志 | `hot_projects/logs/cli-YYYY-MM-DD.log` / `web.log` |
+
+定时任务主日志默认保留阶段摘要、候选入选、每个项目最终增长结果、报告和 DB 更新统计；
+逐关键词搜索、星段细分、逐仓库 stargazers 查询开始等细节写入同日期 debug 日志。
 
 ## 7. 项目结构（编排层重构后）
 

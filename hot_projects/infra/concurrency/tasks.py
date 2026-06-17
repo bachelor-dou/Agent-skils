@@ -77,6 +77,12 @@ async def _record_token_issue_async(token_mgr: Any, token_idx: int | None, exc: 
         return
 
     if isinstance(exc, TokenInvalidError):
+        # 401 优先走 strikes/冷却（与增长阶段一致），避免瞬时 401 永久踢除有效 token；
+        # 仅当池不支持该接口时回退到永久失效。
+        marker = getattr(token_mgr, "mark_auth_failed", None)
+        if callable(marker):
+            await marker(token_idx, str(exc))
+            return
         marker = getattr(token_mgr, "mark_invalid", None)
         if callable(marker):
             await marker(token_idx, str(exc))
@@ -113,7 +119,7 @@ class KeywordSearchTask(Task):
         self.failed_pages = []
         retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
         page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
-        logger.info(
+        logger.debug(
             f"[{self.keyword_idx}/{self.total_keywords}] 搜索: "
             f"'{self.keyword}' (类别: {self.category}{retry_suffix}{page_suffix})"
         )
@@ -176,7 +182,7 @@ class KeywordSearchTask(Task):
         token_suffix = f", token={token_idx}" if token_idx is not None else ""
         retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
         page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
-        logger.info(
+        logger.debug(
             f"[{self.keyword_idx}/{self.total_keywords}] 搜索: "
             f"'{self.keyword}' (类别: {self.category}{token_suffix}{retry_suffix}{page_suffix})"
         )
@@ -285,7 +291,7 @@ class ScanSegmentTask(Task):
             query = f"{query} created:>={self.created_after}"
         retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
         page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
-        logger.info(
+        logger.debug(
             f"  子区间 {self.seg_idx}/{self.total_segments}: "
             f"{query}{retry_suffix}{page_suffix}"
         )
@@ -353,7 +359,7 @@ class ScanSegmentTask(Task):
         token_suffix = f" (token={token_idx})" if token_idx is not None else ""
         retry_suffix = f", retry={self.retry_round}" if self.retry_round else ""
         page_suffix = f", pages={self.page_numbers}" if self.page_numbers else ""
-        logger.info(
+        logger.debug(
             f"  子区间 {self.seg_idx}/{self.total_segments}: "
             f"{query}{token_suffix}{retry_suffix}{page_suffix}"
         )
@@ -485,7 +491,7 @@ class CalcGrowthTask(Task):
         if len(parts) != 2:
             return self.full_name, -1, self.current_star
         owner, repo_name = parts
-        logger.info(
+        logger.debug(
             f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
         )
         growth_calc_days = GROWTH_CALC_DAYS
@@ -505,7 +511,7 @@ class CalcGrowthTask(Task):
         if len(parts) != 2:
             return self.full_name, -1, self.current_star
         owner, repo_name = parts
-        logger.info(
+        logger.debug(
             f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
         )
         growth_calc_days = GROWTH_CALC_DAYS
@@ -546,6 +552,7 @@ class CalcGrowthTask(Task):
         candidate_map = self._ctx["candidate_map"]
         pending_created_at = self._ctx["pending_created_at"]
         growth_threshold = self._ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
+        log_threshold = self._ctx.get("candidate_log_threshold", growth_threshold)
         use_checkpoint = self._ctx.get("use_checkpoint", True)
         can_write_db = self._ctx.get("can_write_db", False)
 
@@ -575,7 +582,8 @@ class CalcGrowthTask(Task):
             if can_write_db:
                 update_db_project(db_projects, self.full_name, current_star, self.repo_item)
             if growth >= growth_threshold:
-                _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at)
+                _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at,
+                                  log_threshold=log_threshold)
 
         if use_checkpoint and self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
             _save_checkpoint(checkpoint)

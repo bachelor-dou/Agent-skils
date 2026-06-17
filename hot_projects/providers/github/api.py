@@ -31,9 +31,15 @@ from ...config import (
     SEARCH_REQUEST_INTERVAL,
 )
 from .token_pool import GitHubTokenPool
-from ...infra.exceptions import RateLimitError, TokenInvalidError
+from ...infra.exceptions import RateLimitError, RetryableError, TokenInvalidError
 
 logger = logging.getLogger("discover_hot")
+
+# stargazers 瞬时故障（网络异常 / 5xx）处理：先原地快速重试，仍失败则抛 RetryableError
+# 交由调度器释放 token 并重排队，避免把瞬时故障误当“大仓库”降级到昂贵的 GraphQL 采样，
+# 也避免在原地退避 sleep 期间长期占用 token。422（REST 分页上限=超大仓库）仍走采样。
+STARGAZER_TRANSIENT_FAST_RETRIES = 2
+STARGAZER_REQUEUE_BACKOFF_SECONDS = 2.0
 
 # ──────────────────────────────────────────────────────────────
 # Star 范围自动分段 — 常量
@@ -386,7 +392,13 @@ async def async_get_stargazers_page(
                     borrowed_token = True
 
                 headers = token_mgr.get_star_headers(attempt_token_idx)
+                _diag_req_t0 = time.time()  # [DIAG-P0] 仅诊断
                 resp = await async_client.get(url, headers=headers, params=params)
+                logger.debug(
+                    "[DIAG-REQ] stargazers %s/%s page=%s token=%s attempt=%s elapsed=%.2fs status=%s",
+                    owner, repo, page, attempt_token_idx, attempt + 1,
+                    time.time() - _diag_req_t0, resp.status_code,
+                )
                 _check_response_async(resp, attempt_token_idx)
                 if resp.status_code == 200:
                     try:
@@ -400,9 +412,22 @@ async def async_get_stargazers_page(
                             await token_mgr.release(attempt_token_idx)
                         return None
                 if resp.status_code == 422:
+                    # 422 = REST stargazers 翻页超过上限（约 4 万 star 的超大仓库），
+                    # 这是真正需要 GraphQL 采样的信号，返回 None 让上层降级采样。
                     if borrowed_token:
                         await token_mgr.release(attempt_token_idx)
                     return None
+                if resp.status_code >= 500:
+                    # 5xx 视为瞬时服务端故障：快速重试，耗尽后重排队（不原地占 token 退避）。
+                    if borrowed_token:
+                        await token_mgr.release(attempt_token_idx)
+                    if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                        await asyncio.sleep(2 * 2 ** attempt)
+                        continue
+                    raise RetryableError(
+                        time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                        f"stargazers {owner}/{repo} page={page} server {resp.status_code}",
+                    )
                 logger.debug(
                     "异步 stargazers 请求失败: %s/%s page=%s, status=%s",
                     owner,
@@ -435,8 +460,19 @@ async def async_get_stargazers_page(
                         page,
                         _format_request_error(e),
                     )
-                    await asyncio.sleep(2 * 2 ** attempt)
-                    continue
+                    logger.debug(
+                        "[DIAG-REQ] stargazers %s/%s page=%s token=%s attempt=%s elapsed=%.2fs status=EXC:%s",
+                        owner, repo, page, attempt_token_idx, attempt + 1,
+                        time.time() - _diag_req_t0, type(e).__name__,
+                    )
+                    # 网络异常：快速重试，耗尽后重排队，而非原地长时间退避占着 token。
+                    if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                        await asyncio.sleep(2 * 2 ** attempt)
+                        continue
+                    raise RetryableError(
+                        time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                        f"stargazers {owner}/{repo} page={page} network {type(e).__name__}",
+                    )
                 if borrowed_token:
                     await token_mgr.release(attempt_token_idx)
                 raise
@@ -776,11 +812,11 @@ def auto_split_star_range(
     time.sleep(SEARCH_REQUEST_INTERVAL)
 
     if total <= max_results:
-        logger.info(f"  区间 stars:{low}..{high} → total_count={total}，无需细分。")
+        logger.debug(f"  区间 stars:{low}..{high} → total_count={total}，无需细分。")
         return [(low, high)]
 
     mid = (low + high) // 2
-    logger.info(
+    logger.debug(
         f"  区间 stars:{low}..{high} → total_count={total}，"
         f"细分 → [{low}..{mid}] + [{mid + 1}..{high}]"
     )
@@ -964,10 +1000,16 @@ async def async_graphql_stargazers_batch(
                     borrowed_token = True
 
                 headers = token_mgr.get_graphql_headers(attempt_token_idx)
+                _diag_req_t0 = time.time()  # [DIAG-P0] 仅诊断
                 resp = await async_client.post(
                     "https://api.github.com/graphql",
                     headers=headers,
                     json={"query": query_str, "variables": variables},
+                )
+                logger.debug(
+                    "[DIAG-REQ] graphql %s/%s token=%s attempt=%s elapsed=%.2fs status=%s",
+                    owner, repo, attempt_token_idx, attempt + 1,
+                    time.time() - _diag_req_t0, resp.status_code,
                 )
                 _check_response_async(resp, attempt_token_idx)
                 if resp.status_code == 200:
@@ -1028,6 +1070,11 @@ async def async_graphql_stargazers_batch(
                         owner,
                         repo,
                         _format_request_error(e),
+                    )
+                    logger.debug(
+                        "[DIAG-REQ] graphql %s/%s token=%s attempt=%s elapsed=%.2fs status=EXC:%s",
+                        owner, repo, attempt_token_idx, attempt + 1,
+                        time.time() - _diag_req_t0, type(e).__name__,
                     )
                     await asyncio.sleep(3 * 2 ** attempt)
                     continue

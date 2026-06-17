@@ -112,7 +112,7 @@ def _estimate_growth_from_sampling_timestamps(
 
         if len(segment_rates) >= 2 and max_rate > median_rate * 3:
             rate_per_second = median_rate
-            logger.info(
+            logger.debug(
                 f"  [GROWTH] {owner}/{repo} 检测到异常段速率 "
                 f"(max={max_rate:.4f} > 3×median={median_rate:.4f})，使用中位数"
             )
@@ -190,7 +190,7 @@ def estimate_star_growth_binary(
     last_page_data = get_stargazers_page(token_mgr, owner, repo, total_pages, token_idx, per_page)
     if last_page_data is None:
         # REST 无法访问最后一页（超大仓库），降级为采样外推
-        logger.info(
+        logger.warning(
             f"  [GROWTH] {owner}/{repo} 最后一页(page={total_pages})不可访问，降级为采样外推。"
         )
         return estimate_by_sampling(token_mgr, owner, repo, token_idx, growth_calc_days=growth_calc_days)
@@ -219,7 +219,7 @@ def estimate_star_growth_binary(
 
         page_data = get_stargazers_page(token_mgr, owner, repo, mid, token_idx, per_page)
         if page_data is None:
-            logger.info(
+            logger.warning(
                 f"  [GROWTH] {owner}/{repo} page={mid} 不可访问，降级为采样外推。"
             )
             return estimate_by_sampling(token_mgr, owner, repo, token_idx, growth_calc_days=growth_calc_days)
@@ -227,7 +227,7 @@ def estimate_star_growth_binary(
         if not page_data:
             consecutive_failures += 1
             if consecutive_failures >= 3:
-                logger.info(
+                logger.warning(
                     f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 页空数据，降级为采样外推。"
                 )
                 return estimate_by_sampling(token_mgr, owner, repo, token_idx, growth_calc_days=growth_calc_days)
@@ -238,7 +238,7 @@ def estimate_star_growth_binary(
         if last_entry_time is None:
             consecutive_failures += 1
             if consecutive_failures >= 3:
-                logger.info(
+                logger.warning(
                     f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 次无法解析时间戳，降级为采样外推。"
                 )
                 return estimate_by_sampling(token_mgr, owner, repo, token_idx, growth_calc_days=growth_calc_days)
@@ -348,7 +348,7 @@ async def estimate_star_growth_binary_async(
             client=async_client,
         )
         if last_page_data is None:
-            logger.info(
+            logger.warning(
                 f"  [GROWTH] {owner}/{repo} 最后一页(page={total_pages})不可访问，降级为采样外推。"
             )
             return await estimate_by_sampling_async(
@@ -389,7 +389,7 @@ async def estimate_star_growth_binary_async(
                 client=async_client,
             )
             if page_data is None:
-                logger.info(
+                logger.warning(
                     f"  [GROWTH] {owner}/{repo} page={mid} 不可访问，降级为采样外推。"
                 )
                 return await estimate_by_sampling_async(
@@ -404,7 +404,7 @@ async def estimate_star_growth_binary_async(
             if not page_data:
                 consecutive_failures += 1
                 if consecutive_failures >= 3:
-                    logger.info(
+                    logger.warning(
                         f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 页空数据，降级为采样外推。"
                     )
                     return await estimate_by_sampling_async(
@@ -422,7 +422,7 @@ async def estimate_star_growth_binary_async(
             if last_entry_time is None:
                 consecutive_failures += 1
                 if consecutive_failures >= 3:
-                    logger.info(
+                    logger.warning(
                         f"  [GROWTH] {owner}/{repo} 连续 {consecutive_failures} 次无法解析时间戳，降级为采样外推。"
                     )
                     return await estimate_by_sampling_async(

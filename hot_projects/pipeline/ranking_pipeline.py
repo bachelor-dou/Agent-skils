@@ -97,7 +97,13 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     effective_window = growth_calc_days or GROWTH_CALC_DAYS
     days_since = params.get("days_since_created")
 
+    # 真实增长阈值：用于 threshold 阶段过滤 + growth_calc 阶段的候选日志展示。
+    threshold = params.get("growth_threshold", STAR_GROWTH_THRESHOLD)
+
     # ── 2) growth_calc（昂贵）──
+    # growth_threshold=0：候选池全量收录，使 threshold 阶段可用不同阈值反复重筛而不重算增长
+    #   （growth_sig 不含阈值，故缓存阈值无关）。
+    # candidate_log_threshold=threshold：[OK] 候选 日志仅展示达标候选，保持"候选=达标"语义。
     growth_sig = {**collect_sig, "growth_calc_days": growth_calc_days, "days_since_created": days_since}
     growth = cache.get("growth_calc", growth_sig)
     if growth is None:
@@ -106,19 +112,22 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
             repos, db, growth_threshold=0, days_since_created=days_since,
             growth_calc_days=effective_window, force_refresh=force_refresh,
             window_specified=window_specified,
+            candidate_log_threshold=threshold,
         )
         cache.set("growth_calc", growth_sig, growth)
     effective_window = growth.get("growth_calc_days", effective_window)
+    growth_candidates_count = len(growth.get("candidates", {}))
+    logger.info("增长候选池: %s 个。", growth_candidates_count)
     _emit(progress_cb, 65, "增长计算完成")
 
     # ── 3) threshold（廉价过滤）──
-    threshold = params.get("growth_threshold", STAR_GROWTH_THRESHOLD)
     thr_sig = {**growth_sig, "growth_threshold": threshold}
     candidates = cache.get("threshold", thr_sig)
     if candidates is None:
         candidates = {k: v for k, v in growth.get("candidates", {}).items() if v["growth"] >= threshold}
         cache.set("threshold", thr_sig, candidates)
-    _emit(progress_cb, 68, f"筛选候选（{len(candidates)} 个达标）")
+    logger.info("达标候选池(growth >= %s): %s 个。", threshold, len(candidates))
+    _emit(progress_cb, 68, f"筛选达标候选（{len(candidates)} 个）")
 
     # ── 4) rank（廉价）──
     rank_mode = "hot_new" if mode == "hot_new" else "comprehensive"
@@ -133,11 +142,19 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         top_n = params.get("top_n")
         ranked = ordered[:top_n] if top_n else ordered
         cache.set("rank", rank_sig, ranked)
+    requested_top_n = params.get("top_n")
+    if requested_top_n and len(ranked) < requested_top_n:
+        logger.warning(
+            "达标候选不足 requested_top_n=%s returned=%s candidates=%s growth_pool=%s",
+            requested_top_n, len(ranked), len(candidates), growth_candidates_count,
+        )
     _emit(progress_cb, 72, "排序完成")
 
     result = {
         "ranked": ranked,
+        "growth_candidates_count": growth_candidates_count,
         "candidates_count": len(candidates),
+        "returned_count": len(ranked),
         "mode": rank_mode,
         "growth_calc_days": effective_window,
     }

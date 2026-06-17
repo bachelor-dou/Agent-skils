@@ -35,8 +35,14 @@ def _upsert_candidate(
     current_star: int,
     created_at: str = "",
     source: str = "",
+    log_threshold: int | None = None,
 ) -> None:
-    """更新或插入候选（取更大的 growth 值），保留 created_at。"""
+    """更新或插入候选（取更大的 growth 值），保留 created_at。
+
+    log_threshold：仅当 growth >= log_threshold 时打印 [OK] 候选 日志。
+    None 表示不限制（始终打印）。候选池本身始终全量收录（供分阶段缓存复用），
+    日志只展示达标候选，与旧项目"候选=达标"的打印语义保持一致。
+    """
     existing = candidate_map.get(full_name)
     if existing:
         if growth > existing["growth"]:
@@ -50,8 +56,9 @@ def _upsert_candidate(
             "star": current_star,
             "created_at": created_at,
         }
-        tag = f"({source})" if source else ""
-        logger.info(f"  [OK] 候选{tag}: {full_name} | growth={growth} | star={current_star}")
+        if log_threshold is None or growth >= log_threshold:
+            tag = f"({source})" if source else ""
+            logger.info(f"  [OK] 候选{tag}: {full_name} | growth={growth} | star={current_star}")
 
 
 def _load_checkpoint() -> dict:
@@ -105,6 +112,7 @@ def _submit_growth_tasks(
 
     db_projects = db.get("projects", {})
     growth_threshold = growth_ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
+    log_threshold = growth_ctx.get("candidate_log_threshold", growth_threshold)
     use_realtime_growth = bool(growth_ctx.get("use_realtime_growth", False))
     can_write_db = bool(growth_ctx.get("can_write_db", False))
     use_checkpoint = bool(growth_ctx.get("use_checkpoint", not use_realtime_growth))
@@ -132,7 +140,8 @@ def _submit_growth_tasks(
                 current_star = cp["star"]
                 created_at = pending[fn].get("created_at", "")
                 if growth >= growth_threshold:
-                    _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint")
+                    _upsert_candidate(candidate_map, fn, growth, current_star, created_at, "checkpoint",
+                                      log_threshold=log_threshold)
                 del pending[fn]
                 resumed_count += 1
 
@@ -188,7 +197,8 @@ def _submit_growth_tasks(
                 checkpoint_dirty = True
             db_count += 1
             if growth >= growth_threshold:
-                _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB")
+                _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB",
+                                  log_threshold=log_threshold)
             del pending[full_name]
 
     if use_realtime_growth:

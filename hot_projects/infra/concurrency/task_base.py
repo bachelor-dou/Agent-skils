@@ -37,6 +37,8 @@ class Task(ABC):
 
     needs_github_token: bool = False  # A模式：任务级 token 持有
     _token_mgr: Any = None  # GitHubTokenPool 引用，由子类构造时设置
+    max_requeue: int = 3  # RetryableError（瞬时故障）最大重排次数，超过则放弃本轮
+    requeue_count: int = 0  # 已重排次数（运行期计数，不参与构造语义）
 
     @abstractmethod
     def execute(self, token_idx: int | None) -> Any:

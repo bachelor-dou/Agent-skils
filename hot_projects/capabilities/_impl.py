@@ -681,6 +681,7 @@ def tool_batch_check_growth(
     growth_calc_days: int = GROWTH_CALC_DAYS,
     force_refresh: bool = False,
     window_specified: bool = True,
+    candidate_log_threshold: int | None = None,
 ) -> dict:
     """
     Tool 4: 批量计算仓库增长并筛选候选。
@@ -705,6 +706,9 @@ def tool_batch_check_growth(
         growth_calc_days: 增长统计窗口（天）
         force_refresh:    定时脚本传入 True 以刷新DB快照；Agent 始终传入 False
         window_specified: 调用方是否显式指定了 growth_calc_days
+        candidate_log_threshold: [OK] 候选 日志的展示阈值（仅 growth >= 此值才打印）。
+                          None 时回退为 growth_threshold。用于 growth_threshold=0
+                          全量收录候选池、但日志只显示达标候选的场景。
     """
     from datetime import timedelta
 
@@ -836,6 +840,11 @@ def tool_batch_check_growth(
         "db_projects": db.get("projects", {}),
         "candidate_map": candidate_map,
         "growth_threshold": growth_threshold,
+        # 候选池全量收录（growth_threshold 可为 0 以支持分阶段缓存复用），
+        # 但 [OK] 候选 日志仅展示达标候选（candidate_log_threshold），保持"候选=达标"语义。
+        "candidate_log_threshold": (
+            candidate_log_threshold if candidate_log_threshold is not None else growth_threshold
+        ),
         "use_realtime_growth": use_realtime_growth,
         "can_write_db": can_write_db,
         "window_specified": window_specified,

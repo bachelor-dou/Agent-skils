@@ -88,7 +88,7 @@ PAGE_NO_CACHE_HEADERS = {
 def setup_app_logging() -> str:
     """配置 API 业务日志：使用 TimedRotatingFileHandler 按日期切换日志文件。"""
     os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, "agent.log")
+    log_path = os.path.join(LOG_DIR, "web.log")
 
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
@@ -97,7 +97,7 @@ def setup_app_logging() -> str:
         except Exception:
             pass
 
-    # 每天午夜自动切换，保留 7 天备份，备份文件名格式: agent.log.2026-04-28
+    # 每天午夜自动切换，保留 7 天备份，备份文件名格式: web.log.2026-04-28
     file_handler = logging.handlers.TimedRotatingFileHandler(
         log_path, when="midnight", interval=1, backupCount=7, encoding="utf-8",
     )

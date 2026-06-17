@@ -98,3 +98,22 @@ def test_keyword_mode_skips_scan_and_trending(monkeypatch):
                 db=db, cache=RankingCache(), do_report=False)
     assert "search" in p.calls
     assert "scan" not in p.calls and "trending" not in p.calls
+
+
+def test_counts_distinguish_growth_pool_from_thresholded_candidates(monkeypatch, caplog):
+    _patch_rank(monkeypatch)
+    p = FakeProvider()
+    db = {"valid": False, "projects": {}}
+
+    caplog.set_level("WARNING", logger="hot_projects")
+    out = run_ranking(
+        p, mode="comprehensive",
+        params={"min_star": 1200, "max_star": 45000, "growth_calc_days": 7,
+                "growth_threshold": 1000, "top_n": 2},
+        db=db, cache=RankingCache(), do_report=False,
+    )
+
+    assert out["growth_candidates_count"] == 1
+    assert out["candidates_count"] == 0
+    assert out["returned_count"] == 0
+    assert "达标候选不足 requested_top_n=2 returned=0 candidates=0 growth_pool=1" in caplog.text

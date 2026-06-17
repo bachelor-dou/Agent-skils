@@ -21,6 +21,12 @@ from ...config import GITHUB_TOKENS
 
 logger = logging.getLogger("discover_hot")
 
+# 401 鉴权失败处理（池内部常量，基本不变动，故不放入 config）：
+#   连续命中 AUTH_FAIL_STRIKES 次 401 才永久失效；否则按瞬时故障冷却，
+#   冷却期间 token 抛回池中（不被 worker 持有），到点自动回归；任意成功 release 清零计数。
+AUTH_FAIL_STRIKES = 3
+AUTH_FAIL_COOLDOWN_SECONDS = 60.0
+
 
 @dataclass(slots=True)
 class _TokenState:
@@ -29,6 +35,7 @@ class _TokenState:
     invalid: bool = False
     available_at: float = 0.0
     rate_limited_count: int = 0
+    auth_fail_count: int = 0
     last_error: str = ""
 
 
@@ -43,6 +50,8 @@ class AsyncTokenPool:
         health_degrade_threshold: int = 3,
         health_penalty_seconds: float = 2.0,
         wait_log_interval_seconds: float = 10.0,
+        auth_fail_strikes: int = AUTH_FAIL_STRIKES,
+        auth_fail_cooldown_seconds: float = AUTH_FAIL_COOLDOWN_SECONDS,
     ) -> None:
         normalized = [t.strip() for t in tokens if t and t.strip()]
         if not normalized:
@@ -55,6 +64,8 @@ class AsyncTokenPool:
         self._time_fn = time_fn or time.time
         self._health_degrade_threshold = max(1, health_degrade_threshold)
         self._health_penalty_seconds = max(0.0, health_penalty_seconds)
+        self._auth_fail_strikes = max(1, auth_fail_strikes)
+        self._auth_fail_cooldown_seconds = max(0.0, auth_fail_cooldown_seconds)
         self._wait_log_interval_seconds = max(0.0, wait_log_interval_seconds)
         self._last_wait_log_at = 0.0
         self._last_wait_log_key: tuple[str, int] | None = None
@@ -120,6 +131,7 @@ class AsyncTokenPool:
         async with condition:
             state = self._states[token_idx]
             state.in_use = False
+            state.auth_fail_count = 0  # 成功归还视为该 token 正常，清零 401 连续计数
             condition.notify()  # 只唤醒 1 个等待者，避免惊群
 
     async def mark_rate_limited(self, token_idx: int, reset_time: float, reason: str = "") -> None:
@@ -141,7 +153,45 @@ class AsyncTokenPool:
         async with condition:
             self._apply_invalid_state(token_idx, reason)
             self._metrics["invalid_total"] += 1
-            # token 永久失效，不唤醒等待者（不会释放出可用 token）
+            # 失效会改变 acquire() 的 "全部失效→抛错" 出口条件，必须唤醒所有等待者，
+            # 否则在最后一个 token 失效时，已挂起的 worker 会永久错过该出口而死锁。
+            condition.notify_all()
+
+    async def mark_auth_failed(self, token_idx: int, reason: str = "") -> None:
+        """处理 401：默认按瞬时故障冷却，连续多次才永久失效。
+
+        GitHub 可能对有效 token 返回瞬时 401（二级限流/鉴权抖动/连接半坏）。
+        若一律永久失效，会因一次抖动把所有有效 token 踢光。此处：
+          - 连续 auth_fail_count < strikes：冷却 cooldown 秒后自动回归。
+          - 达到 strikes：才永久失效。
+        任意一次成功 release 会清零计数。无论哪种分支都 notify_all，
+        让挂起的 worker 重新判定可用性/失效出口。
+        """
+        self._validate_token_idx(token_idx)
+        condition = self._ensure_condition_for_current_loop()
+        async with condition:
+            state = self._states[token_idx]
+            state.auth_fail_count += 1
+            state.last_error = reason or state.last_error
+            if state.auth_fail_count >= self._auth_fail_strikes:
+                self._apply_invalid_state(token_idx, reason)
+                self._metrics["invalid_total"] += 1
+                logger.warning(
+                    "token#%d 连续 %d 次 401，永久失效。",
+                    token_idx, state.auth_fail_count,
+                )
+            else:
+                state.in_use = False
+                state.available_at = max(
+                    state.available_at,
+                    self._time_fn() + self._auth_fail_cooldown_seconds,
+                )
+                logger.warning(
+                    "token#%d 命中 401（第 %d/%d 次），冷却 %.0fs 后重试。",
+                    token_idx, state.auth_fail_count, self._auth_fail_strikes,
+                    self._auth_fail_cooldown_seconds,
+                )
+            condition.notify_all()
 
     def record_rate_limited(self, token_idx: int, reset_time: float, reason: str = "") -> None:
         """同步阶段写回限流状态。

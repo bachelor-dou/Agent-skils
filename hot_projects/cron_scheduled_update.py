@@ -20,11 +20,11 @@
 #    添加以下行：
 #    36 0 * * 7 . /root/.hot_projects.env && cd /root/code/Agent-skils && /usr/bin/python3 -m hot_projects.cron_scheduled_update --top-n 100 --growth-calc-days 7
 #
-# 日志：logs/scheduled-YYYY-MM-DD.log
+# 主日志：logs/cron-YYYY-MM-DD.log
+# 调试日志：logs/debug/cron-YYYY-MM-DD.debug.log
 # ============================================================
 import argparse
 import logging
-import logging.handlers
 import os
 import sys
 from datetime import datetime
@@ -47,27 +47,67 @@ from hot_projects.pipeline.ranking_pipeline import run_ranking
 from hot_projects.pipeline.cache import RankingCache
 
 
+class _DebugOnlyFilter(logging.Filter):
+    """只放行 DEBUG 级记录。
+
+    INFO 及以上已写入主日志，debug 副日志只保留额外的 DEBUG 细节，避免重复。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno == logging.DEBUG
+
+
 def setup_logging() -> str:
-    """配置日志：同时输出到终端和文件，文件使用 RotatingFileHandler 防止过大。"""
+    """配置定时任务日志：主日志（INFO，仅文件）+ debug 副日志（仅 DEBUG 细节，不重复 INFO）。"""
     os.makedirs(LOG_DIR, exist_ok=True)
+    debug_log_dir = os.path.join(LOG_DIR, "debug")
+    os.makedirs(debug_log_dir, exist_ok=True)
+
+    main_level = logging.INFO
+    log_date = datetime.now().strftime("%Y-%m-%d")
     log_path = os.path.join(
         LOG_DIR,
-        f"scheduled-{datetime.now().strftime('%Y-%m-%d')}.log",
+        f"cron-{log_date}.log",
     )
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    file_handler = logging.FileHandler(
+        log_path,
+        encoding="utf-8",
     )
+    file_handler.setLevel(main_level)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     )
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(main_level)
+    stream_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+
+    handlers: list[logging.Handler] = [
+        file_handler,
+        stream_handler,
+    ]
+
+    debug_path = os.path.join(debug_log_dir, f"cron-{log_date}.debug.log")
+    debug_handler = logging.FileHandler(
+        debug_path,
+        encoding="utf-8",
+    )
+    debug_handler.setLevel(logging.DEBUG)
+    debug_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    handlers.append(debug_handler)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            file_handler,
-            logging.StreamHandler(),
-        ],
+        handlers=handlers,
         force=True,
     )
     # httpx/httpcore 会在 INFO 级别输出每条 HTTP 请求，定时日志里只保留业务日志。

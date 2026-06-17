@@ -28,7 +28,7 @@ logger = logging.getLogger("hot_projects")
 
 def setup_logging() -> str:
     os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, f"agent-{datetime.now().strftime('%Y-%m-%d')}.log")
+    log_path = os.path.join(LOG_DIR, f"cli-{datetime.now().strftime('%Y-%m-%d')}.log")
     file_handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8",
     )
