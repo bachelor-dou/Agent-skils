@@ -104,7 +104,6 @@ HOT_PROJECT_COUNT: int = 120           # 综合热门项目默认输出数量（
 HOT_NEW_PROJECT_COUNT: int = 15        # 新项目榜默认输出数量（未指定 top_n 时使用）
 GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
 DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
-DATA_EXPIRE_DAYS: int = GROWTH_CALC_DAYS + 1  # DB 数据过期判定天数（必须 > GROWTH_CALC_DAYS）
 # DB 差值法：项目 refreshed_at 年龄与计算窗口的最大允许偏差（小时）。
 # 仅当 |项目年龄 − 计算窗口| ≤ 该值时，current_star − DB旧star 才被视为有效的窗口期增长。
 DB_DIFF_TOLERANCE_HOURS: int = 5

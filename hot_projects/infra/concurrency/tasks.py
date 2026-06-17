@@ -59,6 +59,11 @@ def _record_token_issue(token_mgr: Any, token_idx: int | None, exc: Exception) -
         return
 
     if isinstance(exc, TokenInvalidError):
+        # 401 优先走 strikes/冷却（与异步一致），避免瞬时 401 永久踢除有效 token。
+        recorder = getattr(token_mgr, "record_auth_failed", None)
+        if callable(recorder):
+            recorder(token_idx, str(exc))
+            return
         recorder = getattr(token_mgr, "record_invalid", None)
         if callable(recorder):
             recorder(token_idx, str(exc))
@@ -594,14 +599,8 @@ class CalcGrowthTask(Task):
         if self._ctx is None:
             return
         logger.error(f"  增长计算异常: {self.full_name}, {error}")
-        fallback_star = self.repo_item.get("stargazers_count", 0)
-        use_checkpoint = self._ctx.get("use_checkpoint", True)
-        if fallback_star:
-            checkpoint = self._ctx["checkpoint"]
-            if use_checkpoint:
-                checkpoint[self.full_name] = {"growth": -1, "star": fallback_star}
-                self._ctx["checkpoint_dirty"][0] = True
-                self._ctx["completed_since_save"][0] += 1
+        # 不把失败写入 checkpoint：否则续传会把 growth=-1 当成“已完成”而永久跳过该仓库。
+        # 不记录即让下一轮重新计算（瞬时故障应可重试）；真正“采样数据不足”才用 unresolved 标记。
 
     def __str__(self) -> str:
         return f"CalcGrowth({self.full_name})"

@@ -1,8 +1,11 @@
 def test_get_db_info_overview():
     from hot_projects.capabilities.describe import get_db_info
-    db = {"valid": True, "date": "2026-06-10", "projects": {"a/b": {"star": 1}}}
+    # 不再有顶层 valid；新鲜度由 date 实时计算（age_days / fresh）。
+    db = {"date": "2026-06-10", "projects": {"a/b": {"star": 1}}}
     out = get_db_info(db=db, repo=None)
-    assert out["total_projects"] == 1 and out["valid"] is True
+    assert out["total_projects"] == 1
+    assert "valid" not in out
+    assert "age_days" in out and "fresh" in out
 
 
 def test_get_db_info_repo_found_and_missing():

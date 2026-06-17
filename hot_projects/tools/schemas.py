@@ -386,7 +386,9 @@ TOOL_PARAM_SCHEMA.update({
     "describe_project": {"repo": {"type": "str"}},
     "get_db_info": {"repo": {"type": "str", "default": None}},
     "fetch_trending": {
-        "trending_range": {"type": "enum", "choices": ["daily", "weekly", "monthly"], "default": "weekly"},
+        # 含 "all"：定时任务/综合榜管线传 "all" 表示日/周/月三榜合一去重；
+        # 缺了它会被校验器打回默认 "weekly"，导致只抓周榜（与前面字面定义保持一致）。
+        "trending_range": {"type": "enum", "choices": ["daily", "weekly", "monthly", "all"], "default": "weekly"},
     },
 })
 

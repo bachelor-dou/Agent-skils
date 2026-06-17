@@ -208,6 +208,36 @@ class AsyncTokenPool:
         self._apply_invalid_state(token_idx, reason)
         self._metrics["invalid_total"] += 1
 
+    def record_auth_failed(self, token_idx: int, reason: str = "") -> None:
+        """同步阶段处理 401：与异步 mark_auth_failed 一致——连续 strikes 次才永久失效，
+        否则按瞬时故障冷却，避免主线程串行链路（分段探测等）被一次瞬时 401 永久踢除有效 token。
+
+        注意：同步路径无成功 release 的清零钩子，strikes 在本次进程内只增不减；
+        但这些链路都很短（Phase0 分段 / 单仓查询），累计到永久失效的风险很低。
+        """
+        self._validate_token_idx(token_idx)
+        state = self._states[token_idx]
+        state.auth_fail_count += 1
+        state.last_error = reason or state.last_error
+        if state.auth_fail_count >= self._auth_fail_strikes:
+            self._apply_invalid_state(token_idx, reason)
+            self._metrics["invalid_total"] += 1
+            logger.warning(
+                "token#%d 连续 %d 次 401，永久失效（同步路径）。",
+                token_idx, state.auth_fail_count,
+            )
+        else:
+            state.in_use = False
+            state.available_at = max(
+                state.available_at,
+                self._time_fn() + self._auth_fail_cooldown_seconds,
+            )
+            logger.warning(
+                "token#%d 命中 401（第 %d/%d 次，同步路径），冷却 %.0fs 后重试。",
+                token_idx, state.auth_fail_count, self._auth_fail_strikes,
+                self._auth_fail_cooldown_seconds,
+            )
+
     async def snapshot(self) -> list[dict[str, object]]:
         """返回状态快照，用于日志与测试。"""
         condition = self._ensure_condition_for_current_loop()

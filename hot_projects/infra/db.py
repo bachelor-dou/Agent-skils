@@ -5,11 +5,11 @@
 
 DB 结构：
   {
-    "date": "YYYY-MM-DD",       # 上次更新日期
-    "valid": true/false,        # 数据是否在有效期内（差值法是否可信）
+    "date": "YYYY-MM-DD",       # 上次更新日期（顶层唯一的新鲜度依据）
     "projects": {
       "owner/repo": {
         "star": 12345,
+        "refreshed_at": "YYYY-MM-DDTHH:MM:SSZ",  # 项目级快照时间，差值判定依据
         "desc": "LLM 生成的描述",
         "short_desc": "GitHub 原始 description",
         "language": "Python",
@@ -19,9 +19,10 @@ DB 结构：
     }
   }
 
-过期策略：
-  距上次更新 > DATA_EXPIRE_DAYS → valid=false（差值不可信），
-  但不清空 projects 数据，保留全部历史记录。
+有效性策略：
+  不再维护顶层 valid 布尔。是否可用 DB 差值，在使用处按「项目级窗口」逐项实时判定
+  （项目 refreshed_at 年龄与本次计算窗口相差 ≤ 容差小时数才走差值），过旧/过新自动回退实时。
+  load_db 仅按 date 记录一条新鲜度提示日志，不影响逻辑。
 """
 
 import fcntl
@@ -31,7 +32,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from ..config import DATA_EXPIRE_DAYS, DB_FILE_PATH, GROWTH_CALC_DAYS
+from ..config import DB_FILE_PATH, GROWTH_CALC_DAYS
 
 logger = logging.getLogger("discover_hot")
 
@@ -65,12 +66,15 @@ def _merge_project_records(disk_project: dict, memory_project: dict) -> dict:
 
 def load_db() -> dict:
     """
-    读取 Github_DB.json 并校验有效性。
+    读取 Github_DB.json。
+
+    不再维护顶层 "valid" 布尔：DB 是否可用于差值，已改为在使用处按项目级窗口（refreshed_at
+    与计算窗口相差 ≤ 容差）逐项实时判定。此处仅按 date 记录一条新鲜度提示日志。
 
     Returns:
-        DB 字典，至少包含 "date"、"valid"、"projects" 三个键。
+        DB 字典，至少包含 "date"、"projects" 两个键。
     """
-    default_db: dict = {"date": "", "valid": False, "projects": {}}
+    default_db: dict = {"date": "", "projects": {}}
 
     if not os.path.exists(DB_FILE_PATH):
         logger.info("DB 文件不存在，初始化空 DB。")
@@ -93,26 +97,21 @@ def load_db() -> dict:
     if "projects" not in db:
         db["projects"] = {}
 
-    # 校验有效性
+    # 仅记录新鲜度提示日志（不再据此设置/使用 valid 开关）。
     date_str = db.get("date", "")
     if date_str:
         try:
             db_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             days_diff = (_utc_now() - db_date).days
-            if days_diff > DATA_EXPIRE_DAYS:
+            if days_diff > GROWTH_CALC_DAYS:
                 logger.warning(
-                    f"DB 数据已过期（距上次更新 {days_diff} 天），"
-                    f"标记 valid=false（保留 {len(db['projects'])} 条历史数据）。"
+                    f"DB 距上次更新 {days_diff} 天（> 默认窗口 {GROWTH_CALC_DAYS}），仅作提示；"
+                    f"差值有效性运行时按项目级窗口逐项判定（保留 {len(db['projects'])} 条历史数据）。"
                 )
-                db["valid"] = False
             else:
-                db["valid"] = True
-                logger.info(f"DB 有效，距上次更新 {days_diff} 天。")
+                logger.info(f"DB 距上次更新 {days_diff} 天，共 {len(db['projects'])} 条记录。")
         except ValueError:
-            logger.warning(f"DB date 格式异常: {date_str}，标记 valid=false。")
-            db["valid"] = False
-    else:
-        db["valid"] = False
+            logger.warning(f"DB date 格式异常: {date_str}。")
 
     return db
 
@@ -157,7 +156,7 @@ def save_db(db: dict) -> None:
                 merged_db = dict(disk_db)
                 merged_db.update(db)
                 merged_db["projects"] = merged_projects
-                merged_db["valid"] = True
+                merged_db.pop("valid", None)  # 不再写入顶层 valid（清理旧文件遗留字段）
                 db.clear()
                 db.update(merged_db)
 
@@ -302,55 +301,6 @@ def get_db_age_days(db: dict) -> int | None:
         return None
 
 
-def is_db_diff_eligible(
-    db: dict,
-    growth_calc_days: int = GROWTH_CALC_DAYS,
-) -> bool:
-    """严格判断 DB 是否满足差值法前提（新项目榜 / 单查 使用）。
-
-    同时满足以下三项才返回 True：
-    1. db["valid"] — DB 未过期
-    2. growth_calc_days < DATA_EXPIRE_DAYS — 窗口在有效期内
-    3. DB 年龄 ≥ growth_calc_days − 1 — 差值接近请求窗口
-    """
-    if not db.get("valid", False):
-        return False
-    if growth_calc_days >= DATA_EXPIRE_DAYS:
-        return False
-    db_date_str = db.get("date", "")
-    if not db_date_str:
-        return False
-    try:
-        db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        db_age_days = (_utc_now() - db_date).total_seconds() / 86400
-        return db_age_days >= (growth_calc_days - 1)
-    except ValueError:
-        return False
-
-
-def is_project_diff_eligible(
-    project: dict,
-    growth_calc_days: int = GROWTH_CALC_DAYS,
-) -> bool:
-    """严格判断单个仓库是否满足差值法条件（新项目榜 / 单查 使用）。
-
-    同时满足：
-    1. refreshed_at 距今 ≥ growth_calc_days − 1（足够旧）
-    2. refreshed_at 距今 ≤ DATA_EXPIRE_DAYS（不超过有效期）
-    """
-    refreshed_at = project.get("refreshed_at", "")
-    if not refreshed_at:
-        return False
-    try:
-        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc
-        )
-        age_days = (_utc_now() - refresh_dt).total_seconds() / 86400
-        return (growth_calc_days - 1) <= age_days <= DATA_EXPIRE_DAYS
-    except ValueError:
-        return False
-
-
 def is_project_window_match(
     refreshed_at: str,
     growth_calc_days: int,
@@ -376,26 +326,3 @@ def is_project_window_match(
         return False
     age_seconds = (_utc_now() - refresh_dt).total_seconds()
     return abs(age_seconds - growth_calc_days * 86400) <= tolerance_hours * 3600
-
-
-def is_project_same_batch(
-    project: dict,
-    db: dict,
-) -> bool:
-    """综合榜专用：判断仓库 refreshed_at 是否与 db["date"] 属于同一批次刷新。
-
-    refreshed_at 与 db["date"] 差值 ≤ 1 天视为同批次。
-    """
-    refreshed_at = project.get("refreshed_at", "")
-    db_date_str = db.get("date", "")
-    if not refreshed_at or not db_date_str:
-        return False
-    try:
-        refresh_dt = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc
-        )
-        db_date = datetime.strptime(db_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        diff_days = abs((refresh_dt - db_date).total_seconds()) / 86400
-        return diff_days <= 1
-    except ValueError:
-        return False

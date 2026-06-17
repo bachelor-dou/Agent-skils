@@ -38,6 +38,7 @@ from .api import (
     async_graphql_stargazers_batch,
 )
 from .token_pool import GitHubTokenPool
+from ...infra.exceptions import RetryableError
 
 logger = logging.getLogger("discover_hot")
 
@@ -150,6 +151,26 @@ def _estimate_growth_from_sampling_timestamps(
 
 
 def estimate_star_growth_binary(
+    token_mgr: GitHubTokenPool, owner: str, repo: str, total_stars: int,
+    token_idx: int = 0,
+    growth_calc_days: int = GROWTH_CALC_DAYS,
+) -> int:
+    """同步增长估算入口：把瞬时故障（网络/5xx → RetryableError）收敛为 unresolved。
+
+    同步链没有调度器重排机制，因此瞬时故障不再被误当“大仓库”降级采样，
+    而是返回 GROWTH_ESTIMATION_UNRESOLVED，由调用方按“暂不可确定”处理。
+    """
+    try:
+        return _estimate_star_growth_binary_impl(
+            token_mgr, owner, repo, total_stars,
+            token_idx=token_idx, growth_calc_days=growth_calc_days,
+        )
+    except RetryableError as e:
+        logger.warning(f"  [GROWTH] {owner}/{repo} 瞬时故障无法确定增长，标记 unresolved：{e}")
+        return GROWTH_ESTIMATION_UNRESOLVED
+
+
+def _estimate_star_growth_binary_impl(
     token_mgr: GitHubTokenPool, owner: str, repo: str, total_stars: int,
     token_idx: int = 0,
     growth_calc_days: int = GROWTH_CALC_DAYS,

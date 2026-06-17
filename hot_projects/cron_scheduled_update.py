@@ -78,15 +78,8 @@ def setup_logging() -> str:
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     )
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(main_level)
-    stream_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    )
-
     handlers: list[logging.Handler] = [
         file_handler,
-        stream_handler,
     ]
 
     debug_path = os.path.join(debug_log_dir, f"cron-{log_date}.debug.log")
@@ -95,6 +88,7 @@ def setup_logging() -> str:
         encoding="utf-8",
     )
     debug_handler.setLevel(logging.DEBUG)
+    debug_handler.addFilter(_DebugOnlyFilter())  # 只写 DEBUG 细节，INFO 已在主日志，避免重复
     debug_handler.setFormatter(
         logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -160,14 +154,17 @@ class DiscoveryPipeline:
             self.provider, mode=mode, params=params, db=self.db,
             cache=RankingCache(), do_report=True, force_refresh=force_refresh,
         )
-        save_db(self.db)
 
         report_path = result.get("report_path", "")
         ranked = result.get("ranked", [])
         if not ranked:
-            logger.warning("[Pipeline] 无榜单结果。")
+            # 空跑（搜索/增长全失败等）不落库：save_db 会强制 date=今天、valid=true，
+            # 会把一次失败伪造成“新鲜基线”，反而误导下一轮的 DB 差值判定。
+            logger.warning("[Pipeline] 无榜单结果，跳过 DB 保存（避免伪造新鲜基线）。")
             return {"error": "无候选项目", "report_path": report_path,
                     "candidates_count": result.get("candidates_count", 0)}
+
+        save_db(self.db)
 
         if report_path:
             logger.info("[Pipeline] 完成! 报告: %s", report_path)

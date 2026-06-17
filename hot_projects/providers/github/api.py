@@ -763,7 +763,10 @@ def _get_search_total_count_with_fallback(
             if earliest_rate_limit is None or exc.reset_time < earliest_rate_limit[1]:
                 earliest_rate_limit = (token_idx, exc.reset_time)
         except TokenInvalidError as exc:
-            if hasattr(token_mgr, "record_invalid"):
+            # 401 走 strikes/冷却而非永久失效，避免瞬时 401 把有效 token 踢光（与异步一致）。
+            if hasattr(token_mgr, "record_auth_failed"):
+                token_mgr.record_auth_failed(token_idx, str(exc))
+            elif hasattr(token_mgr, "record_invalid"):
                 token_mgr.record_invalid(token_idx, str(exc))
             logger.warning(
                 "total_count 查询 token 失效: query='%s', token=%s，尝试其他 token。",
@@ -861,19 +864,36 @@ def get_stargazers_page(
                 except ValueError:
                     logger.error(f"stargazers 响应 JSON 解析失败: {owner}/{repo} page={page}")
                     return None
-            elif resp.status_code == 422:
+            if resp.status_code == 422:
+                # 422 = 超大仓库 REST 分页上限，返回 None 让上层降级 GraphQL 采样。
                 return None
-            else:
-                logger.debug(
-                    f"stargazers 请求失败: {owner}/{repo} page={page}, "
-                    f"status={resp.status_code}"
+            if resp.status_code >= 500:
+                # 5xx 瞬时服务端故障：快速重试后抛 RetryableError，不再返回 None
+                # 被误当作“大仓库”降级采样（与异步路径对齐）。
+                if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                    time.sleep(2 * 2 ** attempt)
+                    continue
+                raise RetryableError(
+                    time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                    f"stargazers {owner}/{repo} page={page} server {resp.status_code}",
                 )
-                time.sleep(2 * 2 ** attempt)
+            logger.debug(
+                f"stargazers 请求失败: {owner}/{repo} page={page}, "
+                f"status={resp.status_code}"
+            )
+            time.sleep(2 * 2 ** attempt)
         except (TokenInvalidError, RateLimitError):
             raise
         except requests.RequestException as e:
             logger.debug(f"stargazers 请求异常: {owner}/{repo} page={page}, {e}")
-            time.sleep(2 * 2 ** attempt)
+            # 网络异常：快速重试后抛 RetryableError（同步链由上层转 unresolved），不误降级采样。
+            if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                time.sleep(2 * 2 ** attempt)
+                continue
+            raise RetryableError(
+                time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                f"stargazers {owner}/{repo} page={page} network {type(e).__name__}",
+            )
 
     return None
 
@@ -952,11 +972,25 @@ def graphql_stargazers_batch(
 
                 return timestamps, first_cursor
             else:
-                time.sleep(3 * 2 ** attempt)
+                # 非 200（多为 5xx）瞬时故障：快速重试后抛 RetryableError，避免采样
+                # 中途失败时用残缺样本外推出错误增长值。
+                if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                    time.sleep(3 * 2 ** attempt)
+                    continue
+                raise RetryableError(
+                    time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                    f"graphql {owner}/{repo} server {resp.status_code}",
+                )
         except (TokenInvalidError, RateLimitError):
             raise
-        except requests.RequestException:
-            time.sleep(3 * 2 ** attempt)
+        except requests.RequestException as e:
+            if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                time.sleep(3 * 2 ** attempt)
+                continue
+            raise RetryableError(
+                time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                f"graphql {owner}/{repo} network {type(e).__name__}",
+            )
 
     return [], None
 
@@ -1050,7 +1084,15 @@ async def async_graphql_stargazers_batch(
 
                 if borrowed_token:
                     await token_mgr.release(attempt_token_idx)
-                await asyncio.sleep(3 * 2 ** attempt)
+                # 非 200 瞬时故障：快速重试后抛 RetryableError 交调度器重排，
+                # 不把采样中途失败当“无数据”而用残缺样本外推。
+                if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                    await asyncio.sleep(3 * 2 ** attempt)
+                    continue
+                raise RetryableError(
+                    time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                    f"graphql {owner}/{repo} server {resp.status_code}",
+                )
             except RateLimitError as e:
                 if borrowed_token:
                     await token_mgr.mark_rate_limited(attempt_token_idx, e.reset_time, str(e))
@@ -1076,8 +1118,13 @@ async def async_graphql_stargazers_batch(
                         owner, repo, attempt_token_idx, attempt + 1,
                         time.time() - _diag_req_t0, type(e).__name__,
                     )
-                    await asyncio.sleep(3 * 2 ** attempt)
-                    continue
+                    if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
+                        await asyncio.sleep(3 * 2 ** attempt)
+                        continue
+                    raise RetryableError(
+                        time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
+                        f"graphql {owner}/{repo} network {type(e).__name__}",
+                    )
                 if borrowed_token:
                     await token_mgr.release(attempt_token_idx)
                 raise

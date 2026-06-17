@@ -88,7 +88,9 @@ def test_realtime_when_window_mismatch():
     assert len(pool.submitted) == 1  # 回退实时任务
 
 
-def test_realtime_when_db_invalid():
+def test_diff_used_when_db_invalid_but_window_matches():
+    # 差值有效性改为逐项判定：即使顶层 db["valid"]=False（由静态 DATA_EXPIRE_DAYS 驱动），
+    # 只要项目快照 refreshed_at 与窗口相差 ≤5h，仍走差值（修复 D1：长窗口被整库误判过期）。
     fn = "a/b"
     refreshed = _ts(7)
     db = {"valid": False, "date": _ts(7)[:10], "projects": {fn: {"star": 1000, "refreshed_at": refreshed}}}
@@ -100,8 +102,8 @@ def test_realtime_when_db_invalid():
 
     _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
 
-    assert fn not in candidate_map
-    assert len(pool.submitted) == 1  # DB 整体失效 → 不走差值
+    assert fn in candidate_map and candidate_map[fn]["growth"] == 300  # 1300-1000，逐项窗口匹配
+    assert pool.submitted == []  # 不再因 db.valid=False 退回实时
 
 
 def test_realtime_when_not_in_prev_snapshot():

@@ -92,8 +92,12 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     window_specified = growth_calc_days is not None
     if not window_specified and mode in ("comprehensive", "keyword"):
         age = get_db_age_days(db)
-        if db.get("valid") and age and age > 0:
-            growth_calc_days = age
+        if age and age > 0:
+            # 未指定窗口：用 DB 年龄当窗口以复用 DB 差值，封顶在默认窗口 GROWTH_CALC_DAYS。
+            # cron 每 7 天跑，DB 年龄基本 ≤7；偶尔 >7 则退回默认 7——此时各项目 refreshed_at
+            # 比窗口旧出超过 5h 容差，逐项匹配会自动失败、回退实时（DB 实质已过期）。
+            # 不再依赖静态 DATA_EXPIRE_DAYS 驱动的 db["valid"]。
+            growth_calc_days = min(age, GROWTH_CALC_DAYS)
     effective_window = growth_calc_days or GROWTH_CALC_DAYS
     days_since = params.get("days_since_created")
 

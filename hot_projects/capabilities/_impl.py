@@ -43,7 +43,7 @@ from ..config import (
     GROWTH_CALC_DAYS,
     MAX_DYNAMIC_SEARCH_KEYWORDS,
 )
-from ..infra.db import update_db_project
+from ..infra.db import update_db_project, get_db_age_days
 from ..providers.github.token_pool import AsyncTokenPool, GitHubTokenPool
 from ..providers.github.api import (
     auto_split_star_range,
@@ -1158,9 +1158,11 @@ def tool_get_db_info(db: dict, repo: str | None = None) -> dict:
             return {"repo": repo, "info": info, "found": True}
         return {"repo": repo, "found": False}
 
+    age_days = get_db_age_days(db)
     return {
-        "valid": db.get("valid", False),
         "date": db.get("date", ""),
+        "age_days": age_days,  # 由 date 实时计算的 DB 年龄（天）
+        "fresh": age_days is not None and 0 <= age_days <= GROWTH_CALC_DAYS,
         "total_projects": len(db.get("projects", {})),
     }
 

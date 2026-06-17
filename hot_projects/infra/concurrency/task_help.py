@@ -173,7 +173,12 @@ def _submit_growth_tasks(
     # 用 seeding 覆盖前捕获的旧快照(prev_snapshot) 计算 current_star − 旧star。
     # 新项目榜(is_hot_new) 与 DB 整体失效时，不走差值，全部实时。
     prev_snapshot = growth_ctx.get("prev_snapshot", {}) or {}
-    allow_diff = (not is_hot_new) and bool(db.get("valid", False))
+    # 差值有效性改为「逐项判定」：仅当项目快照 refreshed_at 与本次窗口相差 ≤ 5h 才走差值
+    # （见下方 is_project_window_match）。不再依赖由静态 DATA_EXPIRE_DAYS 驱动的 db["valid"]
+    # 粗闸——否则 growth_calc_days >= 默认窗口+1 时整库会被误判过期、全量实时（D1）。
+    # is_project_window_match 对过旧/过新的快照会自动回退实时，故无需粗闸兜底。
+    # 新项目榜(is_hot_new) 仍全部实时。
+    allow_diff = not is_hot_new
 
     if allow_diff:
         for full_name in list(pending.keys()):
