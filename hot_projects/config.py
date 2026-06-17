@@ -101,7 +101,7 @@ STAR_GROWTH_THRESHOLD: int = 1000       # 窗口期 star 增长阈值
 MIN_STAR: int = 1200                   # 项目最低 star 门槛（关键词搜索 + 范围扫描下界）
 MAX_STAR: int = 45000                  # 范围扫描上限
 HOT_PROJECT_COUNT: int = 120           # 综合热门项目默认输出数量（上限，有几个出几个）
-HOT_NEW_PROJECT_COUNT: int = 15        # 新项目榜默认输出数量（未指定 top_n 时使用）
+HOT_NEW_PROJECT_COUNT: int = 13        # 新项目榜默认输出数量（未指定 top_n 时使用）
 GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
 DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
 # DB 差值法：项目 refreshed_at 年龄与计算窗口的最大允许偏差（小时）。
