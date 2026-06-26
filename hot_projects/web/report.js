@@ -102,29 +102,7 @@
     return;
   }
 
-  function setButtonMessage(button, message) {
-    button.setAttribute("title", message);
-    button.setAttribute("aria-label", message);
-  }
-
-  function setButtonState(button, state, repo) {
-    const idleMessage = "复制 " + repo;
-    const copiedMessage = "已复制 " + repo;
-    const failedMessage = "复制失败 " + repo;
-
-    button.classList.toggle("copied", state === "copied");
-    button.classList.toggle("copy-failed", state === "failed");
-
-    if (state === "copied") {
-      setButtonMessage(button, copiedMessage);
-      return;
-    }
-    if (state === "failed") {
-      setButtonMessage(button, failedMessage);
-      return;
-    }
-    setButtonMessage(button, idleMessage);
-  }
+  const setButtonState = window.HotCommon.applyRepoCopyState;
 
   function setFavoriteButtonState(button, repo) {
     const favorited = favoritesApi && favoritesApi.isFavorite(repo);

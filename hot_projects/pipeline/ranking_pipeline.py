@@ -6,7 +6,7 @@ Agent 复合工具与 scheduled_update 共用本流水线（单一实现）。
 
 import logging
 
-from ..config import GROWTH_CALC_DAYS, STAR_GROWTH_THRESHOLD
+from ..config import GROWTH_CALC_DAYS, STAR_GROWTH_THRESHOLD, RECENT_GROWTH_DAYS
 from ..capabilities.scoring import step2_rank_and_select
 from ..capabilities.report import step3_generate_report
 from ..infra.db import get_db_age_days
@@ -61,6 +61,40 @@ def _collect(provider, mode, params, progress_cb=None) -> list[dict]:
                 repos.append(trending_repo_to_search_repo(r))
 
     return repos
+
+
+def _calc_recent_growth(provider, candidates: dict, db: dict, recent_days: int) -> dict:
+    """对候选池计算"最近 recent_days 天"增长，供打分做爆发加成。
+
+    复用 batch_growth（实时 API，force_refresh=False 不写 DB）：候选 refreshed_at 与
+    recent_days 窗口不匹配 → 逐项回退实时二分，得到的就是最近 recent_days 天增长。
+
+    Returns: {full_name: recent_growth}，仅含成功解析（>=0）的项目。
+    """
+    if not candidates:
+        return {}
+    cand_repos = [
+        {
+            "full_name": fn,
+            "star": info.get("star", 0),
+            "_raw": {"created_at": info.get("created_at", "")},
+        }
+        for fn, info in candidates.items()
+    ]
+    res = provider.batch_growth(
+        cand_repos, db,
+        growth_threshold=0,
+        growth_calc_days=recent_days,
+        window_specified=True,
+        force_refresh=False,
+        candidate_log_threshold=10 ** 9,  # 抑制 [OK] 候选 日志（这是最近窗口的副计算）
+    )
+    out: dict[str, int] = {}
+    for fn, info in res.get("candidates", {}).items():
+        g = info.get("growth")
+        if isinstance(g, int) and g >= 0:
+            out[fn] = g
+    return out
 
 
 def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
@@ -133,8 +167,21 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     logger.info("达标候选池(growth >= %s): %s 个。", threshold, len(candidates))
     _emit(progress_cb, 68, f"筛选达标候选（{len(candidates)} 个）")
 
-    # ── 4) rank（廉价）──
     rank_mode = "hot_new" if mode == "hot_new" else "comprehensive"
+
+    # ── 3.5) recent_growth：候选池最近 K 天增长，给打分做"最近爆发"加成（仅综合/关键词榜）──
+    # 按项目缓存在 cache.aux（不随阶段失效）：阈值/top_n 变化时只对新出现的候选发 API。
+    if rank_mode == "comprehensive" and candidates:
+        recent_by_repo = cache.aux.setdefault("recent_growth", {})
+        missing = {fn: info for fn, info in candidates.items() if fn not in recent_by_repo}
+        if missing:
+            _emit(progress_cb, 70, f"计算最近 {RECENT_GROWTH_DAYS} 天爆发强度（{len(missing)} 个）")
+            recent_by_repo.update(_calc_recent_growth(provider, missing, db, RECENT_GROWTH_DAYS))
+        for fn, info in candidates.items():
+            if fn in recent_by_repo:
+                info["recent_growth"] = recent_by_repo[fn]
+
+    # ── 4) rank（廉价）──
     rank_sig = {**thr_sig, "rank_mode": rank_mode, "top_n": params.get("top_n")}
     ranked = cache.get("rank", rank_sig)
     if ranked is None:
@@ -142,6 +189,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
             candidates, mode=rank_mode, db=db,
             days_since_created=days_since,
             prefiltered_days_since_created=days_since,  # 隐藏行为#3：预筛窗口透传
+            growth_calc_days=effective_window,
         )
         top_n = params.get("top_n")
         ranked = ordered[:top_n] if top_n else ordered

@@ -453,13 +453,6 @@ h1 {
   font-size: 14px;
 }
 
-.favorites-summary {
-  margin: 14px 0 0;
-  color: var(--muted);
-  line-height: 1.65;
-  font-size: 14px;
-}
-
 .favorites-list {
   display: grid;
   gap: 12px;
@@ -762,19 +755,6 @@ textarea:focus {
   font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.02em;
-}
-
-.composer-secondary-button {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid rgba(23, 50, 77, 0.14);
-  background: rgba(255, 255, 255, 0.72);
-  color: var(--brand);
-  min-height: 58px;
-  padding: 0 10px;
-  border-radius: 18px;
-  font-size: 13px;
-  font-weight: 700;
 }
 
 .composer button[disabled],
@@ -1205,16 +1185,6 @@ textarea:focus {
     font-size: 13px;
   }
 
-  .composer-secondary-button {
-    min-height: 40px;
-    height: 100%;
-    border-radius: 12px;
-    font-size: 10px;
-    padding: 0 4px;
-    line-height: 1.2;
-    word-break: break-all;
-  }
-
   .session-actions {
     margin-top: 4px;
   }
@@ -1574,98 +1544,6 @@ textarea:focus {
   border-radius: 8px;
 }
 
-.message.agent .md-body .repo-copy-btn,
-.fullscreen-body .repo-copy-btn {
-  appearance: none;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  margin-left: 8px;
-  border: 1px solid rgba(23, 50, 77, 0.16);
-  border-radius: 10px;
-  background: rgba(23, 50, 77, 0.04);
-  color: var(--brand);
-  font-size: 0;
-  cursor: pointer;
-  vertical-align: middle;
-  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
-}
-
-.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::before,
-.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::after,
-.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::before,
-.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::after {
-  content: "";
-  position: absolute;
-  width: 11px;
-  height: 13px;
-  border: 1.6px solid currentColor;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::before,
-.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::before {
-  transform: translate(-2px, -2px);
-  opacity: 0.58;
-}
-
-.message.agent .md-body .repo-copy-btn:not(.repo-copy-btn--icon)::after,
-.fullscreen-body .repo-copy-btn:not(.repo-copy-btn--icon)::after {
-  transform: translate(2px, 2px);
-}
-
-.message.agent .md-body .repo-copy-btn--icon .repo-copy-icon,
-.fullscreen-body .repo-copy-btn--icon .repo-copy-icon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-}
-
-.message.agent .md-body .repo-copy-btn--icon .repo-copy-icon svg,
-.fullscreen-body .repo-copy-btn--icon .repo-copy-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.message.agent .md-body .repo-copy-btn:hover,
-.fullscreen-body .repo-copy-btn:hover {
-  background: rgba(23, 50, 77, 0.1);
-  border-color: rgba(23, 50, 77, 0.26);
-  transform: translateY(-1px);
-}
-
-.message.agent .md-body .repo-copy-btn:focus-visible,
-.fullscreen-body .repo-copy-btn:focus-visible {
-  outline: 2px solid rgba(47, 91, 130, 0.16);
-  outline-offset: 2px;
-}
-
-.message.agent .md-body .repo-copy-btn.copied,
-.fullscreen-body .repo-copy-btn.copied {
-  background: rgba(47, 109, 68, 0.14);
-  border-color: rgba(47, 109, 68, 0.32);
-  color: var(--ok);
-}
-
-.message.agent .md-body .repo-copy-btn.copy-failed,
-.fullscreen-body .repo-copy-btn.copy-failed {
-  background: rgba(185, 28, 28, 0.1);
-  border-color: rgba(185, 28, 28, 0.22);
-  color: #b42318;
-}
-
-.message.agent .md-body .repo-copy-btn--title,
-.fullscreen-body .repo-copy-btn--title {
-  width: 28px;
-  height: 28px;
-  margin-left: 10px;
-}
-
 /* ── 深色模式 ── */
 
 @media (prefers-color-scheme: dark) {
@@ -1770,12 +1648,6 @@ textarea:focus {
   .quick-actions button {
     background: linear-gradient(135deg, #9c6230, #7a4a1d);
     border-color: rgba(160, 100, 40, 0.3);
-  }
-
-  .composer-secondary-button {
-    background: rgba(50, 55, 65, 0.7);
-    border-color: rgba(200, 210, 225, 0.12);
-    color: var(--brand);
   }
 
   .report-head {

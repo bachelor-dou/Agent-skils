@@ -23,7 +23,6 @@
 
     // 共享工具（来自 common.js）
     const escapeHtml = window.HotCommon.escapeHtml;
-    const copyText = window.HotCommon.copyText;
 
   let initialSessionExpired = false;
     let sessionId = getOrCreateSessionId();
@@ -1053,54 +1052,6 @@
       }
       return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
     }
-
-    function setCopyButtonMessage(button, message) {
-      button.setAttribute("title", message);
-      button.setAttribute("aria-label", message);
-    }
-
-    function setCopyButtonState(button, state, repo) {
-      const idleMessage = `复制 ${repo}`;
-      const copiedMessage = `已复制 ${repo}`;
-      const failedMessage = `复制失败 ${repo}`;
-
-      button.classList.toggle("copied", state === "copied");
-      button.classList.toggle("copy-failed", state === "failed");
-
-      if (state === "copied") {
-        setCopyButtonMessage(button, copiedMessage);
-        return;
-      }
-      if (state === "failed") {
-        setCopyButtonMessage(button, failedMessage);
-        return;
-      }
-      setCopyButtonMessage(button, idleMessage);
-    }
-
-    document.addEventListener("click", async (event) => {
-      const button = event.target.closest(".repo-copy-btn");
-      if (!button) {
-        return;
-      }
-
-      const repo = button.getAttribute("data-repo") || "";
-      if (!repo) {
-        return;
-      }
-
-      event.preventDefault();
-      try {
-        await copyText(repo);
-        setCopyButtonState(button, "copied", repo);
-      } catch (_error) {
-        setCopyButtonState(button, "failed", repo);
-      }
-
-      window.setTimeout(() => {
-        setCopyButtonState(button, "idle", repo);
-      }, 1400);
-    });
 
     // ── 双击消息全屏查看 ──
     (function setupFullscreen() {

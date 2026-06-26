@@ -22,6 +22,9 @@ class RankingCache:
 
     def __init__(self) -> None:
         self._store: dict[str, tuple[str, object]] = {}
+        # 会话级旁路缓存：不随阶段失效。用于缓存"按项目"的稳定事实（如各候选最近 K 天增长），
+        # 使阈值/top_n 等下游参数变化时无需对已算过的项目重复发 API。
+        self.aux: dict[str, dict] = {}
 
     def get(self, stage: str, params: dict):
         entry = self._store.get(stage)

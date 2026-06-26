@@ -111,6 +111,18 @@ DB_DIFF_TOLERANCE_HOURS: int = 5
 MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 
 # ──────────────────────────────────────────────────────────────
+# 最近爆发加成（仅综合/关键词榜打分）
+#   在"窗口总增长"基础分之上，叠加"最近 RECENT_GROWTH_DAYS 天爆发强度"的乘法加成，
+#   让最近几天突然爆火的项目排名更高（而非只看窗口平均）。
+#     acceleration = (recent_growth / RECENT_GROWTH_DAYS) / (window_growth / window_days)
+#     boost        = 1 + BURST_ALPHA * min(max(acceleration - 1, 0), BURST_CAP)
+#   acceleration<=1（持平或放缓）→ boost=1，不反向惩罚。
+# ──────────────────────────────────────────────────────────────
+RECENT_GROWTH_DAYS: int = 3       # "最近几天"窗口（天）：候选池额外计算该窗口增长
+BURST_ALPHA: float = 0.3          # 爆发加成强度（越大，最近爆发对排名影响越大）
+BURST_CAP: float = 2.0            # acceleration-1 的封顶（boost 最高 1 + ALPHA*CAP）
+
+# ──────────────────────────────────────────────────────────────
 # 评分模式
 #   comprehensive — 综合排名（增长量 + 增长率，新项目平滑折扣）
 #   hot_new       — 新项目专榜（仅创建时间 <= DAYS_SINCE_CREATED 天的新项目，按增长量排序）

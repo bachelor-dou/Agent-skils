@@ -373,6 +373,37 @@ h1 {
   color: #b42318;
 }
 
+.content .repo-copy-btn .repo-copy-feedback {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translate(-50%, 4px);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+  color: #fff;
+  background: #1f6e45;
+  box-shadow: 0 6px 16px rgba(31, 110, 69, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+  z-index: 2;
+}
+
+.content .repo-copy-btn.copied .repo-copy-feedback,
+.content .repo-copy-btn.copy-failed .repo-copy-feedback {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.content .repo-copy-btn.copy-failed .repo-copy-feedback {
+  background: #b42318;
+  box-shadow: 0 6px 16px rgba(180, 35, 24, 0.28);
+}
+
 .content .repo-copy-btn--title {
   width: 28px;
   height: 28px;
