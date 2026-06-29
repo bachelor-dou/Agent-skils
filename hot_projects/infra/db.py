@@ -9,6 +9,8 @@ DB 结构：
     "projects": {
       "owner/repo": {
         "star": 12345,
+        "forks": 678,                            # 最近一次刷新的 fork 数
+        "created_at": "YYYY-MM-DDTHH:MM:SSZ",     # 仓库创建时间（新项目判定）
         "refreshed_at": "YYYY-MM-DDTHH:MM:SSZ",  # 项目级快照时间，差值判定依据
         "desc": "LLM 生成的描述",
         "short_desc": "GitHub 原始 description",

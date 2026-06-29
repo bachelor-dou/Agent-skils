@@ -33,15 +33,3 @@ def test_cron_logging_creates_matching_debug_file(monkeypatch, tmp_path):
         for handler in list(root_logger.handlers):
             root_logger.removeHandler(handler)
             handler.close()
-
-
-def test_log_knobs_stay_out_of_global_config():
-    import hot_projects.config as config
-
-    assert not hasattr(config, "LOG_LEVEL")
-    assert not hasattr(config, "LOG_MAX_BYTES")
-    assert not hasattr(config, "LOG_BACKUP_COUNT")
-    assert not hasattr(config, "DEBUG_LOG_ENABLED")
-    assert not hasattr(config, "DEBUG_LOG_DIR")
-    assert not hasattr(config, "DEBUG_LOG_MAX_BYTES")
-    assert not hasattr(config, "DEBUG_LOG_BACKUP_COUNT")

@@ -43,8 +43,9 @@ def _hydrate_candidate_created_at(
 ) -> None:
     """为缺失 created_at 的候选从 DB 补充创建时间。
 
-    API 补全已在 tool_batch_check_growth 初筛阶段完成并存入 DB，
-    此处仅查 DB 作为二次兜底（如 comprehensive 搜索后切 hot_new 排名）。
+    created_at 的 API 补全已在 tool_batch_check_growth 初筛阶段完成（写入内存候选；
+    仅 force_refresh 路径才落 DB 快照）；此处查 DB 作为二次兜底
+    （如 comprehensive 搜索后切 hot_new 排名）。
     """
     if not candidate_map:
         return
@@ -75,7 +76,7 @@ def step2_rank_and_select(
     评分排序 + 截取 Top N。
 
     评分模式：
-      comprehensive — 综合排名：基础分 = (log(增长量) + log(增长率)) × 折扣；
+      comprehensive — 综合排名：基础分 = (log(1+增长量)·1000 + log2(1+增长率)·3000) × 折扣；
                       再叠加"最近爆发加成"——若候选带 recent_growth（最近 recent_growth_days
                       天增长），最近速率显著高于整窗平均时给乘法加成 boost，
                       使最近几天爆火的项目排名更高（详见 _burst_boost）。

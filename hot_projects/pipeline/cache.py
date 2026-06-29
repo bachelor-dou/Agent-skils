@@ -5,7 +5,8 @@
   growth_calc   ← collect 输出 + growth_calc_days, days_since_created      (昂贵: API)
   threshold     ← growth_calc 输出 + growth_threshold                       (廉价: 纯过滤)
   rank          ← threshold 输出 + mode, top_n, days_since_created          (廉价)
-  report        ← rank 输出 + 展示参数
+
+注：report 仅作为 STAGE_ORDER 末位用于失效传播，run_ranking 直接生成报告、不缓存该阶段。
 """
 
 import json

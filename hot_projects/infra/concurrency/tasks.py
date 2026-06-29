@@ -3,7 +3,7 @@ Task 子类定义
 ==============
 定义搜索 / 扫描 / 增长计算相关的 Task 子类。
 
-Task 子类（继承 task_base.Task）由 agent_tools 中的 Tool 函数创建并提交到 Pool。
+Task 子类（继承 task_base.Task）由 capabilities/_impl.py 中的 Tool 函数创建并提交到 AsyncTaskDispatcher。
 辅助函数（checkpoint/批量提交等）已拆分到 task_help.py。
 """
 

@@ -1,11 +1,11 @@
 """
 自定义异常
 ==========
-Worker Pool 与 GitHub API 共用的异常层级：
+AsyncTaskDispatcher 与 GitHub API 共用的异常层级：
 
-  RetryableError        — 任务应回退重试
+  RetryableError        — 任务回队重试
     └─ RateLimitError   — GitHub API 限流（403/429）
-  FatalWorkerError      — Worker 应退出
+  FatalWorkerError      — 本次尝试失败，任务回队（worker 不退出）
     └─ TokenInvalidError — Token 已失效（401）
 """
 
@@ -19,7 +19,7 @@ class RetryableError(Exception):
 
 
 class FatalWorkerError(Exception):
-    """Worker 应退出（任务回退给其他 Worker）。"""
+    """本次尝试致命错误；dispatcher 将任务重新入队，worker 继续运行。"""
 
     pass
 

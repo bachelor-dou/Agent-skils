@@ -4,8 +4,8 @@ Task 辅助函数
 承载 Task 相关的流程辅助逻辑：候选管理、checkpoint、批量增长任务提交。
 
 说明：
-  - 任务子类定义保留在 task.py。
-  - 本模块不在顶层导入 CalcGrowthTask，避免与 task.py 形成循环导入。
+  - 任务子类定义保留在 tasks.py。
+  - 本模块不在顶层导入 CalcGrowthTask，避免与 tasks.py 形成循环导入。
 """
 
 import json
@@ -62,7 +62,7 @@ def _upsert_candidate(
 
 
 def _load_checkpoint() -> dict:
-    """加载断点续传文件。返回 {full_name: {"growth": int, "star": int}} 或空字典。"""
+    """加载断点续传文件。返回 {full_name: {"growth": int | "unresolved", "star": int}} 或空字典。"""
     if not os.path.exists(CHECKPOINT_FILE_PATH):
         return {}
     try:
@@ -171,7 +171,7 @@ def _submit_growth_tasks(
     # 定时=调用方传入并已取 max(指定,默认)）。
     # 第二层（项目级）：项目在 DB 里 + |项目年龄 − time_window| ≤ 容差(5h) → 走差值，
     # 用 seeding 覆盖前捕获的旧快照(prev_snapshot) 计算 current_star − 旧star。
-    # 新项目榜(is_hot_new) 与 DB 整体失效时，不走差值，全部实时。
+    # 仅新项目榜(is_hot_new) 整体不走差值、全部实时；综合榜按项目级窗口匹配逐项决定。
     prev_snapshot = growth_ctx.get("prev_snapshot", {}) or {}
     # 差值有效性改为「逐项判定」：仅当项目快照 refreshed_at 与本次窗口相差 ≤ 5h 才走差值
     # （见下方 is_project_window_match）。不再依赖由静态 DATA_EXPIRE_DAYS 驱动的 db["valid"]

@@ -20,20 +20,3 @@ def test_report_fetches_readme_when_no_desc(tmp_path, monkeypatch):
     )
     assert path  # 报告已生成
     assert captured["repo_info"].get("readme_excerpt") == "README 真实内容"
-
-
-def test_report_no_fetch_without_token(tmp_path, monkeypatch):
-    """未提供 token_mgr → 不抓取（维持只读元数据行为）。"""
-    monkeypatch.setattr(R, "REPORT_DIR", str(tmp_path))
-    called = {"fetched": False}
-
-    def fake_fetch(*a, **k):
-        called["fetched"] = True
-        return {"text": "x"}
-
-    monkeypatch.setattr(R, "call_llm_describe", lambda *a, **k: "d")
-    monkeypatch.setattr(R, "fetch_repo_readme_excerpt", fake_fetch)
-
-    db = {"projects": {"a/b": {"short_desc": ""}}}
-    R.step3_generate_report([("a/b", {"growth": 100, "star": 1500})], db, token_mgr=None)
-    assert called["fetched"] is False

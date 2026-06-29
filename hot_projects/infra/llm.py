@@ -3,8 +3,8 @@ LLM 调用模块
 =============
 调用 LLM（兼容 OpenAI /v1/chat/completions 格式）为项目生成结构化介绍。
 
-仅对最终 Top N 中 desc 为空的项目调用，
-传入仓库元信息（description、language、topics、readme_url）供 LLM 综合总结。
+调用方包括：报告生成（Top N 中 desc 为空的项目）、check_repo_growth、describe_project 等。
+传入仓库元信息（description、language、topics、readme_url 等）供 LLM 综合总结。
 """
 
 import logging
@@ -101,10 +101,10 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
         repo_name: "owner/repo"
         repo_info: DB 中的仓库信息字典（含 short_desc / language / topics / readme_url）
         html_url:  项目 GitHub 页面 URL
-        detail_level: "standard"=260-520字三段式, "detailed"=800-1500字六段式
+        detail_level: "standard"=260-520字三段式, "detailed"=400-800字四段式
 
     Returns:
-        LLM 生成的描述文本；失败 3 次后返回空字符串。
+        LLM 生成的描述文本；单次调用失败（含 LLMClient 内部 A/B 回退与重试）后返回空字符串。
     """
     if not _llm_configured():
         logger.warning("LLM 未配置，跳过描述生成。")

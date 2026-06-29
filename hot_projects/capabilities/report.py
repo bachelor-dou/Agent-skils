@@ -4,18 +4,18 @@
 为 Top N 项目生成 LLM 描述，并输出纯 Markdown 报告。
 
 架构定位：
-    执行层独立组件，由 agent_tools.tool_generate_report() 调用。
+    执行层独立组件，由 capabilities/_impl.tool_generate_report() 与 pipeline 调用。
 
 工作流程：
-    1. 遍历已排名项目，优先复用 DB 缓存描述，否则调用 LLM 生成 200-400 字中文摘要
+    1. 遍历已排名项目，优先复用 DB 缓存描述，否则调用 LLM 生成 detailed 四段式中文描述（约 400-800 字）
     2. 每个项目输出可直接阅读的 Markdown 条目，避免将前端 HTML 混入 .md 文件
-    3. 输出到 report/ 目录，文件名为日期格式 (YYYY-MM-DD.md)
+    3. 输出到 report/ 目录，基础文件名为 YYYY-MM-DD.md，可附加模式/窗口/方向后缀（如 _10d、_hot_new、_win7d）
     4. 支持 comprehensive / hot_new 两种标题样式 + 自定义时间窗口
 
 关键实现细节：
     - LLM 描述容错：调用失败时回退到 GitHub 原始 description
     - 单项目始终展示创建时间；若仍处于新项目窗口，则额外标记 NEW
-    - 原子写入：报告先写 .tmp 再 os.replace，避免中间状态
+    - 直接写入目标 .md 文件（open(path, "w")）
 """
 
 import logging

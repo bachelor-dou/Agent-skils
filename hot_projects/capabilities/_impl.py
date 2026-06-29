@@ -1,7 +1,7 @@
 """
 Agent Tool 定义（执行层 · 工具中枢）
 ====================================
-9 个 Tool 函数（TOOL_SCHEMAS 已集中到 parsing/schema.py）。
+9 个 Tool 函数（TOOL_SCHEMAS / AGENT_TOOL_SCHEMAS 集中在 tools/schemas.py）。
 
 架构定位：
   capabilities 层核心实现，连接上层（pipeline / tools / cron_scheduled_update）与各执行组件（scoring/report/growth/trending）。
@@ -19,8 +19,8 @@ Tool 列表：
   9. fetch_trending         — 获取 GitHub Trending 热门仓库
 
 内部实现拆分到独立模块：
-  - tasks/     — Task 子类、批量提交、断点续传、候选管理
-  - ranking.py — 评分排序算法
+  - infra/concurrency/ — Task 子类、批量提交、断点续传、候选管理
+  - scoring.py — 评分排序算法
   - report.py  — 报告生成
 """
 
@@ -432,7 +432,7 @@ def tool_scan_star_range(
 
     阶段隔离：
     Phase 0 — 串行：auto_split_star_range 递归分段（主线程优先 token_idx=0，限流时自动切换其他 token）
-      Phase 1 — 并行：ScanSegmentTask 提交到 Pool，N Worker 并行扫描
+      Phase 1 — 并行：ScanSegmentTask 提交到 AsyncTaskDispatcher，N Worker 并行扫描
 
     Args:
         min_star:         项目最低 star 门槛（扫描区间下界）
@@ -692,11 +692,13 @@ def tool_batch_check_growth(
     增长计算策略：
     - 综合榜：未指定窗口用DB年龄窗口+DB差值；指定窗口匹配DB用差值；不匹配用实时
     - 新项目榜：始终实时计算（因为新项目DB无历史数据）
-    - force_refresh=True（仅定时脚本）：强制实时计算并刷新DB快照
+    - force_refresh=True（仅定时脚本）：刷新DB快照 + 启用 checkpoint；
+      窗口匹配的项目仍走 DB 差值（并非全局强制实时）
 
     DB写入权限（can_write_db）：
-    - 定时脚本 force_refresh=True → 允许刷新DB快照
-    - 其他场景（force_refresh=False）→ 只写候选 desc 字段，不刷新快照
+    - 定时脚本 force_refresh=True → 允许刷新DB快照（seeding）
+    - 其他场景（force_refresh=False）→ 不刷新快照；desc 不在此写，
+      由 ranking 复合工具完成后经 save_db_desc_only 持久化
 
     Args:
         repos:            仓库列表（含 full_name, star, _raw）
@@ -953,7 +955,8 @@ def tool_rank_candidates(
         prefiltered_days_since_created=prefiltered_days_since_created,
     )[:top_n]
 
-    # 注意: DB 保存逻辑在 agent.py 中统一处理，此处不直接调用 save_db
+    # 注意: DB 持久化由调用方负责（Agent 路径在 ranking 复合工具后 save_db_desc_only；
+    # cron 走全量 save_db），此处不直接调用 save_db。
 
     ranked = []
     for i, (name, info) in enumerate(top, 1):

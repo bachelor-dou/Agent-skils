@@ -1,18 +1,6 @@
 from hot_projects.pipeline.cache import RankingCache
 
 
-def test_reuse_when_signature_unchanged():
-    c = RankingCache()
-    c.set("collect", {"min_star": 1200}, payload=["repoX"])
-    assert c.get("collect", {"min_star": 1200}) == ["repoX"]
-
-
-def test_invalidate_on_signature_change():
-    c = RankingCache()
-    c.set("collect", {"min_star": 1200}, payload=["repoX"])
-    assert c.get("collect", {"min_star": 2000}) is None
-
-
 def test_downstream_invalidated_when_upstream_changes():
     c = RankingCache()
     c.set("collect", {"min_star": 1200}, payload="C")

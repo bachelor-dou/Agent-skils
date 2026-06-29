@@ -6,12 +6,12 @@ API Server — FastAPI Web 服务入口
 
 启动方式：
   # 开发环境
-  uvicorn hot_projects.api_server:app --host 0.0.0.0 --port 8000 --reload
+  uvicorn hot_projects.api_server:app --host 0.0.0.0 --port 8001 --reload
 
   # 生产环境（进程挂起）
-  nohup uvicorn hot_projects.api_server:app --host 0.0.0.0 --port 8000 --workers 1 &
+  nohup uvicorn hot_projects.api_server:app --host 0.0.0.0 --port 8001 --workers 1 &
 
-  # 或使用 python -m 启动
+  # 或使用 python -m 启动（main() 默认 port=8001）
   python -m hot_projects.api_server
 
 API 接口：
@@ -19,7 +19,7 @@ API 接口：
   GET  /api/reports        — 获取报告列表
   GET  /api/reports/{name} — 获取单个报告内容
   GET  /api/status         — 服务状态检查
-  WS   /ws/chat/{sid}      — WebSocket 实时对话（预留）
+  WS   /ws/chat/{sid}      — WebSocket 实时对话（进度流式推送 + 末尾整段回复）
 
 依赖：
   pip install fastapi uvicorn
@@ -677,7 +677,7 @@ async def index():
 
 @app.get("/chat", response_class=FileResponse)
 async def chat_page():
-    """提供移动端聊天页静态文件。"""
+    """渲染并返回移动端聊天页（读取 HTML 模板并注入占位符，非原样静态文件）。"""
     return _build_page_response(CHAT_PAGE_PATH, "聊天页面不存在")
 
 
@@ -789,7 +789,9 @@ async def delete_session(session_id: str):
 
 
 # ══════════════════════════════════════════════════════════════
-# WebSocket（预留，未来支持流式输出）
+# WebSocket 实时对话
+#   执行期间流式推送 进度(progress) + 心跳(heartbeat)；回复正文在末尾以单条
+#   reply 整段返回（当前不做 token 级流式，agent.chat 同步返回完整文本）。
 # ══════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/chat/{session_id}")

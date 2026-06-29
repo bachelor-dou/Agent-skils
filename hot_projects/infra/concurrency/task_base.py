@@ -1,7 +1,7 @@
 """
 Task 基类
 =========
-并行任务的抽象基类，定义 Worker Pool 任务接口。
+并行任务的抽象基类，定义 AsyncTaskDispatcher 任务接口。
 
 扩展新任务类型只需：
   1. 继承 Task
@@ -9,9 +9,9 @@ Task 基类
   3. 实现 execute(token_idx) 方法
   4. 可选实现 on_result() / on_error() 回调
 
-execute() 可抛出的异常（由 Worker 统一处理）：
-  - FatalWorkerError / TokenInvalidError → Worker 退出并回退任务
-  - RetryableError / RateLimitError      → Worker sleep 后回退任务重试
+execute() 可抛出的异常（由 dispatcher worker 统一处理）：
+  - FatalWorkerError / TokenInvalidError → 任务回队重试（worker 不退出）
+  - RetryableError / RateLimitError      → 退避后回队重试（超过 max_requeue 才放弃）
   - 其他 Exception                       → 记录错误，标记任务完成（不回退）
 """
 
@@ -63,11 +63,11 @@ class Task(ABC):
         return None
 
     def on_result(self, result: Any) -> None:
-        """结果处理回调，由主线程在 wait_all_done 后调用。子类可覆盖。"""
+        """结果处理回调，由 dispatcher worker 在 execute_async 成功后实时调用。子类可覆盖。"""
         pass
 
     def on_error(self, error: Exception) -> None:
-        """错误处理回调，由主线程在 wait_all_done 后调用。子类可覆盖。"""
+        """错误处理回调，由 dispatcher worker 在任务失败时实时调用。子类可覆盖。"""
         pass
 
     def __str__(self) -> str:
