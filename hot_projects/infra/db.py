@@ -13,6 +13,7 @@ DB 结构：
         "created_at": "YYYY-MM-DDTHH:MM:SSZ",     # 仓库创建时间（新项目判定）
         "refreshed_at": "YYYY-MM-DDTHH:MM:SSZ",  # 项目级快照时间，差值判定依据
         "desc": "LLM 生成的描述",
+        "desc_updated_at": "YYYY-MM-DD",          # desc 生成日期，超过 DESC_REFRESH_DAYS 天重刷
         "short_desc": "GitHub 原始 description",
         "language": "Python",
                 "topics": ["ai", "llm"],
@@ -209,14 +210,24 @@ def save_db_desc_only(db: dict) -> int:
                     desc = info.get("desc", "")
                     if not desc:
                         continue
+                    desc_ts = info.get("desc_updated_at", "")
 
                     existing = disk_projects.get(name)
                     if isinstance(existing, dict):
+                        touched = False
                         if existing.get("desc") != desc:
                             existing["desc"] = desc
+                            touched = True
+                        if desc_ts and existing.get("desc_updated_at") != desc_ts:
+                            existing["desc_updated_at"] = desc_ts
+                            touched = True
+                        if touched:
                             changed_projects += 1
                     else:
-                        disk_projects[name] = {"desc": desc}
+                        new_record = {"desc": desc}
+                        if desc_ts:
+                            new_record["desc_updated_at"] = desc_ts
+                        disk_projects[name] = new_record
                         changed_projects += 1
 
                 if changed_projects == 0:

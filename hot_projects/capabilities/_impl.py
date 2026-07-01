@@ -806,7 +806,7 @@ def tool_batch_check_growth(
             update_db_project(db_projects, fn, info.get("star", 0), repo_item)
             seeded_count += 1
         if seeded_count:
-            logger.info(f"刷新模式: 初筛阶段已同步 DB 快照 {seeded_count} 个项目。")
+            logger.info(f"刷新模式:  当前star数 更新已有{seeded_count} 个项目的 DB 快照基线（refreshed_at=now）。")
 
     # ── 新项目前置筛选：仅保留创建时间在窗口内的仓库 ──
     skipped_count = 0
@@ -908,6 +908,9 @@ def tool_batch_check_growth(
         "use_realtime_growth": use_realtime_growth,
         "db_updated": db_updated,
         "seeded_snapshot_count": seeded_count,
+        "db_diff_count": growth_ctx.get("db_diff_count", 0),
+        "realtime_count": growth_ctx.get("realtime_count", 0),
+        "resumed_count": growth_ctx.get("resumed_count", 0),
         "growth_calc_days": effective_time_window,
         "requested_growth_calc_days": growth_calc_days,
     }

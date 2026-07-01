@@ -81,14 +81,22 @@ def _calc_recent_growth(provider, candidates: dict, db: dict, recent_days: int) 
         }
         for fn, info in candidates.items()
     ]
-    res = provider.batch_growth(
-        cand_repos, db,
-        growth_threshold=0,
-        growth_calc_days=recent_days,
-        window_specified=True,
-        force_refresh=False,
-        candidate_log_threshold=10 ** 9,  # 抑制 [OK] 候选 日志（这是最近窗口的副计算）
-    )
+    # 这趟是"最近窗口"副计算：把 discover_hot 的 INFO 噪声（批量增长/[GROWTH] 逐条）压到
+    # WARNING，避免和主 7 天增长的日志混淆；调用方会打印清晰的探针起止行。
+    growth_logger = logging.getLogger("discover_hot")
+    prev_level = growth_logger.level
+    growth_logger.setLevel(logging.WARNING)
+    try:
+        res = provider.batch_growth(
+            cand_repos, db,
+            growth_threshold=0,
+            growth_calc_days=recent_days,
+            window_specified=True,
+            force_refresh=False,
+            candidate_log_threshold=10 ** 9,  # 抑制 [OK] 候选 日志
+        )
+    finally:
+        growth_logger.setLevel(prev_level)
     out: dict[str, int] = {}
     for fn, info in res.get("candidates", {}).items():
         g = info.get("growth")
@@ -155,7 +163,12 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         cache.set("growth_calc", growth_sig, growth)
     effective_window = growth.get("growth_calc_days", effective_window)
     growth_candidates_count = len(growth.get("candidates", {}))
-    logger.info("增长候选池: %s 个。", growth_candidates_count)
+    collected_count = growth.get("total_checked", len(repos))
+    excluded_count = max(0, collected_count - growth_candidates_count)
+    logger.info(
+        "增长候选池(增长≥0): %s 个（本轮计算 %s，掉星/未确定剔除 %s）。",
+        growth_candidates_count, collected_count, excluded_count,
+    )
     _emit(progress_cb, 65, "增长计算完成")
 
     # ── 3) threshold（廉价过滤）──
@@ -171,15 +184,30 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
 
     # ── 3.5) recent_growth：候选池最近 K 天增长，给打分做"最近爆发"加成（仅综合/关键词榜）──
     # 按项目缓存在 cache.aux（不随阶段失效）：阈值/top_n 变化时只对新出现的候选发 API。
+    recent_probe_count = 0
+    boost_applied_count = 0
     if rank_mode == "comprehensive" and candidates:
         recent_by_repo = cache.aux.setdefault("recent_growth", {})
         missing = {fn: info for fn, info in candidates.items() if fn not in recent_by_repo}
         if missing:
-            _emit(progress_cb, 70, f"计算最近 {RECENT_GROWTH_DAYS} 天爆发强度（{len(missing)} 个）")
+            _emit(progress_cb, 70, f"最近 {RECENT_GROWTH_DAYS} 天爆发探针（{len(missing)} 个）")
+            logger.info("最近爆发探针: 对 %s 个达标候选实时计算近 %s 天增长…", len(missing), RECENT_GROWTH_DAYS)
             recent_by_repo.update(_calc_recent_growth(provider, missing, db, RECENT_GROWTH_DAYS))
         for fn, info in candidates.items():
             if fn in recent_by_repo:
                 info["recent_growth"] = recent_by_repo[fn]
+        # 爆发加成生效数：近 K 天速率 > 整窗平均速率（acceleration > 1）
+        recent_probe_count = sum(1 for info in candidates.values() if "recent_growth" in info)
+        if effective_window > 0:
+            for info in candidates.values():
+                rg = info.get("recent_growth")
+                g = info.get("growth", 0)
+                if rg is not None and g > 0 and (rg / RECENT_GROWTH_DAYS) > (g / effective_window):
+                    boost_applied_count += 1
+        logger.info(
+            "最近爆发探针完成: %s 个候选，爆发加成生效 %s 个。",
+            recent_probe_count, boost_applied_count,
+        )
 
     # ── 4) rank（廉价）──
     rank_sig = {**thr_sig, "rank_mode": rank_mode, "top_n": params.get("top_n")}
@@ -209,6 +237,16 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         "returned_count": len(ranked),
         "mode": rank_mode,
         "growth_calc_days": effective_window,
+        "funnel": {
+            "collected": collected_count,
+            "db_diff": growth.get("db_diff_count", 0),
+            "realtime": growth.get("realtime_count", 0),
+            "growth_pool": growth_candidates_count,
+            "qualified": len(candidates),
+            "recent_probe": recent_probe_count,
+            "boost_applied": boost_applied_count,
+            "ranked": len(ranked),
+        },
     }
 
     # ── 5) report ──

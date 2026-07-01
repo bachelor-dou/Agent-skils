@@ -104,6 +104,7 @@ HOT_PROJECT_COUNT: int = 120           # 综合热门项目默认输出数量（
 HOT_NEW_PROJECT_COUNT: int = 13        # 新项目榜默认输出数量（未指定 top_n 时使用）
 GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
 DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
+DESC_REFRESH_DAYS: int = 60            # LLM 描述刷新周期（天）—— desc 生成超过此天数则重新生成（默认约 2 个月）
 # DB 差值法：项目 refreshed_at 年龄与计算窗口的最大允许偏差（小时）。
 # 仅当 |项目年龄 − 计算窗口| ≤ 该值时，current_star − DB旧star 才被视为有效的窗口期增长。
 DB_DIFF_TOLERANCE_HOURS: int = 5
@@ -119,7 +120,7 @@ MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 #   acceleration<=1（持平或放缓）→ boost=1，不反向惩罚。
 # ──────────────────────────────────────────────────────────────
 RECENT_GROWTH_DAYS: int = 3       # "最近几天"窗口（天）：候选池额外计算该窗口增长
-BURST_ALPHA: float = 0.3          # 爆发加成强度（越大，最近爆发对排名影响越大）
+BURST_ALPHA: float = 0.15         # 爆发加成强度（越大，最近爆发对排名影响越大）
 BURST_CAP: float = 2.0            # acceleration-1 的封顶（boost 最高 1 + ALPHA*CAP）
 
 # ──────────────────────────────────────────────────────────────

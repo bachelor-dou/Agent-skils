@@ -173,7 +173,29 @@ class DiscoveryPipeline:
             "ranked_count": len(ranked),
             "candidates_count": result.get("candidates_count", 0),
             "mode": result.get("mode", mode),
+            "funnel": result.get("funnel"),
         }
+
+
+def log_pipeline_funnel(funnel: dict | None) -> None:
+    """输出本轮榜单漏斗：从收集到出榜的逐层数量，集中一处便于核对。"""
+    if not funnel:
+        return
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("【本轮榜单漏斗】")
+    logger.info("=" * 70)
+    logger.info(f"收集并计算增长: {funnel.get('collected', 0)} 个仓库")
+    logger.info(f"  · DB 差值(秒算): {funnel.get('db_diff', 0)}")
+    logger.info(f"  · 实时 API 计算: {funnel.get('realtime', 0)}")
+    logger.info(f"增长候选池(增长≥0): {funnel.get('growth_pool', 0)}")
+    logger.info(f"达标(增长≥阈值) → 进入排名: {funnel.get('qualified', 0)}")
+    logger.info(
+        f"最近爆发探针: {funnel.get('recent_probe', 0)} 个"
+        f"（爆发加成生效 {funnel.get('boost_applied', 0)}）"
+    )
+    logger.info(f"榜单输出: Top {funnel.get('ranked', 0)}")
+    logger.info("=" * 70)
 
 
 def log_update_summary(old_db: dict, new_db: dict) -> None:
@@ -428,7 +450,8 @@ def run_update(
     report_path = result.get("report_path", "")
     if report_path:
         logger.info(f"定时更新完成! 报告: {report_path}")
-        # 输出更新统计
+        # 先打印榜单漏斗（收集→出榜逐层数量），再打印 DB 字段变化统计
+        log_pipeline_funnel(result.get("funnel"))
         log_update_summary(old_db, db)
     elif result.get("error"):
         logger.error(f"定时更新失败: {result['error']}")

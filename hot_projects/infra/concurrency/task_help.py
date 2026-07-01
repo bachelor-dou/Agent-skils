@@ -224,6 +224,10 @@ def _submit_growth_tasks(
             _ctx=growth_ctx,
         ))
 
+    growth_ctx["db_diff_count"] = db_count
+    growth_ctx["realtime_count"] = len(pending)
+    growth_ctx["resumed_count"] = resumed_count
+
     db_age_info = f"(距上次更新≈{db_age}天)" if db_age is not None else ""
     logger.info(
         f"批量增长计算: {len(pending)} 个任务入队 "

@@ -26,12 +26,28 @@ from datetime import datetime, timedelta, timezone
 from ..config import (
     MIN_STAR,
     DAYS_SINCE_CREATED,
+    DESC_REFRESH_DAYS,
     REPORT_DIR,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
 )
 from ..infra.llm import call_llm_describe
 from ..providers.github.api import fetch_repo_readme_excerpt, fetch_repo_recent_commits
+
+
+def _desc_is_stale(desc_updated_at: str, max_age_days: int) -> bool:
+    """desc 生成时间超过 max_age_days 天则视为陈旧，需重新生成。
+
+    无时间戳（旧数据）返回 False——交由调用方补盖今天的时间戳（grandfather），
+    避免历史 desc 全部一次性判定过期、造成一轮内大量重刷。
+    """
+    if not desc_updated_at:
+        return False
+    try:
+        ts = datetime.strptime(desc_updated_at[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    return (datetime.now(timezone.utc) - ts).days >= max_age_days
 
 logger = logging.getLogger("discover_hot")
 
@@ -294,19 +310,31 @@ def step3_generate_report(
 
     need_llm: list[tuple[int, str, str, dict]] = []
     desc_results: dict[str, str] = {}
+    stale_refresh = 0
 
     for idx, (full_name, _info) in enumerate(top_projects):
         saved = db_projects.get(full_name, {})
         existing_desc = saved.get("desc", "")
+        desc_ts = saved.get("desc_updated_at", "")
         html_url = f"https://github.com/{full_name}"
-        if existing_desc:
+        if existing_desc and _desc_is_stale(desc_ts, DESC_REFRESH_DAYS):
+            # 描述已超过刷新周期 → 重新生成（项目可能已迭代，避免描述陈旧）
+            stale_refresh += 1
+            need_llm.append((idx + 1, full_name, html_url, saved))
+        elif existing_desc:
             desc_results[full_name] = existing_desc
+            # 旧数据无时间戳：补盖为今天（grandfather），避免历史 desc 全部一次性过期重刷
+            if not desc_ts and full_name in db_projects:
+                db_projects[full_name]["desc_updated_at"] = today
         else:
             need_llm.append((idx + 1, full_name, html_url, saved))
 
     if need_llm:
         total_llm = len(need_llm)
-        logger.info(f"报告生成: 需要生成完整描述 {total_llm} 个项目，按顺序调用 LLM...")
+        logger.info(
+            f"报告生成: 需生成完整描述 {total_llm} 个"
+            f"（新 {total_llm - stale_refresh}，过期重刷 {stale_refresh}），按顺序调用 LLM..."
+        )
         for done, (idx, full_name, html_url, saved) in enumerate(need_llm, 1):
             logger.info(f"[{idx}/{len(top_projects)}] LLM 生成完整描述: {full_name}")
             if progress_cb is not None:
@@ -330,6 +358,7 @@ def step3_generate_report(
                 desc_results[full_name] = desc
                 if full_name in db_projects:
                     db_projects[full_name]["desc"] = desc
+                    db_projects[full_name]["desc_updated_at"] = today
             else:
                 desc_results.setdefault(full_name, "")
 
