@@ -20,6 +20,27 @@
       </header>
 
       <section class="status-strip">
+        <div class="status-cluster status-cluster--user">
+          <button
+            type="button"
+            class="status-user-button"
+            id="user-login-button"
+            aria-haspopup="dialog"
+            aria-controls="user-popover"
+            aria-expanded="false"
+          >登录</button>
+          <div class="user-popover" id="user-popover" hidden>
+            <p class="user-popover__hint">输入用户 ID 即可跨设备同步收藏（无需密码）。仅允许大小写字母和数字，3-32 位。</p>
+            <div class="user-popover__row">
+              <input type="text" id="user-id-input" placeholder="仅字母和数字（3-32 位）"
+                     autocomplete="off" spellcheck="false" maxlength="32"
+                     pattern="[A-Za-z0-9]{3,32}">
+              <button type="button" id="user-login-confirm">登录</button>
+            </div>
+            <button type="button" class="user-popover__logout" id="user-logout" hidden>退出当前 ID</button>
+          </div>
+        </div>
+        <span class="status-sep">·</span>
         <div class="status-cluster">
           <span class="status-dot" id="status-dot"></span>
           <span class="status-text" id="transport-status">连接中</span>
@@ -33,15 +54,6 @@
             id="end-session-button"
           >新会话</button>
           <div class="status-actions">
-            <button
-              type="button"
-              class="status-help-button status-favorite-button"
-              id="favorites-panel-button"
-              aria-label="查看收藏项目"
-              aria-haspopup="dialog"
-              aria-controls="favorites-overlay"
-              aria-expanded="false"
-            >☆</button>
             <button
               type="button"
               class="status-help-button"
@@ -157,18 +169,6 @@
     </section>
   </div>
 
-  <div class="favorites-overlay" id="favorites-overlay" hidden>
-    <section class="favorites-card" role="dialog" aria-modal="true" aria-labelledby="favorites-title">
-      <div class="favorites-head">
-        <div>
-          <p class="favorites-eyebrow">收藏列表</p>
-        </div>
-        <button type="button" class="favorites-close" id="favorites-close">关闭</button>
-      </div>
-      <div class="favorites-list" id="favorites-list"></div>
-    </section>
-  </div>
-
   <!-- 全屏阅读 overlay -->
   <div class="fullscreen-overlay" id="fullscreen-overlay" hidden>
     <header class="fullscreen-header">
@@ -178,8 +178,8 @@
   </div>
 
   <script src="/web/common.js?v=__ASSET_VER__"></script>
+  <script src="/web/user.js?v=__ASSET_VER__"></script>
   <script src="/web/favorites.js?v=__ASSET_VER__"></script>
-  <script src="/web/chat-favorites.js?v=__ASSET_VER__"></script>
   <script src="/web/chat.js?v=__ASSET_VER__"></script>
 </body>
 </html>

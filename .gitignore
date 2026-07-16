@@ -12,8 +12,8 @@ logs/
 # Data
 *.lock
 # hot_projects 运行时产物（数据/报告/断点，不入库）
-hot_projects/.pipeline_checkpoint.json
 hot_projects/report/
+hot_projects/data/
 # Environment
 .env
 .venv/

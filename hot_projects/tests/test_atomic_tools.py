@@ -1,7 +1,8 @@
-from hot_projects.providers.base import Repo
-from hot_projects.tools.atomic_tools import (
-    repo_growth_handler, describe_project_handler, get_db_info_handler, fetch_trending_handler,
-)
+from hot_projects.datasource.base import Repo
+from hot_projects.tools.tool.repo_growth import repo_growth_handler
+from hot_projects.tools.tool.describe_project import describe_project_handler
+from hot_projects.tools.tool.get_db_info import get_db_info_handler
+from hot_projects.tools.tool.fetch_trending import fetch_trending_handler
 
 
 class _Prov:

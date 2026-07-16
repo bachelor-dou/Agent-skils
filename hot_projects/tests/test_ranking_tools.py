@@ -1,11 +1,11 @@
-import hot_projects.tools.ranking_tools as RT
-from hot_projects.tools.ranking_tools import make_ranking_handler
+import hot_projects.tools.tool.ranking as RT
+from hot_projects.tools.tool.ranking import make_ranking_handler
 
 
 class _State:
     def __init__(self):
         self.pending_confirmation_signature = None
-        self.ranking_cache = None
+        self.tool_state = {}
 
 
 class _Ctx:

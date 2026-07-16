@@ -16,11 +16,11 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from ...providers.github.token_pool import AsyncTokenPool
+from ...datasource.github.token_pool import AsyncTokenPool
 from ..exceptions import FatalWorkerError, RateLimitError, RetryableError, TokenInvalidError
 from .task_base import Task
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 
 _SENTINEL = object()
 
@@ -128,10 +128,6 @@ class AsyncTaskDispatcher:
         self._workers.clear()
         self._running = False
         logger.info("AsyncTaskDispatcher 已关闭。")
-
-    async def snapshot_metrics(self) -> dict[str, int]:
-        """导出调度器运行指标，便于日志与压测统计。"""
-        return dict(self._metrics)
 
     async def _worker_loop(self, worker_id: int) -> None:
         while True:

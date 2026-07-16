@@ -106,6 +106,16 @@ class HotProjectAgent:
         if len(non_system) <= KEEP_RECENT_MESSAGES:
             return
         old, recent = non_system[:-KEEP_RECENT_MESSAGES], non_system[-KEEP_RECENT_MESSAGES:]
+        # 边界安全（Claude Code 式压缩）：recent 不能以孤儿 tool 消息开头——它对应的
+        # assistant/tool_calls 已被归入 old，OpenAI 兼容接口会拒绝这样的历史。
+        # 优先把边界对齐到 recent 内最早的 user 消息（保留完整轮次）；
+        # 若切片内没有 user 消息（上一轮工具调用过长），则仅剥离开头的孤儿 tool 消息。
+        boundary = next((i for i, m in enumerate(recent) if m.get("role") == "user"), None)
+        if boundary is None:
+            boundary = 0
+            while boundary < len(recent) and recent[boundary].get("role") == "tool":
+                boundary += 1
+        old, recent = old + recent[:boundary], recent[boundary:]
         summary = self._summarize(old)
         if summary:
             self.state.conversation_summary = summary

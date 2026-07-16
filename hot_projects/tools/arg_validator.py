@@ -12,7 +12,7 @@ from typing import Any
 
 from .schemas import TOOL_PARAM_SCHEMA
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 
 
 def validate_tool_args(tool_name: str, args: dict) -> dict:
@@ -142,36 +142,3 @@ def _coerce_strict(value, spec: dict, current_args: dict) -> tuple[bool, Any, st
     if not isinstance(value, str):
         return False, None, "expected_string"
     return True, value, None
-
-
-def log_validated_params(
-    tool_name: str,
-    llm_args: dict,
-    prepared_args: dict,
-    validated_args: dict,
-) -> None:
-    """以单条日志输出 Tool 参数校验结果。"""
-    parts: list[str] = []
-
-    for key, value in validated_args.items():
-        if key in llm_args:
-            if llm_args[key] == value:
-                source = "llm"
-            else:
-                source = "coerced"
-        elif key in prepared_args:
-            if prepared_args[key] == value:
-                source = "system"
-            else:
-                source = "system_coerced"
-        else:
-            source = "default"
-
-        if isinstance(value, (list, dict, tuple)):
-            value_text = json.dumps(value, ensure_ascii=False, default=str)
-        else:
-            value_text = str(value)
-        parts.append(f"{key}={value_text}({source})")
-
-    if parts:
-        logger.info("[Agent] Tool 参数: %s | %s", tool_name, " | ".join(parts))

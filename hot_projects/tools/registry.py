@@ -36,13 +36,17 @@ class ToolRegistry:
 
 
 def build_default_registry() -> ToolRegistry:
-    """组装默认注册表：3 个复合榜单工具（昂贵）+ 4 个原子工具。"""
+    """组装默认注册表：3 个复合榜单工具（昂贵）+ 8 个独立工具（一工具一文件）。"""
     from .schemas import AGENT_TOOL_SCHEMAS
-    from .ranking_tools import make_ranking_handler
-    from .atomic_tools import (
-        repo_growth_handler, describe_project_handler,
-        get_db_info_handler, fetch_trending_handler,
-    )
+    from .tool.ranking import make_ranking_handler
+    from .tool.repo_growth import repo_growth_handler
+    from .tool.describe_project import describe_project_handler
+    from .tool.repo_profile import repo_profile_handler
+    from .tool.search_repos import search_repos_handler
+    from .tool.star_trend import star_trend_handler
+    from .tool.analyze_report import analyze_report_handler
+    from .tool.get_db_info import get_db_info_handler
+    from .tool.fetch_trending import fetch_trending_handler
 
     schema_by_name = {s["function"]["name"]: s for s in AGENT_TOOL_SCHEMAS}
     handlers = {
@@ -51,6 +55,10 @@ def build_default_registry() -> ToolRegistry:
         "keyword_ranking": (make_ranking_handler("keyword"), True),
         "repo_growth": (repo_growth_handler, False),
         "describe_project": (describe_project_handler, False),
+        "repo_profile": (repo_profile_handler, False),
+        "search_repos": (search_repos_handler, False),
+        "star_trend": (star_trend_handler, False),
+        "analyze_report": (analyze_report_handler, False),
         "get_db_info": (get_db_info_handler, False),
         "fetch_trending": (fetch_trending_handler, False),
     }

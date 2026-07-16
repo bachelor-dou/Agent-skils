@@ -1,5 +1,6 @@
 import logging
 import logging.handlers
+from datetime import datetime
 from pathlib import Path
 
 
@@ -10,7 +11,11 @@ def test_cron_logging_creates_matching_debug_file(monkeypatch, tmp_path):
 
     log_path = Path(cron.setup_logging())
     try:
-        debug_path = tmp_path / "debug" / f"{log_path.stem}.debug.log"
+        # 按月归档：主日志在 logs/YYYY-MM/，debug 在 logs/YYYY-MM/debug/
+        month_dir = log_path.parent
+        assert month_dir.parent == tmp_path
+        assert month_dir.name == datetime.now().strftime("%Y-%m")
+        debug_path = month_dir / "debug" / f"{log_path.stem}.debug.log"
         file_handlers = [
             handler
             for handler in logging.getLogger().handlers

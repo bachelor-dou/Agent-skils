@@ -35,7 +35,6 @@
     const WS_MAX_RECONNECT_DELAY = 30000;
     let chatHistory = []; // {role, content, isHtml}
     let activeRequest = null;
-    let favoritesPanel = null;
 
     restoreMessages();
     if (initialSessionExpired) {
@@ -47,7 +46,6 @@
     setupSessionActions();
     setupUsageHelp();
     setupAutoHideStatusStrip();
-    favoritesPanel = initFavoritesPanel();
     connectWebSocket();
     loadReports();
 
@@ -234,9 +232,6 @@
       }
 
       function openUsageHelp() {
-        if (favoritesPanel && typeof favoritesPanel.close === "function") {
-          favoritesPanel.close();
-        }
         usageHelpOverlay.hidden = false;
         usageHelpButton.setAttribute("aria-expanded", "true");
       }
@@ -263,19 +258,6 @@
         if (event.key === "Escape" && !usageHelpOverlay.hidden) {
           closeUsageHelp();
         }
-      });
-    }
-
-    function initFavoritesPanel() {
-      if (typeof window.setupChatFavoritesPanel !== "function") {
-        return null;
-      }
-
-      return window.setupChatFavoritesPanel({
-        onBeforeOpen() {
-          usageHelpOverlay.hidden = true;
-          usageHelpButton.setAttribute("aria-expanded", "false");
-        },
       });
     }
 
@@ -1150,7 +1132,7 @@
       });
 
       shellEl.addEventListener("touchstart", (event) => {
-        if (!mobileQuery.matches || event.touches.length !== 1 || !usageHelpOverlay.hidden || (favoritesPanel && favoritesPanel.isOpen())) {
+        if (!mobileQuery.matches || event.touches.length !== 1 || !usageHelpOverlay.hidden) {
           return;
         }
         if (event.target.closest("textarea, button, a, .usage-help-card")) {

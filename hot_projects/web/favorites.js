@@ -1,204 +1,173 @@
-(function setupGitHubHotFavorites(global) {
-  const STORAGE_KEY = "gh-hot-favorites-v1";
+/* 收藏：服务端持久化（按 user_id 全局），前端内存缓存 + 乐观更新。
+   对外接口 isFavorite / toggle / subscribe / getAll 保持同步语义，
+   report.js 等调用方无需改动；数据在页面加载时经 ready() 预载。 */
+(function (global) {
+  "use strict";
+
+  const OLD_KEY = "gh-hot-favorites-v1";
   const listeners = new Set();
 
-  function normalizeFavorite(item) {
-    if (typeof item === "string") {
-      const repoFromString = String(item || "").trim();
-      if (!repoFromString) {
-        return null;
-      }
-      return {
-        repo: repoFromString,
-        reportName: "",
-        reportUrl: "",
-      };
-    }
+  let repos = new Set();          // 已收藏的 repo 集合（内存缓存）
+  let readyPromise = null;
 
-    if (!item || typeof item !== "object") {
-      return null;
-    }
-
-    const repo = String(item.repo || item.name || "").trim();
-    if (!repo) {
-      return null;
-    }
-
-    return {
-      repo: repo,
-      reportName: String(item.reportName || "").trim(),
-      reportUrl: String(item.reportUrl || "").trim(),
-    };
+  function userId() {
+    return global.HotUser ? global.HotUser.getId() : "";
   }
 
-  function normalizeFavorites(items) {
-    const unique = [];
-    const seen = new Map();
-
-    (Array.isArray(items) ? items : []).forEach(function (item) {
-      const favorite = normalizeFavorite(item);
-      if (!favorite) {
-        return;
-      }
-
-      const existingIndex = seen.get(favorite.repo);
-      if (existingIndex === undefined) {
-        seen.set(favorite.repo, unique.length);
-        unique.push(favorite);
-        return;
-      }
-
-      const existing = unique[existingIndex];
-      if (!existing.reportName && favorite.reportName) {
-        existing.reportName = favorite.reportName;
-      }
-      if (!existing.reportUrl && favorite.reportUrl) {
-        existing.reportUrl = favorite.reportUrl;
-      }
-    });
-
-    return unique;
-  }
-
-  function readFavorites() {
-    try {
-      const raw = global.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        return [];
-      }
-      return normalizeFavorites(JSON.parse(raw));
-    } catch (_error) {
-      return [];
-    }
+  function currentReport() {
+    // 报告页 URL 形如 /api/reports/2026-07-01.md/html
+    const m = (global.location.pathname || "").match(/\/api\/reports\/([^/]+)\/html/);
+    return m ? decodeURIComponent(m[1]) : "";
   }
 
   function notify() {
-    const repos = readFavorites();
-    listeners.forEach(function (listener) {
+    const list = getAll();
+    listeners.forEach(function (fn) {
       try {
-        listener(repos);
-      } catch (_error) {
-      }
+        fn(list);
+      } catch (_e) {}
     });
   }
 
-  function writeFavorites(items) {
-    const favorites = normalizeFavorites(items);
+  async function apiGet(uid) {
+    const resp = await fetch("/api/favorites?user_id=" + encodeURIComponent(uid));
+    if (!resp.ok) {
+      throw new Error("load favorites failed");
+    }
+    const data = await resp.json();
+    return (data.favorites || []).map(function (x) {
+      return x.repo;
+    });
+  }
+
+  async function apiSet(uid, repo, action) {
+    const resp = await fetch("/api/favorites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: uid,
+        repo: repo,
+        action: action,
+        source_report: currentReport(),
+      }),
+    });
+    if (!resp.ok) {
+      throw new Error("update favorite failed");
+    }
+  }
+
+  // 一次性迁移旧版 localStorage 收藏到服务端，成功后清除旧 key
+  async function migrateLegacy(uid) {
+    let legacy = [];
     try {
-      global.localStorage.setItem(STORAGE_KEY, JSON.stringify(favorites));
-    } catch (_error) {
+      const raw = global.localStorage.getItem(OLD_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      legacy = (Array.isArray(parsed) ? parsed : [])
+        .map(function (x) {
+          return typeof x === "string" ? x : (x && x.repo) || "";
+        })
+        .filter(Boolean);
+    } catch (_e) {
+      return;
     }
-    notify();
-    return favorites;
+    for (const repo of legacy) {
+      try {
+        await apiSet(uid, repo, "add");
+      } catch (_e) {}
+    }
+    try {
+      global.localStorage.removeItem(OLD_KEY);
+    } catch (_e) {}
   }
 
-  function findFavorite(repo) {
-    const normalized = String(repo || "").trim();
-    if (!normalized) {
-      return null;
+  function ready() {
+    if (!readyPromise) {
+      readyPromise = (async function () {
+        const uid = userId();
+        await migrateLegacy(uid);
+        try {
+          repos = new Set(await apiGet(uid));
+        } catch (_e) {
+          repos = new Set();
+        }
+        notify();
+      })();
     }
-    return readFavorites().find(function (item) {
-      return item.repo === normalized;
-    }) || null;
-  }
-
-  function add(repoOrFavorite, metadata) {
-    const favorite = normalizeFavorite(
-      typeof repoOrFavorite === "object" && repoOrFavorite !== null
-        ? repoOrFavorite
-        : Object.assign({ repo: repoOrFavorite }, metadata || {})
-    );
-
-    if (!favorite) {
-      return readFavorites();
-    }
-
-    const next = readFavorites().filter(function (item) {
-      return item.repo !== favorite.repo;
-    });
-    next.unshift(favorite);
-    return writeFavorites(next);
-  }
-
-  function remove(repo) {
-    const normalized = String(repo || "").trim();
-    if (!normalized) {
-      return readFavorites();
-    }
-    return writeFavorites(readFavorites().filter(function (item) {
-      return item.repo !== normalized;
-    }));
+    return readyPromise;
   }
 
   function isFavorite(repo) {
-    return !!findFavorite(repo);
+    return repos.has(String(repo || "").trim());
   }
 
-  function enrich(repo, metadata) {
-    const normalized = String(repo || "").trim();
-    if (!normalized) {
-      return readFavorites();
-    }
-
-    const current = readFavorites();
-    const index = current.findIndex(function (item) {
-      return item.repo === normalized;
+  function getAll() {
+    return Array.from(repos).map(function (repo) {
+      return { repo: repo };
     });
-    if (index < 0) {
-      return current;
-    }
-
-    const updated = normalizeFavorite(Object.assign({}, current[index], metadata || {}, { repo: normalized }));
-    if (!updated) {
-      return current;
-    }
-
-    if (
-      current[index].reportName === updated.reportName &&
-      current[index].reportUrl === updated.reportUrl
-    ) {
-      return current;
-    }
-
-    current[index] = updated;
-    return writeFavorites(current);
   }
 
-  function toggle(repo, metadata) {
-    if (isFavorite(repo)) {
-      remove(repo);
-      return false;
+  // 乐观更新：先改内存并通知，失败再回滚
+  async function toggle(repo) {
+    const name = String(repo || "").trim();
+    if (!name) {
+      return isFavorite(name);
     }
-    add(repo, metadata);
-    return true;
+    const wasFav = repos.has(name);
+    const action = wasFav ? "remove" : "add";
+    if (wasFav) {
+      repos.delete(name);
+    } else {
+      repos.add(name);
+    }
+    notify();
+    try {
+      await apiSet(userId(), name, action);
+    } catch (_e) {
+      if (wasFav) {
+        repos.add(name);
+      } else {
+        repos.delete(name);
+      }
+      notify();
+    }
+    return repos.has(name);
+  }
+
+  // 登录时把旧身份收藏合并到新身份（HotUser.login 调用）
+  async function migrateTo(oldId, newId) {
+    let list = [];
+    try {
+      list = await apiGet(oldId);
+    } catch (_e) {
+      return;
+    }
+    for (const repo of list) {
+      try {
+        await apiSet(newId, repo, "add");
+      } catch (_e) {}
+    }
   }
 
   function subscribe(listener) {
     if (typeof listener !== "function") {
-      return function noop() {};
+      return function () {};
     }
     listeners.add(listener);
-    listener(readFavorites());
-    return function unsubscribe() {
+    listener(getAll());
+    return function () {
       listeners.delete(listener);
     };
   }
 
-  global.addEventListener("storage", function (event) {
-    if (event.key === STORAGE_KEY) {
-      notify();
-    }
-  });
-
   global.GitHubHotFavorites = {
-    add: add,
-    enrich: enrich,
-    get: findFavorite,
-    getAll: readFavorites,
+    ready: ready,
     isFavorite: isFavorite,
-    key: STORAGE_KEY,
-    remove: remove,
-    subscribe: subscribe,
+    getAll: getAll,
     toggle: toggle,
+    subscribe: subscribe,
+    migrateTo: migrateTo,
   };
 })(window);

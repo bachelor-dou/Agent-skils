@@ -23,9 +23,9 @@ from ..db import (
     get_db_age_days,
     is_project_window_match,
 )
-from ...providers.github.token_pool import GitHubTokenPool
+from ...datasource.github.token_pool import GitHubTokenPool
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 
 
 def _upsert_candidate(

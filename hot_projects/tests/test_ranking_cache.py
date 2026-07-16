@@ -1,4 +1,4 @@
-from hot_projects.pipeline.cache import RankingCache
+from hot_projects.tools.tool.ranking import RankingCache
 
 
 def test_downstream_invalidated_when_upstream_changes():

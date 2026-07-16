@@ -51,6 +51,8 @@ import markdown
 import hashlib
 
 from .agent import HotProjectAgent, build_agent
+from .infra import favorites_store
+from .tools.basic.report_parse import parse_structured_report
 from .config import (
     DATA_DIR,
     LOG_DIR,
@@ -60,7 +62,7 @@ from .config import (
     SECURITY_IP_BLACKLIST,
 )
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 CHAT_PAGE_PATH = os.path.join(WEB_DIR, "chat.html")
 REPORT_PAGE_TEMPLATE_PATH = os.path.join(WEB_DIR, "report.html")
@@ -125,6 +127,13 @@ class ChatResponse(BaseModel):
     reply: str
     session_ttl_seconds: int
     session_expires_at: str
+
+
+class FavoriteRequest(BaseModel):
+    user_id: str
+    repo: str
+    action: str  # "add" | "remove"
+    source_report: str = ""
 
 
 # ══════════════════════════════════════════════════════════════
@@ -288,90 +297,8 @@ def _safe_report_href(url: str) -> str:
 
 
 def _parse_structured_report(markdown_text: str) -> dict | None:
-    lines = markdown_text.splitlines()
-    title = next((line[2:].strip() for line in lines if line.startswith("# ")), "")
-    summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
-    repos: list[dict] = []
-    idx = 0
-
-    while idx < len(lines):
-        stripped = lines[idx].strip()
-        heading_match = re.match(r"##\s+(?P<rank>\d+)\.\s+(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$", stripped)
-        if not heading_match:
-            idx += 1
-            continue
-
-        rank = int(heading_match.group("rank"))
-        repo_name = heading_match.group("repo")
-        idx += 1
-
-        link = ""
-        metadata: dict[str, str] = {}
-        sections: list[dict[str, str]] = []
-
-        while idx < len(lines):
-            current = lines[idx].rstrip()
-            compact = current.strip()
-            if compact.startswith("## "):
-                break
-            if not compact:
-                idx += 1
-                continue
-            if compact == "---":
-                idx += 1
-                break
-            if compact.startswith("链接:") or compact.startswith("链接："):
-                link = compact.split(":", 1)[1].strip() if ":" in compact else compact.split("：", 1)[1].strip()
-                idx += 1
-                continue
-
-            meta_match = re.match(r"-\s*(?P<label>[^:：]+)[:：]\s*(?P<value>.+)", compact)
-            if meta_match:
-                metadata[meta_match.group("label").strip()] = meta_match.group("value").strip()
-                idx += 1
-                continue
-
-            if compact.startswith("### "):
-                section_title = compact[4:].strip()
-                idx += 1
-                block_lines: list[str] = []
-                while idx < len(lines):
-                    block_line = lines[idx]
-                    block_compact = block_line.strip()
-                    if block_compact.startswith("### ") or block_compact.startswith("## "):
-                        break
-                    if block_compact == "---":
-                        break
-                    block_lines.append(block_line)
-                    idx += 1
-                sections.append({
-                    "title": section_title,
-                    "content": "\n".join(block_lines).strip(),
-                })
-                continue
-
-            idx += 1
-
-        repos.append(
-            {
-                "rank": rank,
-                "repo": repo_name,
-                "link": link,
-                "metadata": metadata,
-                "sections": sections,
-            }
-        )
-
-    if not repos:
-        return None
-    if not any(repo["metadata"].get("创建时间") and repo["metadata"].get("总 Star") for repo in repos):
-        return None
-
-    return {
-        "title": title,
-        "summary": summary,
-        "repos": repos,
-    }
+    """解析结构化报告（共用 tools.basic.report_parse 的实现）。"""
+    return parse_structured_report(markdown_text)
 
 
 def _render_report_stat(label: str, value: str, kind: str = "") -> str:
@@ -386,9 +313,108 @@ def _render_report_stat(label: str, value: str, kind: str = "") -> str:
     )
 
 
-def _render_structured_report_html(parsed: dict) -> tuple[str, str]:
+# ── 上期对比：同类报告 diff（蓝色「上新」徽章 + 排名变化） ──
+
+# 报告名 = 日期 + 类型/区间/方向尾缀：2026-07-07.md / 2026-07-07_NEW.md /
+# 2026-07-07_KEY_10d.md / 2026-07-07_KEY_向量库.md（方向可含中文）
+_REPORT_NAME_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})(?P<suffix>.*)\.md$")
+
+# 上一份报告的解析缓存：{path: (mtime, parsed)}
+_prev_report_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+def _load_structured_report_cached(path: str) -> dict | None:
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    cached = _prev_report_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            parsed = _parse_structured_report(f.read())
+    except OSError:
+        parsed = None
+    _prev_report_cache[path] = (mtime, parsed)
+    return parsed
+
+
+def _title_prefix(parsed: dict | None) -> str:
+    """报告标题去掉日期部分（『GitHub 热门项目 — 2026-07-01』→『GitHub 热门项目』）。"""
+    if not parsed:
+        return ""
+    return (parsed.get("title") or "").split("—")[0].strip()
+
+
+def _find_previous_report(name: str, current_parsed: dict) -> tuple[str, dict] | None:
+    """找同类型（同尾缀）且日期更早的最新一份报告，返回 (文件名, 解析结果)。
+
+    旧文件（重命名规则之前生成的）可能类型混叠，故再用标题前缀做一层校验。
+    """
+    m = _REPORT_NAME_RE.match(name)
+    if not m:
+        return None
+    cur_date, cur_suffix = m.group("date"), m.group("suffix")
+
+    candidates: list[tuple[str, str]] = []
+    try:
+        entries = os.listdir(REPORT_DIR)
+    except OSError:
+        return None
+    for fname in entries:
+        pm = _REPORT_NAME_RE.match(fname)
+        if not pm or fname == name:
+            continue
+        if pm.group("suffix") != cur_suffix or pm.group("date") >= cur_date:
+            continue
+        candidates.append((pm.group("date"), fname))
+
+    for _, fname in sorted(candidates, reverse=True):
+        parsed = _load_structured_report_cached(os.path.join(REPORT_DIR, fname))
+        if parsed is None:
+            continue
+        if _title_prefix(parsed) != _title_prefix(current_parsed):
+            continue  # 同名不同类（如旧版关键词榜与综合榜混叠）→ 跳过
+        return fname, parsed
+    return None
+
+
+def _build_report_diff(name: str, current_parsed: dict) -> dict | None:
+    """返回 {prev_name, prev_ranks, added, removed}；无可对比报告时返回 None。"""
+    prev = _find_previous_report(name, current_parsed)
+    if prev is None:
+        return None
+    prev_name, prev_parsed = prev
+    prev_ranks = {r["repo"]: r["rank"] for r in prev_parsed.get("repos", [])}
+    cur_repos = {r["repo"] for r in current_parsed.get("repos", [])}
+    return {
+        "prev_name": prev_name,
+        "prev_ranks": prev_ranks,
+        "added": sum(1 for r in cur_repos if r not in prev_ranks),
+        "removed": sum(1 for r in prev_ranks if r not in cur_repos),
+    }
+
+
+# 常见主语言的标识色（侧栏语言圆点），未收录语言回退灰色
+_LANG_COLORS = {
+    "python": "#3572A5", "typescript": "#3178c6", "javascript": "#f1e05a",
+    "go": "#00ADD8", "rust": "#dea584", "c++": "#f34b7d", "c": "#555555",
+    "java": "#b07219", "kotlin": "#A97BFF", "swift": "#F05138", "ruby": "#701516",
+    "c#": "#178600", "html": "#e34c26", "css": "#563d7c", "shell": "#89e051",
+    "jupyter notebook": "#DA5B0B", "dart": "#00B4AB", "php": "#4F5D95",
+    "zig": "#ec915c", "lua": "#000080", "vue": "#41b883", "svelte": "#ff3e00",
+}
+
+
+def _render_structured_report_html(parsed: dict, diff: dict | None = None) -> tuple[str, str]:
+    """主从布局：返回 (详情面板集合 article_html, 侧栏项目列表 toc_html)。
+
+    diff 提供时标注上期对比：上期没有的项目挂蓝色「上新」徽章，排名变化挂 ↑/↓。
+    """
     article_parts: list[str] = []
-    toc_items: list[str] = []
+    nav_items: list[str] = []
+    prev_ranks = diff["prev_ranks"] if diff else None
 
     for repo in parsed["repos"]:
         repo_name = repo["repo"]
@@ -399,14 +425,15 @@ def _render_structured_report_html(parsed: dict) -> tuple[str, str]:
         topic_values = [item.strip() for item in re.split(r"[，,]", metadata.get("主题标签", "")) if item.strip()]
         growth_label = next((label for label in metadata if "增长" in label), "")
         growth_value = metadata.get(growth_label, "") if growth_label else ""
+        language = metadata.get("主语言", "")
 
         stat_items: list[str] = []
         if metadata.get("总 Star"):
             stat_items.append(_render_report_stat("总 Star", metadata["总 Star"], "star"))
         if growth_label and growth_value:
             stat_items.append(_render_report_stat(growth_label, growth_value, "growth"))
-        if metadata.get("主语言"):
-            stat_items.append(_render_report_stat("主语言", metadata["主语言"], "language"))
+        if language:
+            stat_items.append(_render_report_stat("主语言", language, "language"))
 
         created_value = escape(metadata.get("创建时间", "未知"))
         status_value = metadata.get("项目状态", "")
@@ -423,7 +450,6 @@ def _render_structured_report_html(parsed: dict) -> tuple[str, str]:
         )
 
         section_items: list[str] = []
-        toc_section_items: list[str] = []
         for section in repo["sections"]:
             section_anchor = f"{anchor}-{_slugify_report_anchor(section['title'])}"
             paragraphs = _split_report_paragraphs(section["content"]) or ["暂无补充信息，可进入仓库查看 README。"]
@@ -434,60 +460,130 @@ def _render_structured_report_html(parsed: dict) -> tuple[str, str]:
                 f'{paragraphs_html}'
                 '</section>'
             )
-            toc_section_items.append(
-                f'<li><a href="#{section_anchor}">{escape(section["title"])}</a></li>'
-            )
 
         topics_html = ""
         if topic_values:
             tags_html = "".join(f'<span class="repo-topic">{escape(topic)}</span>' for topic in topic_values[:6])
-            topics_html = f'<div class="repo-card__topics">{tags_html}</div>'
+            topics_html = f'<div class="repo-detail__topics">{tags_html}</div>'
 
         actions_html = (
-            '<div class="repo-card__actions">'
-            f'<a class="repo-card__action" href="{escape(repo_link)}" target="_blank" rel="noreferrer">打开仓库</a>'
-            f'<a class="repo-card__action repo-card__action--ghost" href="{escape(readme_link)}" target="_blank" rel="noreferrer">查看 README</a>'
+            '<div class="repo-detail__actions">'
+            f'<a class="repo-action" href="{escape(repo_link)}" target="_blank" rel="noreferrer">打开仓库 ↗</a>'
+            f'<a class="repo-action repo-action--ghost" href="{escape(readme_link)}" target="_blank" rel="noreferrer">查看 README</a>'
+            f'<button type="button" class="repo-action repo-action--ghost repo-trend-btn" data-repo="{escape(repo_name)}">📈 star 走势</button>'
             '</div>'
+            '<div class="repo-trend" hidden></div>'
         )
 
+        # 上期对比：上期没有 → 蓝色「上新」；排名变化 → ↑/↓
+        is_fresh = prev_ranks is not None and repo_name not in prev_ranks
+        delta_html = ""
+        if prev_ranks is not None and not is_fresh:
+            delta = prev_ranks[repo_name] - repo["rank"]
+            if delta > 0:
+                delta_html = f'<span class="repo-detail__delta repo-detail__delta--up" title="较上期上升 {delta} 名">↑{delta}</span>'
+            elif delta < 0:
+                delta_html = f'<span class="repo-detail__delta repo-detail__delta--down" title="较上期下降 {-delta} 名">↓{-delta}</span>'
+        fresh_badge = '<span class="repo-detail__fresh" title="上期报告中没有的项目">上新</span>' if is_fresh else ""
+
+        new_badge = '<span class="repo-detail__new" title="新项目">NEW</span>' if status_value else ""
+        fresh_attr = ' data-fresh="1"' if is_fresh else ""
         article_parts.append(
-            '<section class="repo-card repo-card--markdown">'
-            f'<h2 id="{anchor}">{repo["rank"]}. {escape(repo_name)}</h2>'
-            f'<div class="repo-card__stats">{"".join(stat_items)}</div>'
+            f'<section class="repo-detail" id="{anchor}" data-repo="{escape(repo_name)}" data-rank="{repo["rank"]}"{fresh_attr}>'
+            '<header class="repo-detail__head">'
+            f'<span class="repo-detail__rank">#{repo["rank"]}</span>'
+            f'{delta_html}'
+            f'<h2>{escape(repo_name)}</h2>'
+            f'{fresh_badge}'
+            f'{new_badge}'
+            '</header>'
+            f'<div class="repo-detail__stats">{"".join(stat_items)}</div>'
             f'{topics_html}'
-            f'<div class="repo-card__grid">{"".join(section_items)}</div>'
+            f'<div class="repo-detail__grid">{"".join(section_items)}</div>'
             f'{actions_html}'
             '</section>'
         )
 
-        nested_toc = f'<ul>{"".join(toc_section_items)}</ul>' if toc_section_items else ""
-        toc_items.append(
-            f'<li><a href="#{anchor}">{repo["rank"]}. {escape(repo_name)}</a>{nested_toc}</li>'
+        lang_dot = ""
+        if language:
+            color = _LANG_COLORS.get(language.strip().lower(), "#8b94a7")
+            lang_dot = (
+                f'<span class="repo-nav__lang"><i style="background:{color}"></i>{escape(language)}</span>'
+            )
+        growth_chip = f'<span class="repo-nav__growth">{escape(growth_value)}</span>' if growth_value else ""
+        new_chip = '<span class="repo-nav__new">NEW</span>' if status_value else ""
+        fresh_chip = '<span class="repo-nav__fresh">上新</span>' if is_fresh else ""
+        nav_delta = ""
+        if delta_html:
+            arrow = "↑" if "--up" in delta_html else "↓"
+            nav_delta = (
+                f'<span class="repo-nav__delta repo-nav__delta--{"up" if arrow == "↑" else "down"}">'
+                f'{arrow}{abs(prev_ranks[repo_name] - repo["rank"])}</span>'
+            )
+        search_blob = " ".join([repo_name, language] + topic_values).lower()
+        nav_items.append(
+            f'<a class="repo-nav__item" href="#{anchor}" data-panel="{anchor}" '
+            f'data-repo="{escape(repo_name)}" data-search="{escape(search_blob)}"{fresh_attr}>'
+            f'<span class="repo-nav__rank">{repo["rank"]}</span>'
+            '<span class="repo-nav__body">'
+            f'<span class="repo-nav__name">{escape(repo_name)}</span>'
+            # 徽章放 meta 行行首：项目名过长被截断时徽章仍可见；收藏 ★ 由 report.js 挂载
+            f'<span class="repo-nav__meta">{fresh_chip}{new_chip}{growth_chip}{nav_delta}{lang_dot}</span>'
+            '</span>'
+            '</a>'
         )
 
-    toc_html = f'<nav class="toc"><ul>{"".join(toc_items)}</ul></nav>' if toc_items else '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
+    toc_html = (
+        f'<nav class="repo-nav" id="repo-nav">{"".join(nav_items)}</nav>'
+        if nav_items else '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
+    )
     article_html = "".join(article_parts) if article_parts else '<p>当前报告暂无项目内容。</p>'
     return article_html, toc_html
 
 
+def _render_summary_chips(summary: str, extra_chips: list[str] | None = None) -> str:
+    """把「共 N 个项目 | 窗口: 7 天 | …」形式的摘要拆成头部信息条。
+
+    extra_chips: 已渲染好的附加 chip HTML（如上期对比统计）。
+    """
+    text = (summary or "").strip()
+    extra = "".join(extra_chips or [])
+    if not text:
+        return f'<div class="hero__chips">{extra}</div>' if extra else ""
+    parts = [p.strip() for p in text.split("|") if p.strip()]
+    if len(parts) <= 1 and not extra:
+        return f'<p class="hero__summary">{escape(text)}</p>'
+    chips = "".join(f'<span class="hero__chip">{escape(p)}</span>' for p in parts)
+    return f'<div class="hero__chips">{chips}{extra}</div>'
+
+
 def _render_report_html(name: str, markdown_text: str) -> str:
-    """将 Markdown 报告渲染为移动端友好的 HTML 页面。"""
+    """将 Markdown 报告渲染为主从布局的 HTML 页面。"""
     lines = markdown_text.splitlines()
     title = next((line[2:].strip() for line in lines if line.startswith("# ")), name)
     summary = next((line[1:].strip() for line in lines if line.startswith(">")), "")
     structured_report = _parse_structured_report(markdown_text)
 
     if structured_report is not None:
-        article_html, toc_html = _render_structured_report_html(structured_report)
+        diff = _build_report_diff(name, structured_report)
+        article_html, toc_html = _render_structured_report_html(structured_report, diff)
+        extra_chips = []
+        if diff:
+            prev_date = diff["prev_name"].rsplit(".", 1)[0]
+            extra_chips.append(
+                '<span class="hero__chip hero__chip--fresh">'
+                f'较上期 {escape(prev_date)}: 上新 {diff["added"]} · 移出 {diff["removed"]}'
+                '</span>'
+            )
         safe_title = escape(structured_report.get("title") or title)
-        safe_summary = escape(structured_report.get("summary") or "这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。")
+        summary_html = _render_summary_chips(structured_report.get("summary") or summary, extra_chips)
         safe_name = escape(name)
         return _render_web_template(
             REPORT_PAGE_TEMPLATE_PATH,
             {
                 "__REPORT_NAME__": safe_name,
                 "__REPORT_TITLE__": safe_title,
-                "__REPORT_SUMMARY__": safe_summary,
+                "__REPORT_SUMMARY_HTML__": summary_html,
                 "__REPORT_TOC_HTML__": toc_html,
                 "__REPORT_ARTICLE_HTML__": article_html,
             },
@@ -508,14 +604,14 @@ def _render_report_html(name: str, markdown_text: str) -> str:
         toc_html = '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
 
     safe_title = escape(title)
-    safe_summary = escape(summary or "这是一份由服务器根据 Markdown 报告渲染出的移动端可读网页。")
+    summary_html = _render_summary_chips(summary or "这是一份由服务器根据 Markdown 报告渲染出的可读网页。")
     safe_name = escape(name)
     return _render_web_template(
         REPORT_PAGE_TEMPLATE_PATH,
         {
             "__REPORT_NAME__": safe_name,
             "__REPORT_TITLE__": safe_title,
-            "__REPORT_SUMMARY__": safe_summary,
+            "__REPORT_SUMMARY_HTML__": summary_html,
             "__REPORT_TOC_HTML__": toc_html,
             "__REPORT_ARTICLE_HTML__": article_html,
         },
@@ -774,6 +870,35 @@ async def delete_report(name: str):
         return {"message": f"报告 {name} 已删除", "deleted": name}
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+
+
+@app.get("/api/star-trend")
+async def star_trend_api(repo: str):
+    """返回某项目的多周 star 轨迹（供报告卡片的「star 走势」按钮）。"""
+    from .tools.tool.star_trend import star_trend
+    if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo or ""):
+        raise HTTPException(status_code=400, detail="无效的仓库名")
+    return star_trend(repo)
+
+
+@app.get("/api/favorites")
+async def list_favorites(user_id: str):
+    """获取用户全局收藏清单。"""
+    if not favorites_store.valid_user_id(user_id):
+        raise HTTPException(status_code=400, detail="无效的 user_id")
+    return {"user_id": user_id, "favorites": favorites_store.get_favorites(user_id)}
+
+
+@app.post("/api/favorites")
+async def update_favorite(req: FavoriteRequest):
+    """添加 / 取消收藏（全局，按 user_id 存储）。"""
+    try:
+        items = favorites_store.set_favorite(
+            req.user_id, req.repo, req.action, source_report=req.source_report,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"user_id": req.user_id, "favorites": items}
 
 
 @app.delete("/api/sessions/{session_id}")

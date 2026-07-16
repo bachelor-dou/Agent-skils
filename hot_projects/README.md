@@ -5,6 +5,8 @@
 ## 1. 安装
 
 ```bash
+cd /root/code/Agent-skils
+source .venv/bin/activate
 pip install -r hot_projects/requirements.txt
 ```
 
@@ -32,17 +34,26 @@ export LLM_B_KEY="<siliconflow-key>"
 
 ## 3. 启动方式
 
+建议统一使用项目虚拟环境中的 Python，避免系统 Python 缺少 `fastapi` 等依赖。
+
 | 命令 | 说明 |
 |------|------|
-| `python -m hot_projects.agent_cli` | 终端对话（REPL，调试最方便） |
-| `python -m hot_projects` | Web/API 服务（默认 8000 端口） |
-| `python -m hot_projects.cron_scheduled_update --top-n 100` | 定时批处理（搜索→增长→排名→报告） |
+| `/root/code/Agent-skils/.venv/bin/python -m hot_projects.agent_cli` | 终端对话（REPL，调试最方便） |
+| `/root/code/Agent-skils/.venv/bin/python -m hot_projects` | Web/API 服务（默认 8000 端口） |
+| `/root/code/Agent-skils/.venv/bin/python -m hot_projects.cron_scheduled_update --top-n 100` | 定时批处理（搜索→增长→排名→报告） |
+
+前台启动 Web 服务：
+
+```bash
+cd /root/code/Agent-skils
+/root/code/Agent-skils/.venv/bin/python -m hot_projects
+```
 
 后台运行 Web 服务：
 
 ```bash
 cd /root/code/Agent-skils
-nohup python -m hot_projects >> hot_projects/logs/server.log 2>&1 &
+nohup /root/code/Agent-skils/.venv/bin/python -m hot_projects >> hot_projects/logs/server.log 2>&1 &
 tail -f hot_projects/logs/server.log
 ```
 
@@ -86,26 +97,38 @@ vllm 怎么样                       → 名字不全/拼错会返回相似候�
 | 内容 | 位置 |
 |------|------|
 | 报告 | `hot_projects/report/YYYY-MM-DD*.md` |
-| 数据库 | `hot_projects/Github_DB.json`（运行时生成，已 gitignore） |
-| 定时任务主日志 | `hot_projects/logs/cron-YYYY-MM-DD.log` |
-| 定时任务调试日志 | `hot_projects/logs/debug/cron-YYYY-MM-DD.debug.log` |
+| 数据库/收藏 | `hot_projects/data/`（`Github_DB.json`、`favorites.json`，运行时生成，已 gitignore） |
+| 定时任务主日志 | `hot_projects/logs/YYYY-MM/cron-YYYY-MM-DD.log`（按月归档） |
+| 定时任务调试日志 | `hot_projects/logs/YYYY-MM/debug/cron-YYYY-MM-DD.debug.log` |
 | CLI / Web 日志 | `hot_projects/logs/cli-YYYY-MM-DD.log` / `web.log` |
 
 定时任务主日志默认保留阶段摘要、候选入选、每个项目最终增长结果、报告和 DB 更新统计；
 逐关键词搜索、星段细分、逐仓库 stargazers 查询开始等细节写入同日期 debug 日志。
 
-## 7. 项目结构（编排层重构后）
+## 7. 项目结构
+
+**找工具:先看 `tools/registry.py` 的名单 → 打开同名文件看实现。** 每个 LLM 工具一个文件。
 
 ```
 hot_projects/
-├── agent/        精简 ReAct 循环 + 会话状态 + prompt
-├── tools/        工具注册表 + LLM schema + 复合榜单工具(含确认守卫) + 原子工具(含模糊消歧)
-├── pipeline/     唯一榜单流水线 ranking_pipeline + 分阶段参数签名缓存
-├── capabilities/ 基础工具层（搜索/扫描/增长/排序/报告，纯函数）
-├── providers/    Provider 接口 + 归一化 Repo 模型；providers/github/ 为 GitHub 实现
-├── infra/        LLM 双后端客户端 + db + 并发调度框架
-├── config.py     全局配置（阈值/关键词/路径/安全/LLM）
-└── 入口: agent_cli / cron_scheduled_update / api_server / __main__
+├── agent/            精简 ReAct 循环 + 会话状态(通用 tool_state 槽) + prompt
+├── tools/            工具层——每个 LLM 工具一个文件，文件名 = 工具名
+│   ├── registry.py       唯一注册表(工具名单一览)
+│   ├── schemas.py        唯一 LLM function-calling schema + 参数校验规格
+│   ├── arg_validator.py  参数严格校验
+│   ├── tool/            所有 LLM 工具(一工具一文件，文件名=工具名)
+│   │   ├── ranking.py        复合榜单(综合/新项目/关键词)：内部编排 + 缓存 + 确认守卫
+│   │   ├── repo_growth.py / describe_project.py / repo_profile.py / search_repos.py
+│   │   └── analyze_report.py / get_db_info.py / fetch_trending.py
+│   └── basic/           基础能力(被 ≥2 个工具复用的公用实现，不直接暴露给 LLM)
+│       ├── core.py       搜索/扫描/增长/排序/描述/DB/Trending 实现
+│       ├── report.py     报告生成   scoring.py 评分   report_parse.py 报告解析
+│       └── resolve.py    单仓库输入消歧
+├── datasource/       数据源适配层：Provider 接口 + 归一化 Repo；datasource/github/ 为 GitHub 实现
+├── infra/            LLM 双后端客户端 + llm(描述生成) + db + favorites + 并发调度框架
+├── data/             运行时数据(Github_DB.json / favorites.json / 断点，已 gitignore)
+├── config.py         全局配置(阈值/关键词/路径写死/安全/LLM)
+└── 入口: agent_cli / cron_scheduled_update / api_server(含报告 HTML 渲染+上期对比) / __main__
 ```
 
-设计要点：榜单的工具调用顺序内聚在「复合工具」内部，顶层 ReAct 只负责选工具，无白名单/无前置硬校验/无状态机。多平台可通过新增 Provider 扩展。
+设计要点:工具只有两类——**独立工具**(一文件一工具,内部若需编排就自己 import basic)与 **basic 公用能力**(被 ≥2 个工具复用才准入)。榜单的顺序编排内聚在 `ranking.py`;agent 与定时任务共用同一榜单入口。多平台可通过新增 datasource Provider 扩展。

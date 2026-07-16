@@ -12,7 +12,7 @@ import logging
 from .. import config as cfg
 from .llm_client import client_from_config
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 
 _client = None
 

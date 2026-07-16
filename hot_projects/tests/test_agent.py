@@ -5,7 +5,7 @@ from hot_projects.tools.registry import ToolSpec, ToolRegistry
 
 def test_agent_state_defaults():
     s = AgentState(db={"projects": {}})
-    assert s.ranking_cache is not None
+    assert isinstance(s.tool_state, dict)
     assert s.active_repo is None
     assert s.pending_confirmation_signature is None
     assert isinstance(s.conversation, list)
@@ -61,6 +61,48 @@ def test_llm_failure_returns_message():
     agent = HotProjectAgent(llm=llm, registry=reg, provider=None, db={"projects": {}})
     reply = agent.chat("hi")
     assert "失败" in reply
+
+
+def test_compress_keeps_tool_pairing():
+    """压缩后保留的历史不能以孤儿 tool 消息开头（否则 OpenAI 兼容接口报 400）。"""
+    from hot_projects.agent.state import MAX_CONVERSATION_MESSAGES
+
+    reg = _registry_with("get_db_info", lambda ctx, args: {})
+    # 第 1 个响应给 _summarize（lite 摘要），第 2 个给正常对话
+    llm = FakeLLM([_text("历史摘要"), _text("好的。")])
+    agent = HotProjectAgent(llm=llm, registry=reg, provider=None, db={"projects": {}})
+
+    # 构造超长历史：结尾是「assistant(tool_calls) + 大量 tool 结果」，
+    # 使朴素的 [-KEEP_RECENT:] 切片必然切在配对中间。
+    conv = agent.state.conversation  # [system]
+    for i in range(MAX_CONVERSATION_MESSAGES - 8):
+        conv.append({"role": "user", "content": f"问题{i}"})
+        conv.append({"role": "assistant", "content": f"回答{i}"})
+    conv.append({"role": "user", "content": "跑一批工具"})
+    conv.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": str(i), "type": "function",
+         "function": {"name": "get_db_info", "arguments": "{}"}}
+        for i in range(12)
+    ]})
+    for i in range(12):
+        conv.append({"role": "tool", "tool_call_id": str(i), "content": "{}"})
+
+    reply = agent.chat("继续")
+    assert reply == "好的。"
+
+    rebuilt = agent.state.conversation
+    assert rebuilt[0]["role"] == "system"
+    # 找到摘要之后的第一条历史消息，不能是 tool
+    first_kept = next(
+        m for m in rebuilt[1:]
+        if not (m.get("role") == "user" and str(m.get("content", "")).startswith("[对话历史摘要]"))
+    )
+    assert first_kept.get("role") != "tool"
+    # 且全历史中每条 tool 消息前必须能追溯到带 tool_calls 的 assistant
+    for idx, m in enumerate(rebuilt):
+        if m.get("role") == "tool":
+            prev = rebuilt[idx - 1]
+            assert prev.get("role") == "tool" or prev.get("tool_calls")
 
 
 def test_bad_tool_args_recorded_then_replies():

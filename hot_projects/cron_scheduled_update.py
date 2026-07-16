@@ -20,8 +20,8 @@
 #    添加以下行：
 #    36 0 * * 7 . /root/.hot_projects.env && cd /root/code/Agent-skils && /usr/bin/python3 -m hot_projects.cron_scheduled_update --top-n 100 --growth-calc-days 7
 #
-# 主日志：logs/cron-YYYY-MM-DD.log
-# 调试日志：logs/debug/cron-YYYY-MM-DD.debug.log
+# 主日志：logs/YYYY-MM/cron-YYYY-MM-DD.log
+# 调试日志：logs/YYYY-MM/debug/cron-YYYY-MM-DD.debug.log
 # ============================================================
 import argparse
 import logging
@@ -41,10 +41,9 @@ from hot_projects.config import (
     MAX_STAR,
 )
 from hot_projects.infra.db import load_db, save_db
-from hot_projects.providers.github.token_pool import GitHubTokenPool
-from hot_projects.providers.github.provider import GitHubProvider
-from hot_projects.pipeline.ranking_pipeline import run_ranking
-from hot_projects.pipeline.cache import RankingCache
+from hot_projects.datasource.github.token_pool import GitHubTokenPool
+from hot_projects.datasource.github.provider import GitHubProvider
+from hot_projects.tools.tool.ranking import run_ranking, RankingCache
 
 
 class _DebugOnlyFilter(logging.Filter):
@@ -58,17 +57,19 @@ class _DebugOnlyFilter(logging.Filter):
 
 
 def setup_logging() -> str:
-    """配置定时任务日志：主日志（INFO，仅文件）+ debug 副日志（仅 DEBUG 细节，不重复 INFO）。"""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    debug_log_dir = os.path.join(LOG_DIR, "debug")
+    """配置定时任务日志：主日志（INFO，仅文件）+ debug 副日志（仅 DEBUG 细节，不重复 INFO）。
+
+    按月归档：logs/YYYY-MM/cron-YYYY-MM-DD.log，调试日志在 logs/YYYY-MM/debug/ 下。
+    """
+    now = datetime.now()
+    month_dir = os.path.join(LOG_DIR, now.strftime("%Y-%m"))
+    os.makedirs(month_dir, exist_ok=True)
+    debug_log_dir = os.path.join(month_dir, "debug")
     os.makedirs(debug_log_dir, exist_ok=True)
 
     main_level = logging.INFO
-    log_date = datetime.now().strftime("%Y-%m-%d")
-    log_path = os.path.join(
-        LOG_DIR,
-        f"cron-{log_date}.log",
-    )
+    log_date = now.strftime("%Y-%m-%d")
+    log_path = os.path.join(month_dir, f"cron-{log_date}.log")
     file_handler = logging.FileHandler(
         log_path,
         encoding="utf-8",
@@ -113,68 +114,47 @@ def setup_logging() -> str:
 logger = logging.getLogger("scheduled_update")
 
 
-class DiscoveryPipeline:
-    """端到端项目发现管道（委托统一 ranking_pipeline）。
+def _run_comprehensive(token_mgr: GitHubTokenPool, db: dict, top_n: int,
+                       growth_calc_days: int, force_refresh: bool) -> dict:
+    """跑综合榜(search+scan+trending→增长→排序→报告),与 Agent 复合工具共用 run_ranking。"""
+    params = {
+        "min_star": MIN_STAR,
+        "max_star": MAX_STAR,
+        "top_n": top_n,
+        "growth_calc_days": growth_calc_days,
+        "growth_threshold": STAR_GROWTH_THRESHOLD,
+        "days_since_created": None,
+    }
+    logger.info(
+        "[Pipeline] 启动: mode=comprehensive, top_n=%s, growth_calc_days=%s, "
+        "growth_threshold=%s, 数据源=search+scan+trending 三源合一",
+        top_n, growth_calc_days, STAR_GROWTH_THRESHOLD,
+    )
 
-    定时任务场景：search -> scan -> trending -> growth -> rank -> report，
-    与 Agent 复合榜单工具共用同一 run_ranking 实现。
-    """
+    result = run_ranking(
+        GitHubProvider(token_mgr), mode="comprehensive", params=params, db=db,
+        cache=RankingCache(), do_report=True, force_refresh=force_refresh,
+    )
 
-    def __init__(self, token_mgr: GitHubTokenPool, db: dict) -> None:
-        self.provider = GitHubProvider(token_mgr)
-        self.db = db
+    report_path = result.get("report_path", "")
+    if not result.get("ranked"):
+        # 空跑（搜索/增长全失败等）不落库：save_db 会强制 date=今天，
+        # 会把一次失败伪造成“新鲜基线”，误导下一轮 DB 差值判定。
+        logger.warning("[Pipeline] 无榜单结果，跳过 DB 保存（避免伪造新鲜基线）。")
+        return {"error": "无候选项目", "report_path": report_path,
+                "candidates_count": result.get("candidates_count", 0)}
 
-    def run(
-        self,
-        top_n: int | None = None,
-        days_since_created: int | None = None,
-        growth_calc_days: int = GROWTH_CALC_DAYS,
-        growth_threshold: int = STAR_GROWTH_THRESHOLD,
-        force_refresh: bool = False,
-    ) -> dict:
-        if top_n is None:
-            top_n = HOT_PROJECT_COUNT
-
-        mode = "hot_new" if days_since_created is not None else "comprehensive"
-        params = {
-            "min_star": MIN_STAR,
-            "max_star": MAX_STAR,
-            "top_n": top_n,
-            "growth_calc_days": growth_calc_days,
-            "growth_threshold": growth_threshold,
-            "days_since_created": days_since_created,
-        }
-        logger.info(
-            "[Pipeline] 启动: mode=%s, top_n=%s, days_since_created=%s, "
-            "growth_calc_days=%s, growth_threshold=%s, 数据源=search+scan+trending 三源合一",
-            mode, top_n, days_since_created, growth_calc_days, growth_threshold,
-        )
-
-        result = run_ranking(
-            self.provider, mode=mode, params=params, db=self.db,
-            cache=RankingCache(), do_report=True, force_refresh=force_refresh,
-        )
-
-        report_path = result.get("report_path", "")
-        ranked = result.get("ranked", [])
-        if not ranked:
-            # 空跑（搜索/增长全失败等）不落库：save_db 会强制 date=今天、valid=true，
-            # 会把一次失败伪造成“新鲜基线”，反而误导下一轮的 DB 差值判定。
-            logger.warning("[Pipeline] 无榜单结果，跳过 DB 保存（避免伪造新鲜基线）。")
-            return {"error": "无候选项目", "report_path": report_path,
-                    "candidates_count": result.get("candidates_count", 0)}
-
-        save_db(self.db)
-
-        if report_path:
-            logger.info("[Pipeline] 完成! 报告: %s", report_path)
-        return {
-            "report_path": report_path,
-            "ranked_count": len(ranked),
-            "candidates_count": result.get("candidates_count", 0),
-            "mode": result.get("mode", mode),
-            "funnel": result.get("funnel"),
-        }
+    save_db(db)
+    if report_path:
+        logger.info("[Pipeline] 完成! 报告: %s", report_path)
+    return {
+        "report_path": report_path,
+        "ranked_count": len(result["ranked"]),
+        "candidates_count": result.get("candidates_count", 0),
+        "mode": result.get("mode", "comprehensive"),
+        "funnel": result.get("funnel"),
+        "ranked": result["ranked"],  # [(full_name, {growth, star}), ...] 供推送取 Top3
+    }
 
 
 def log_pipeline_funnel(funnel: dict | None) -> None:
@@ -214,8 +194,8 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
     # 统计：包含已有项目变化 + 新增项目的字段填充
     stats = {
         "refreshed_at": {"changed": 0, "new_filled": 0},
-        "star": {"changed": 0, "increased": 0, "decreased": 0, "total_growth": 0},
-        "forks": {"changed": 0, "increased": 0, "decreased": 0, "total_growth": 0},
+        "star": {"changed": 0, "increased": 0, "decreased": 0},
+        "forks": {"changed": 0, "increased": 0, "decreased": 0},
         "short_desc": {
             "changed": 0,
             "empty_to_filled": 0,
@@ -230,8 +210,6 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
             "content_changed": 0,
             "new_filled": 0,  # 新增项目填充
         },
-        "topics": {"changed": 0, "empty_to_filled": 0, "new_filled": 0},
-        "language": {"changed": 0, "empty_to_filled": 0, "new_filled": 0},
     }
 
     # 统计新增项目的字段填充
@@ -242,10 +220,6 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
             stats["short_desc"]["new_filled"] += 1
         if new_p.get("desc"):
             stats["desc"]["new_filled"] += 1
-        if new_p.get("topics"):
-            stats["topics"]["new_filled"] += 1
-        if new_p.get("language"):
-            stats["language"]["new_filled"] += 1
 
     # 遍历已有项目，统计变化
     for name in existing:
@@ -261,10 +235,8 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
         new_star = new_p.get("star", 0)
         if old_star != new_star:
             stats["star"]["changed"] += 1
-            diff = new_star - old_star
-            if diff > 0:
+            if new_star - old_star > 0:
                 stats["star"]["increased"] += 1
-                stats["star"]["total_growth"] += diff
             else:
                 stats["star"]["decreased"] += 1
 
@@ -273,10 +245,8 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
         new_forks = new_p.get("forks", 0)
         if old_forks != new_forks:
             stats["forks"]["changed"] += 1
-            diff = new_forks - old_forks
-            if diff > 0:
+            if new_forks - old_forks > 0:
                 stats["forks"]["increased"] += 1
-                stats["forks"]["total_growth"] += diff
             else:
                 stats["forks"]["decreased"] += 1
 
@@ -304,22 +274,6 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
             else:
                 stats["desc"]["content_changed"] += 1
 
-        # topics
-        old_topics = old_p.get("topics", [])
-        new_topics = new_p.get("topics", [])
-        if old_topics != new_topics:
-            stats["topics"]["changed"] += 1
-            if not old_topics and new_topics:
-                stats["topics"]["empty_to_filled"] += 1
-
-        # language
-        old_lang = old_p.get("language", "")
-        new_lang = new_p.get("language", "")
-        if old_lang != new_lang:
-            stats["language"]["changed"] += 1
-            if not old_lang and new_lang:
-                stats["language"]["empty_to_filled"] += 1
-
     # 输出详细统计
     logger.info("")
     logger.info("=" * 70)
@@ -346,24 +300,14 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
     # star
     s = stats["star"]
     if s["changed"]:
-        avg_growth = s["total_growth"] / s["increased"] if s["increased"] > 0 else 0
-        logger.info(
-            f"  star: {s['changed']} 个变化 "
-            f"(↑{s['increased']} 个, ↓{s['decreased']} 个, "
-            f"总增长 +{s['total_growth']}, 平均增长 +{avg_growth:.1f})"
-        )
+        logger.info(f"  star: {s['changed']} 个变化 (↑{s['increased']} 个, ↓{s['decreased']} 个)")
     else:
         logger.info("  star: 无变化")
 
     # forks
     f = stats["forks"]
     if f["changed"]:
-        avg_growth = f["total_growth"] / f["increased"] if f["increased"] > 0 else 0
-        logger.info(
-            f"  forks: {f['changed']} 个变化 "
-            f"(↑{f['increased']} 个, ↓{f['decreased']} 个, "
-            f"总增长 +{f['total_growth']}, 平均增长 +{avg_growth:.1f})"
-        )
+        logger.info(f"  forks: {f['changed']} 个变化 (↑{f['increased']} 个, ↓{f['decreased']} 个)")
     else:
         logger.info("  forks: 无变化")
 
@@ -401,22 +345,6 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
     else:
         logger.info("  desc (LLM): 无变化")
 
-    # topics
-    t = stats["topics"]
-    total_t = t["changed"] + t["new_filled"]
-    if total_t:
-        logger.info(f"  topics: {total_t} 个变化 (已有空→有内容 {t['empty_to_filled']}, 新增 {t['new_filled']})")
-    else:
-        logger.info("  topics: 无变化")
-
-    # language
-    l = stats["language"]
-    total_l = l["changed"] + l["new_filled"]
-    if total_l:
-        logger.info(f"  language: {total_l} 个变化 (已有空→有内容 {l['empty_to_filled']}, 新增 {l['new_filled']})")
-    else:
-        logger.info("  language: 无变化")
-
     logger.info("=" * 70)
     logger.info("")
 
@@ -440,11 +368,9 @@ def run_update(
         f"DB projects={len(db.get('projects', {}))}, valid={db.get('valid')}"
     )
 
-    pipeline = DiscoveryPipeline(token_mgr, db)
-    result = pipeline.run(
-        top_n=top_n,
-        growth_calc_days=growth_calc_days,
-        force_refresh=True,
+    result = _run_comprehensive(
+        token_mgr, db, top_n=top_n,
+        growth_calc_days=growth_calc_days, force_refresh=True,
     )
 
     report_path = result.get("report_path", "")
@@ -453,10 +379,73 @@ def run_update(
         # 先打印榜单漏斗（收集→出榜逐层数量），再打印 DB 字段变化统计
         log_pipeline_funnel(result.get("funnel"))
         log_update_summary(old_db, db)
+        _push_weekly_digest(result)
     elif result.get("error"):
         logger.error(f"定时更新失败: {result['error']}")
     else:
         logger.error("报告生成失败。")
+
+
+def _prev_report_added_removed(report_path: str, current_names: set[str]) -> tuple[int, int, str] | None:
+    """对比上一份同名式报告，返回 (上新数, 移出数, 上期文件名)；无可比则 None。"""
+    import glob
+    import re
+    from hot_projects.config import REPORT_DIR
+    from hot_projects.tools.basic.report_parse import parse_structured_report
+
+    cur = os.path.basename(report_path)
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})(.*)\.md$", cur)
+    if not m:
+        return None
+    cur_date, suffix = m.group(1), m.group(2)
+    prev = None
+    for path in sorted(glob.glob(os.path.join(REPORT_DIR, "*.md")), reverse=True):
+        pm = re.match(r"^(\d{4}-\d{2}-\d{2})(.*)\.md$", os.path.basename(path))
+        if pm and pm.group(2) == suffix and pm.group(1) < cur_date:
+            prev = path
+            break
+    if prev is None:
+        return None
+    try:
+        parsed = parse_structured_report(open(prev, encoding="utf-8").read())
+    except OSError:
+        return None
+    if not parsed:
+        return None
+    prev_names = {r["repo"] for r in parsed["repos"]}
+    added = len(current_names - prev_names)
+    removed = len(prev_names - current_names)
+    return added, removed, os.path.basename(prev)
+
+
+def _push_weekly_digest(result: dict) -> None:
+    """周报生成成功后推一条微信摘要（Server酱）。未配 key 则静默跳过。
+
+    含:①Top5 ②较上期上新/移出数。
+    """
+    from datetime import datetime, timezone
+    from hot_projects.infra import notify
+
+    ranked = result.get("ranked", [])
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parts = [f"综合榜已更新，共 {len(ranked)} 个项目。"]
+
+    # ② 较上期上新/移出
+    diff = _prev_report_added_removed(result.get("report_path", ""), {n for n, _ in ranked})
+    if diff:
+        added, removed, prev_name = diff
+        parts.append(f"较上期（{prev_name}）：上新 {added} · 移出 {removed}")
+
+    # ① Top5
+    top_lines = [
+        f"{i}. {name} (+{info['growth']:,}, {info['star']:,}★)"
+        for i, (name, info) in enumerate(ranked[:5], 1)
+    ]
+    if top_lines:
+        parts.append("**Top5**\n" + "\n".join(top_lines))
+
+    parts.append(f"报告：{os.path.basename(result.get('report_path', ''))}")
+    notify.send(f"GitHub 周报 {today}", "\n\n".join(parts))
 
 
 def main():

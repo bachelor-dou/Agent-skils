@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 
 from ..config import DB_FILE_PATH, GROWTH_CALC_DAYS
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 
 _db_lock = threading.Lock()
 

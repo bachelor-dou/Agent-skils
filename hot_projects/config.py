@@ -74,6 +74,11 @@ _DEFAULT_SECURITY_IP_BLACKLIST = [
 SECURITY_IP_BLACKLIST: list[str] = _parse_csv_env("SECURITY_IP_BLACKLIST") or _DEFAULT_SECURITY_IP_BLACKLIST
 
 # ──────────────────────────────────────────────────────────────
+# 微信推送（Server酱）：定时周报生成后推一条摘要。可选——未配 key 即关闭。
+# ──────────────────────────────────────────────────────────────
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "")
+
+# ──────────────────────────────────────────────────────────────
 # LLM A/B 双后端配置（兼容 OpenAI /v1/chat/completions 格式）
 #   逐调用回退：每次先调方案 A，失败再回退方案 B。
 #   两方案可配置不同平台、账号、模型与参数风格（azure / openai）。
@@ -99,8 +104,8 @@ LLM_B_KEY = os.environ.get("LLM_B_KEY", "")
 # ──────────────────────────────────────────────────────────────
 STAR_GROWTH_THRESHOLD: int = 1000       # 窗口期 star 增长阈值
 MIN_STAR: int = 1200                   # 项目最低 star 门槛（关键词搜索 + 范围扫描下界）
-MAX_STAR: int = 45000                  # 范围扫描上限
-HOT_PROJECT_COUNT: int = 120           # 综合热门项目默认输出数量（上限，有几个出几个）
+MAX_STAR: int = 50000                  # 范围扫描上限
+HOT_PROJECT_COUNT: int = 100           # 综合热门项目默认输出数量（上限，有几个出几个）
 HOT_NEW_PROJECT_COUNT: int = 13        # 新项目榜默认输出数量（未指定 top_n 时使用）
 GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
 DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
@@ -138,14 +143,17 @@ SEARCH_REQUEST_INTERVAL: float = 1.3  # Search API 请求最小间隔（秒）
 MAX_GRAPHQL_SAMPLING_BATCHES: int = 45  # GraphQL 采样外推最多翻页批次数（35×100≈3500 条）
 
 # ──────────────────────────────────────────────────────────────
-# 路径配置（基于包根目录 hot_projects/）
-#   可通过环境变量覆盖：DATA_DIR
+# 路径配置（均写死在包根目录 hot_projects/ 下，不走环境变量）
 # ──────────────────────────────────────────────────────────────
-DATA_DIR: str = os.environ.get("DATA_DIR", str(PACKAGE_DIR))
+_ROOT = str(PACKAGE_DIR)
+REPORT_DIR = os.path.join(_ROOT, "report")
+LOG_DIR = os.path.join(_ROOT, "logs")
+# 数据存储目录（Github_DB.json、favorites.json、.pipeline_checkpoint.json 及各自 .lock/.tmp）
+DATA_DIR = os.path.join(_ROOT, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE_PATH = os.path.join(DATA_DIR, "Github_DB.json")
+FAVORITES_FILE_PATH = os.path.join(DATA_DIR, "favorites.json")
 CHECKPOINT_FILE_PATH = os.path.join(DATA_DIR, ".pipeline_checkpoint.json")
-REPORT_DIR = os.path.join(DATA_DIR, "report")
-LOG_DIR = os.path.join(DATA_DIR, "logs")
 
 # ──────────────────────────────────────────────────────────────
 # 搜索关键词词典（AI 重点 + 通用全覆盖）

@@ -1,5 +1,4 @@
-from hot_projects.pipeline.ranking_pipeline import run_ranking
-from hot_projects.pipeline.cache import RankingCache
+from hot_projects.tools.tool.ranking import run_ranking, RankingCache
 
 
 class FakeProvider:
@@ -25,7 +24,7 @@ class FakeProvider:
 
 
 def _patch_rank(monkeypatch):
-    import hot_projects.pipeline.ranking_pipeline as P
+    import hot_projects.tools.tool.ranking as P
     monkeypatch.setattr(P, "step2_rank_and_select", lambda cand, **kw: list(cand.items()))
 
 

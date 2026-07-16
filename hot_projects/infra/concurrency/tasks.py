@@ -3,7 +3,7 @@ Task 子类定义
 ==============
 定义搜索 / 扫描 / 增长计算相关的 Task 子类。
 
-Task 子类（继承 task_base.Task）由 capabilities/_impl.py 中的 Tool 函数创建并提交到 AsyncTaskDispatcher。
+Task 子类（继承 task_base.Task）由 tools/basic/core.py 中的能力函数创建并提交到 AsyncTaskDispatcher。
 辅助函数（checkpoint/批量提交等）已拆分到 task_help.py。
 """
 
@@ -23,9 +23,9 @@ from ..db import (
     update_db_project,
 )
 from ..exceptions import RateLimitError, TokenInvalidError
-from ...providers.github.api import search_github_repos, async_search_github_repos
-from ...providers.github.trending import fetch_trending
-from ...providers.github.growth_estimator import (
+from ...datasource.github.api import search_github_repos, async_search_github_repos
+from ...datasource.github.trending import fetch_trending
+from ...datasource.github.growth_estimator import (
     GROWTH_ESTIMATION_UNRESOLVED,
     estimate_star_growth_binary,
     estimate_star_growth_binary_async,
@@ -39,7 +39,7 @@ from .task_help import (
     _submit_growth_tasks,
 )
 
-logger = logging.getLogger("discover_hot")
+logger = logging.getLogger("hot_projects")
 
 CHECKPOINT_BATCH_SIZE = 10  # checkpoint 批量落盘阈值
 
