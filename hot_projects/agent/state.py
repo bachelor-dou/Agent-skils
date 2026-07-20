@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 
 # 对话历史压缩参数
-MAX_CONVERSATION_MESSAGES = 40
+MAX_CONVERSATION_MESSAGES = 35
 KEEP_RECENT_MESSAGES = 10
 
 

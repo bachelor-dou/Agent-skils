@@ -105,6 +105,20 @@ def test_compress_keeps_tool_pairing():
             assert prev.get("role") == "tool" or prev.get("tool_calls")
 
 
+def test_step_cap_finalizes_without_tools():
+    """命中步数护栏后：不再给工具，额外做一次无工具收口，返回其正文。"""
+    from hot_projects.agent.agent import MAX_AGENT_STEPS
+
+    reg = _registry_with("get_db_info", lambda ctx, args: {"total_projects": 1})
+    # 前 MAX_AGENT_STEPS 步一直返回 tool_calls（模拟不收敛），最后一次收口返回文本
+    responses = [_toolcall("get_db_info")] * MAX_AGENT_STEPS + [_text("已尽力收口。")]
+    llm = FakeLLM(responses)
+    agent = HotProjectAgent(llm=llm, registry=reg, provider=None, db={"projects": {}})
+    reply = agent.chat("反复调用")
+    assert reply == "已尽力收口。"
+    assert llm.calls == MAX_AGENT_STEPS + 1  # 15 步循环 + 1 次无工具收口
+
+
 def test_bad_tool_args_recorded_then_replies():
     # get_db_info 参数非法 JSON → 工具返回错误 → LLM 下一轮给出文本
     reg = _registry_with("get_db_info", lambda ctx, args: {"total_projects": 0})

@@ -7,8 +7,8 @@ __all__ = ["HotProjectAgent", "ToolContext", "AgentState", "build_agent"]
 
 
 def build_agent() -> HotProjectAgent:
-    """组装生产用 Agent：A/B LLM 客户端 + 默认注册表 + GitHubProvider + DB。"""
-    from ..infra.llm_client import client_from_config
+    """组装生产用 Agent：共享 LLM 客户端 + 默认注册表 + GitHubProvider + DB。"""
+    from ..infra.llm_client import get_client
     from ..infra.db import load_db
     from ..datasource.github.token_pool import GitHubTokenPool
     from ..datasource.github.provider import GitHubProvider
@@ -17,7 +17,7 @@ def build_agent() -> HotProjectAgent:
     token_mgr = GitHubTokenPool()
     db = load_db()
     return HotProjectAgent(
-        llm=client_from_config(),
+        llm=get_client(),
         registry=build_default_registry(),
         provider=GitHubProvider(token_mgr),
         db=db,

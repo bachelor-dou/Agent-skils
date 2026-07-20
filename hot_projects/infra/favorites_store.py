@@ -81,7 +81,7 @@ def _write_all(data: dict) -> None:
 
 
 def set_favorite(user_id: str, repo: str, action: str,
-                 source_report: str = "") -> list[dict]:
+                 source_report: str = "", short_desc: str = "") -> list[dict]:
     """add / remove 单个收藏，返回更新后的清单。非法输入抛 ValueError。"""
     if not valid_user_id(user_id):
         raise ValueError("invalid user_id")
@@ -97,14 +97,19 @@ def set_favorite(user_id: str, repo: str, action: str,
 
         if action == "remove":
             items = [x for x in items if x.get("repo") != repo]
-        else:  # add：幂等去重，新收藏置顶
-            if not any(x.get("repo") == repo for x in items):
+        else:  # add：幂等去重，新收藏置顶；已存在则补写概要
+            existing = next((x for x in items if x.get("repo") == repo), None)
+            if existing is not None:
+                if short_desc:
+                    existing["short_desc"] = short_desc
+            else:
                 if len(items) >= MAX_FAVORITES_PER_USER:
                     raise ValueError("favorites limit reached")
                 items.insert(0, {
                     "repo": repo,
                     "favorited_at": _now(),
                     "source_report": source_report or "",
+                    "short_desc": short_desc or "",
                 })
 
         users[user_id] = items

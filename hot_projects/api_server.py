@@ -57,6 +57,7 @@ from .config import (
     DATA_DIR,
     LOG_DIR,
     REPORT_DIR,
+    LLM_MODELS,
     CORS_ALLOWED_ORIGINS,
     CORS_ALLOW_CREDENTIALS,
     SECURITY_IP_BLACKLIST,
@@ -121,6 +122,9 @@ def setup_app_logging() -> str:
 class ChatRequest(BaseModel):
     session_id: str = "default"
     message: str
+    user_id: str = ""
+    model: str = ""
+    lite: str = ""  # 子模型 id（"平台id:模型名"）；空=跟随主模型平台
 
 class ChatResponse(BaseModel):
     session_id: str
@@ -796,7 +800,7 @@ def chat(req: ChatRequest):
         )
         agent = get_agent(req.session_id)
         with _tool_execution_lock:
-            reply = agent.chat(req.message)
+            reply = agent.chat(req.message, user_id=req.user_id, model=req.model, lite=req.lite)
         logger.info(
             "HTTP 对话完成: session=%s, reply_len=%s",
             req.session_id,
@@ -813,6 +817,71 @@ def chat(req: ChatRequest):
         session_ttl_seconds=_SESSION_TTL,
         session_expires_at=_format_session_expiry(),
     )
+
+
+@app.get("/api/models")
+async def list_models():
+    """返回已配置（有 key 且 enabled）的模型清单，供网页模型切换器渲染。
+
+    - models:      主模型列表（config 已过滤未启用条目）。
+    - lite_models: 所有平台子模型融合成的共享池；主/子模型选择解耦，
+                   任意主模型可搭配任意平台的子模型（按子模型所属平台调用）。
+    """
+    configured = [m for m in LLM_MODELS if m.get("key")]
+    # 跨平台融合子模型池：按模型名去重，同名只保留先出现的平台（前端展示用；
+    # 各平台内部的完整 lite_models 不受影响，仍供内部/定时任务按平台回退）。
+    lite_pool: list[dict] = []
+    seen_names: set[str] = set()
+    for m in configured:
+        for name in m["lite_models"]:
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            lite_pool.append({"id": f"{m['id']}:{name}", "label": name.rsplit("/", 1)[-1]})
+    return {
+        "models": [{"id": m["id"], "label": m["label"]} for m in configured],
+        "lite_models": lite_pool,
+    }
+
+
+class ModelTestRequest(BaseModel):
+    model: str = ""  # 主模型 id；空=不测
+    lite: str = ""   # 子模型 id（"平台id:模型名"）；空=不测
+
+
+@app.post("/api/models/test")
+def test_models(req: ModelTestRequest):
+    """模型预检：对选中的主/子模型各发一次极小的真实调用，验证可用性。
+
+    前端在切换模型后、主循环启动前调用；返回 unavailable 非空则取消使用并提示。
+    同步 def 走线程池，不阻塞事件循环。
+    """
+    from .infra.llm_client import get_client
+
+    client = get_client()
+    logger.info("模型预检开始: model=%s, lite=%s", req.model or "-", req.lite or "-")
+    unavailable: list[str] = []
+    if req.model:
+        ok = client.test_model(model_id=req.model)
+        label = next((m["label"] for m in LLM_MODELS if m["id"] == req.model), req.model)
+        if ok:
+            logger.info("模型预检通过: 主模型 %s (%s)", req.model, label)
+        else:
+            logger.warning("模型预检不可用: 主模型 %s (%s)", req.model, label)
+            unavailable.append(label)
+    if req.lite:
+        ok = client.test_model(lite_id=req.lite)
+        lite_name = req.lite.partition(":")[2] or req.lite
+        if ok:
+            logger.info("模型预检通过: 子模型 %s", req.lite)
+        else:
+            logger.warning("模型预检不可用: 子模型 %s", req.lite)
+            unavailable.append(lite_name)
+    if unavailable:
+        logger.warning("模型预检结果: 不可用 %s", unavailable)
+    else:
+        logger.info("模型预检结果: 全部可用")
+    return {"ok": not unavailable, "unavailable": unavailable}
 
 
 @app.get("/api/reports")
@@ -930,7 +999,11 @@ async def ws_chat(websocket: WebSocket, session_id: str):
     支持重连后推送断开期间的待发回复。
     """
     await websocket.accept()
-    logger.info("WebSocket 已连接: %s", session_id)
+    user_id = websocket.query_params.get("user_id", "")
+    model = websocket.query_params.get("model", "")
+    lite = websocket.query_params.get("lite", "")
+    logger.info("WebSocket 已连接: %s (user=%s, model=%s, lite=%s)",
+                session_id, user_id or "-", model or "-", lite or "-")
 
     # 推送断开期间缓存的待发回复（纯文本：前端按非信封消息当最终回复处理）
     with _pending_replies_lock:
@@ -953,7 +1026,8 @@ async def ws_chat(websocket: WebSocket, session_id: str):
             return "系统繁忙，请稍后重试。"
         logger.info("WebSocket 已获取执行锁: session=%s", session_id)
         try:
-            return agent.chat(message, progress_cb=progress_cb)
+            return agent.chat(message, progress_cb=progress_cb, user_id=user_id,
+                              model=model, lite=lite)
         finally:
             _tool_execution_lock.release()
             logger.info("WebSocket 已释放执行锁: session=%s", session_id)

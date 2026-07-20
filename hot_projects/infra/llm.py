@@ -9,25 +9,14 @@ LLM 调用模块
 
 import logging
 
-from .. import config as cfg
-from .llm_client import client_from_config
+from .llm_client import get_client as _get_client
 
 logger = logging.getLogger("hot_projects")
 
-_client = None
-
-
-def _get_client():
-    """惰性构造共享 LLMClient（A/B 双后端）。"""
-    global _client
-    if _client is None:
-        _client = client_from_config()
-    return _client
-
 
 def _llm_configured() -> bool:
-    """A 或 B 任一方案配置了 key 即视为可用。"""
-    return bool(cfg.LLM_A_KEY or cfg.LLM_B_KEY)
+    """任一模型配置了 key 即视为可用。"""
+    return bool(_get_client().usable())
 
 
 def _extract_content(data: dict | None) -> str:
@@ -104,7 +93,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
         detail_level: "standard"=260-520字三段式, "detailed"=400-800字四段式
 
     Returns:
-        LLM 生成的描述文本；单次调用失败（含 LLMClient 内部 A/B 回退与重试）后返回空字符串。
+        LLM 生成的描述文本；单次调用失败（含 LLMClient 多平台顺序回退与重试）后返回空字符串。
     """
     if not _llm_configured():
         logger.warning("LLM 未配置，跳过描述生成。")
@@ -126,30 +115,30 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
         info_parts.append(f"近期提交线索: {recent_commits}")
 
     prompt = (
-        f"请基于以下已提供信息，用中文总结这个 GitHub 开源项目。\n"
-        f"输出要求：\n"
-        f"1. 只能基于下方明确提供的信息，不要把项目地址或 README 链接当作已读取内容。\n"
-        f"2. 不要补充未在输入中出现、且无法确认的外部知识；信息不足时使用保守表述。\n"
-        f"3. 如果输入中包含 README摘录、发布记录或提交记录，可以引用；若缺失，请明确说明信息不足。\n"
+        "请基于以下已提供信息，用中文总结这个 GitHub 开源项目。\n"
+        "输出要求：\n"
+        "1. 只能基于下方明确提供的信息，不要把项目地址或 README 链接当作已读取内容。\n"
+        "2. 不要补充未在输入中出现、且无法确认的外部知识；信息不足时使用保守表述。\n"
+        "3. 如果输入中包含 README摘录、发布记录或提交记录，可以引用；若缺失，请明确说明信息不足。\n"
     )
     if detail_level == "detailed":
         prompt += (
-            f"4. 必须严格输出以下四个字段，每个字段单独成段，字段间用换行分隔：\n"
-            f"项目定位与用途：...（100-200字，说明是什么、做什么，简要介绍核心定位）\n"
-            f"解决的问题：...（100-200字，聚焦核心痛点，说明为什么需要这个项目）\n"
-            f"使用场景：...（100-200字，列举典型应用场景和目标用户）\n"
-            f"技术架构与特性：...（100-200字，关键技术栈、架构特点和核心特性）\n"
-            f"5. 总长度控制在 400-800 字，信息详实但不冗余。\n"
-            f"6. 不要使用列表、不要加 Markdown 标题、字段名后必须换行。\n\n"
+            "4. 必须严格输出以下四个字段，每个字段单独成段，字段间用换行分隔：\n"
+            "项目定位与用途：...（100-200字，说明是什么、做什么，简要介绍核心定位）\n"
+            "解决的问题：...（100-200字，聚焦核心痛点，说明为什么需要这个项目）\n"
+            "使用场景：...（100-200字，列举典型应用场景和目标用户）\n"
+            "技术架构与特性：...（100-200字，关键技术栈、架构特点和核心特性）\n"
+            "5. 总长度控制在 400-800 字，信息详实但不冗余。\n"
+            "6. 不要使用列表、不要加 Markdown 标题、字段名后必须换行。\n\n"
         )
     else:
         prompt += (
-            f"4. 必须严格输出以下三个字段，字段名保持原样：\n"
-            f"项目定位与用途：...\n"
-            f"解决的问题：...\n"
-            f"使用场景：...\n"
-            f"5. 每个字段建议 80-160 字，总长度控制在 260-520 字。\n"
-            f"6. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
+            "4. 必须严格输出以下三个字段，字段名保持原样：\n"
+            "项目定位与用途：...\n"
+            "解决的问题：...\n"
+            "使用场景：...\n"
+            "5. 每个字段建议 80-160 字，总长度控制在 260-520 字。\n"
+            "6. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
         )
     prompt += "\n".join(info_parts) + "\n"
 
@@ -165,7 +154,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
     if content:
         return content
 
-    logger.warning(f"LLM 描述生成失败（A/B 均失败），跳过描述: {repo_name}")
+    logger.warning(f"LLM 描述生成失败（所有平台均失败），跳过描述: {repo_name}")
     return ""
 
 

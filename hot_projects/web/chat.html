@@ -70,26 +70,35 @@
       <section class="messages" id="messages"></section>
 
       <footer class="composer">
-        <div class="quick-actions">
-          <button type="button" data-prompt="生成综合热榜">生成综合榜</button>
-          <button type="button" data-prompt="生成新项目热榜">生成新项目榜</button>
-          <button type="button" data-prompt="看看本周 GitHub Trending">GitHub Trending</button>
-        </div>
-        <div class="composer-row">
-          <textarea id="composer-input" placeholder="例如：生成综合热榜 / 前50名 AI Agent 方向 / 增长>=500的新项目"></textarea>
-        </div>
-        <div class="session-actions">
-          <button id="send-button" class="composer-primary-button" type="button">发送</button>
+        <div class="input-shell">
+          <textarea id="composer-input" rows="1" placeholder="例如：生成综合热榜 / 前50名 AI Agent 方向 / 增长>=500的新项目"></textarea>
+          <div class="composer-bar">
+          <div class="model-select">
+            <button type="button" class="model-select__btn" id="model-button" aria-haspopup="menu" aria-expanded="false" title="选择模型（主模型 → 子模型）">
+              <span class="model-select__name" id="model-current">模型</span>
+              <span class="model-select__chev" aria-hidden="true">▾</span>
+            </button>
+            <div class="model-select__menu" id="model-menu" role="menu" hidden></div>
+          </div>
+          <!-- 二级子模型菜单：无独立按钮，点主模型行时在其右侧展开；JS 会移到 body 下定位 -->
+          <div class="model-select__menu model-submenu" id="lite-menu" role="menu" hidden></div>
+          <button id="send-button" class="composer-primary-button" type="button" aria-label="发送" title="发送">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M12 19V5M12 5L6 11M12 5L18 11" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          </div>
         </div>
       </footer>
     </section>
 
     <aside class="report-panel">
-      <header class="report-head">
-        <h2>报告列表</h2>
-      </header>
-
-      <section class="report-list" id="report-list"></section>
+      <div class="panel-tabs" role="tablist">
+        <button type="button" class="panel-tab is-active" id="tab-reports" data-pane="report-list" role="tab" aria-selected="true">报告</button>
+        <button type="button" class="panel-tab" id="tab-fav" data-pane="fav-list" role="tab" aria-selected="false">⭐ 收藏 <strong id="fav-count">0</strong></button>
+      </div>
+      <section class="report-list panel-pane is-active" id="report-list"></section>
+      <div class="fav-list panel-pane" id="fav-list"></div>
     </aside>
   </main>
 

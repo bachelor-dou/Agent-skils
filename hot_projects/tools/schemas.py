@@ -90,6 +90,9 @@ TOOL_PARAM_SCHEMA.update({
         "repo": {"type": "str", "default": None},
     },
     "get_db_info": {"repo": {"type": "str", "default": None}},
+    "get_keyword_catalog": {},
+    "recall_tool_result": {"ref": {"type": "str"}},
+    "add_favorite": {"repo": {"type": "str"}},
     "fetch_trending": {
         # 含 "all"：定时任务/综合榜管线传 "all" 表示日/周/月三榜合一去重；
         # 缺了它会被校验器打回默认 "weekly"，导致只抓周榜（与前面字面定义保持一致）。
@@ -138,8 +141,8 @@ AGENT_TOOL_SCHEMAS = [
         }),
     _fn("keyword_ranking",
         "【关键词热榜·昂贵】按关键词搜索→增长→排序（不做星段扫描/Trending）。"
-        "根据用户自然语言：从系统提示里的「关键词类别参考」挑出相关关键词，并补充未覆盖到的英文搜索词，一起传入 keywords；"
-        "也可用 categories 选整组。执行前先回显参数等用户确认『开始』。",
+        "挑词前先调 get_keyword_catalog 获取预设分组表：从相关组挑出关键词，并补充未覆盖到的英文搜索词，一起传入 keywords；"
+        "也可用 categories 选整组（无需查表）。执行前先回显参数等用户确认『开始』。",
         {
             "keywords": {
                 "type": "array", "items": {"type": "string"},
@@ -175,7 +178,8 @@ AGENT_TOOL_SCHEMAS = [
     _fn("search_repos",
         "【按描述找项目】把用户的自然语言需求转成简洁的英文搜索词，去 GitHub 按 star 降序找 Top N 项目。"
         "适合『帮我找个手机远程控制 agent 的项目』这类『找到那个项目』的诉求——即时、轻量、不出榜单、不算增长。"
-        "query 用 2-4 个核心英文关键词（可加引号词组），不要堆太多词以免零结果；可选 in: 限定符（默认已含 name/description/readme）。",
+        "query 用 2-4 个核心英文关键词（可加引号词组），不要堆太多词以免零结果；可选 in: 限定符（默认已含 name/description/readme）。"
+        "结果不满意就换一组同义关键词再试。",
         {
             "query": {"type": "string", "description": "GitHub 搜索查询：由用户需求提炼的简洁英文关键词，如 'mobile remote control ai agent'。"},
             "top_n": {"type": "integer", "description": "返回前 N 个，默认 5，最多 20。"},
@@ -199,6 +203,21 @@ AGENT_TOOL_SCHEMAS = [
     _fn("get_db_info",
         "【数据库查询】查本地 DB 概览或指定仓库缓存信息（不联网）。",
         {"repo": {"type": "string", "description": "可选，查特定仓库；不传返回概览。"}}),
+    _fn("get_keyword_catalog",
+        "【关键词分组表】返回预设的搜索关键词分组全表（本地读取，零成本）。"
+        "做关键词榜（keyword_ranking）需要挑词时先调用本工具查看各组关键词，再挑选+补充后传入 keywords。",
+        {}),
+    _fn("recall_tool_result",
+        "【取回暂存结果】重新读取之前因体积过大被暂存的工具结果（本地读取，零成本）。"
+        "当你在历史里看到形如 {offloaded:true, ref:'tr3', digest:...} 的存根、且需要其完整内容时调用。",
+        {"ref": {"type": "string", "description": "存根里的 ref，如 tr3。"}},
+        required=["ref"]),
+    _fn("add_favorite",
+        "【收藏项目】把某项目加入当前用户收藏（需用户已登录）。"
+        "适用于用户在对话中分析后确认『收藏/加入收藏』某项目时调用；"
+        "DB 无此项目会自动拉取信息入库并生成一句话中文概要。",
+        {"repo": {"type": "string", "description": "owner/repo；也可只给项目名或描述，自动检索匹配，有歧义时返回候选。"}},
+        required=["repo"]),
     _fn("fetch_trending",
         "【Trending】获取 GitHub Trending 列表。",
         {"trending_range": {"type": "string", "enum": ["daily", "weekly", "monthly"],

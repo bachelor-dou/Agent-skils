@@ -36,7 +36,7 @@ class ToolRegistry:
 
 
 def build_default_registry() -> ToolRegistry:
-    """组装默认注册表：3 个复合榜单工具（昂贵）+ 8 个独立工具（一工具一文件）。"""
+    """组装默认注册表：3 个复合榜单工具（昂贵）+ 11 个独立工具（一工具一文件）。"""
     from .schemas import AGENT_TOOL_SCHEMAS
     from .tool.ranking import make_ranking_handler
     from .tool.repo_growth import repo_growth_handler
@@ -46,7 +46,10 @@ def build_default_registry() -> ToolRegistry:
     from .tool.star_trend import star_trend_handler
     from .tool.analyze_report import analyze_report_handler
     from .tool.get_db_info import get_db_info_handler
+    from .tool.get_keyword_catalog import get_keyword_catalog_handler
+    from .tool.recall_tool_result import recall_tool_result_handler
     from .tool.fetch_trending import fetch_trending_handler
+    from .tool.add_favorite import add_favorite_handler
 
     schema_by_name = {s["function"]["name"]: s for s in AGENT_TOOL_SCHEMAS}
     handlers = {
@@ -60,7 +63,10 @@ def build_default_registry() -> ToolRegistry:
         "star_trend": (star_trend_handler, False),
         "analyze_report": (analyze_report_handler, False),
         "get_db_info": (get_db_info_handler, False),
+        "get_keyword_catalog": (get_keyword_catalog_handler, False),
+        "recall_tool_result": (recall_tool_result_handler, False),
         "fetch_trending": (fetch_trending_handler, False),
+        "add_favorite": (add_favorite_handler, False),
     }
 
     reg = ToolRegistry()

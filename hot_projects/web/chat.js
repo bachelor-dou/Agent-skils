@@ -17,8 +17,14 @@
     const usageHelpButton = document.getElementById("usage-help-button");
     const usageHelpOverlay = document.getElementById("usage-help-overlay");
     const usageHelpClose = document.getElementById("usage-help-close");
+    const modelButton = document.getElementById("model-button");
+    const modelMenu = document.getElementById("model-menu");
+    const modelCurrentEl = document.getElementById("model-current");
+    const liteMenu = document.getElementById("lite-menu"); // 二级子模型菜单（无独立按钮，由主行展开）
 
     const CHAT_HISTORY_KEY = "gh-hot-chat-history";
+    const MODEL_KEY = "gh-hot-model-id";
+    const LITE_KEY = "gh-hot-lite-id";
     const MAX_CHAT_HISTORY = 100; // 聊天历史最多保留的消息数，防止 localStorage 撑爆
 
     // 共享工具（来自 common.js）
@@ -35,6 +41,10 @@
     const WS_MAX_RECONNECT_DELAY = 30000;
     let chatHistory = []; // {role, content, isHtml}
     let activeRequest = null;
+    let availableModels = []; // [{id, label}]
+    let selectedModelId = ""; // 当前选用主模型 id（硬切换）
+    let availableLiteModels = []; // 跨平台共享子模型池 [{id:"平台id:模型名", label}]
+    let selectedLiteId = ""; // 当前选用子模型 id；空=自动（跟随主模型平台）
 
     restoreMessages();
     if (initialSessionExpired) {
@@ -42,12 +52,14 @@
     }
 
     setupComposer();
-    setupQuickActions();
+    setupModelSelector();
     setupSessionActions();
     setupUsageHelp();
     setupAutoHideStatusStrip();
     connectWebSocket();
     loadReports();
+    setupPanelTabs();
+    setupFavorites();
 
     function createSessionId() {
       return `mobile-${Math.random().toString(36).slice(2, 10)}`;
@@ -183,6 +195,16 @@
                 body.textContent = entry.content;
               }
               item.appendChild(body);
+              if (entry.role === "user" && !entry.isHtml) {
+                const resend = document.createElement("button");
+                resend.type = "button";
+                resend.className = "message__resend";
+                resend.title = "重新发送";
+                resend.setAttribute("aria-label", "重新发送");
+                resend.textContent = "↻";
+                resend.addEventListener("click", () => submitMessage(entry.content));
+                item.appendChild(resend);
+              }
               messagesEl.appendChild(item);
             });
             messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -201,6 +223,238 @@
       clearStoredSessionState(sessionId);
     }
 
+    function getSelectedModel() {
+      return selectedModelId || "";
+    }
+
+    function getSelectedLite() {
+      return selectedLiteId || "";
+    }
+
+    let pendingMainId = ""; // 主菜单中当前展开子菜单的主模型 id
+
+    async function setupModelSelector() {
+      if (!modelButton || !modelMenu || !modelCurrentEl) {
+        return;
+      }
+      try {
+        const resp = await fetch("/api/models");
+        const data = await resp.json();
+        availableModels = Array.isArray(data.models) ? data.models : [];
+        availableLiteModels = Array.isArray(data.lite_models) ? data.lite_models : [];
+      } catch (_e) {
+        availableModels = [];
+        availableLiteModels = [];
+      }
+      if (!availableModels.length) {
+        modelButton.style.display = "none";
+        return;
+      }
+
+      let stored = "";
+      let storedLite = "";
+      try {
+        stored = localStorage.getItem(MODEL_KEY) || "";
+        storedLite = localStorage.getItem(LITE_KEY) || "";
+      } catch (_e) {}
+      selectedModelId = availableModels.some((m) => m.id === stored) ? stored : availableModels[0].id;
+      // 子模型：空 = 自动（跟随主模型平台）；失效的历史选择静默回落自动
+      selectedLiteId = availableLiteModels.some((m) => m.id === storedLite) ? storedLite : "";
+      updateButtonLabel();
+      // 初始 WS 在模型列表加载前已连接（model 为空）；此处重连使默认模型即刻生效
+      closeSocket(false);
+      connectWebSocket();
+
+      // 菜单移到 body 下：composer 有 overflow:hidden + transform/will-change，会裁切并成为
+      // fixed 定位容器，弹出菜单会被切掉。移出后用 fixed 按坐标定位，脱离一切裁切。
+      document.body.appendChild(modelMenu);
+      if (liteMenu) document.body.appendChild(liteMenu);
+
+      modelButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const willOpen = modelMenu.hidden;
+        closeMenus();
+        if (willOpen) openMainMenu();
+      });
+      modelMenu.addEventListener("click", (e) => e.stopPropagation());
+      if (liteMenu) liteMenu.addEventListener("click", (e) => e.stopPropagation());
+      document.addEventListener("click", closeMenus);
+    }
+
+    function closeMenus() {
+      modelMenu.hidden = true;
+      if (liteMenu) liteMenu.hidden = true;
+      modelButton.setAttribute("aria-expanded", "false");
+      pendingMainId = "";
+    }
+
+    // 按钮标题显示当前"主 · 子"组合（无子模型池时只显示主）
+    function updateButtonLabel() {
+      const cur = availableModels.find((m) => m.id === selectedModelId);
+      const sub = availableLiteModels.find((m) => m.id === selectedLiteId);
+      const mainLabel = cur ? cur.label : "模型";
+      modelCurrentEl.textContent = availableLiteModels.length
+        ? `${mainLabel} · ${sub ? sub.label : "自动"}`
+        : mainLabel;
+    }
+
+    // 一级：主模型列表。有子模型池时每行带 › 展开子菜单；无池则点行直接选主+自动。
+    function openMainMenu() {
+      const hasPool = availableLiteModels.length > 0;
+      modelMenu.innerHTML = availableModels
+        .map((m) => {
+          const active = m.id === selectedModelId ? " is-active" : "";
+          const tail = hasPool
+            ? `<span class="model-option__arrow" aria-hidden="true">›</span>`
+            : `<span class="model-option__tick">✓</span>`;
+          return `<button type="button" class="model-option${active}" data-model="${escapeHtml(m.id)}">` +
+            `<span>${escapeHtml(m.label)}</span>${tail}</button>`;
+        })
+        .join("");
+      modelMenu.querySelectorAll(".model-option").forEach((row) => {
+        row.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const mid = row.getAttribute("data-model");
+          if (!hasPool) {
+            selectCombo(mid, "");
+          } else {
+            openSubMenu(mid, row);
+          }
+        });
+      });
+      modelMenu.hidden = false;
+      modelButton.setAttribute("aria-expanded", "true");
+      positionUp(modelMenu, modelButton);
+    }
+
+    // 二级：某主模型右侧的共享子模型池。首项"自动（跟随）"= 只定主模型。
+    function openSubMenu(mainId, anchorRow) {
+      pendingMainId = mainId;
+      // 首项"自动"= 只定主模型，轻量子任务跟随主模型所在平台的默认子模型
+      const options = [{ id: "", label: "自动" }].concat(availableLiteModels);
+      liteMenu.innerHTML = options
+        .map((m) => {
+          const active = mainId === selectedModelId && m.id === selectedLiteId ? " is-active" : "";
+          return `<button type="button" class="model-option${active}" data-model="${escapeHtml(m.id)}">` +
+            `<span>${escapeHtml(m.label)}</span>` +
+            `<span class="model-option__tick">✓</span></button>`;
+        })
+        .join("");
+      liteMenu.querySelectorAll(".model-option").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectCombo(pendingMainId, btn.getAttribute("data-model"));
+        });
+      });
+      modelMenu.querySelectorAll(".model-option").forEach((r) =>
+        r.classList.toggle("is-open", r.getAttribute("data-model") === mainId)
+      );
+      liteMenu.hidden = false;
+      positionRight(liteMenu, anchorRow);
+    }
+
+    // 向上弹出：菜单底边贴锚点上沿（主菜单用）
+    function positionUp(menu, anchor) {
+      const r = anchor.getBoundingClientRect();
+      const mw = menu.offsetWidth;
+      menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mw - 8)) + "px";
+      menu.style.top = "auto";
+      menu.style.bottom = (window.innerHeight - r.top + 6) + "px";
+    }
+
+    // 向右弹出：贴主行右边，右侧放不下则翻到左侧；顶部对齐主行并夹在视口内（子菜单用）
+    function positionRight(menu, anchorRow) {
+      const r = anchorRow.getBoundingClientRect();
+      const mw = menu.offsetWidth;
+      const mh = menu.offsetHeight;
+      let left = r.right + 4;
+      if (left + mw > window.innerWidth - 8) left = r.left - mw - 4;
+      let top = r.top;
+      if (top + mh > window.innerHeight - 8) top = window.innerHeight - mh - 8;
+      menu.style.left = Math.max(8, left) + "px";
+      menu.style.top = Math.max(8, top) + "px";
+      menu.style.bottom = "auto";
+    }
+
+    // 预检选中的模型：发一次极小的真实调用；不可用返回该模型的名称，可用返回 ""
+    async function preflightTest(params) {
+      try {
+        const resp = await fetch("/api/models/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+        });
+        const data = await resp.json();
+        if (data && data.ok === false) {
+          return (data.unavailable || []).join("、") || "所选模型";
+        }
+        return "";
+      } catch (_e) {
+        return ""; // 预检接口本身异常不拦截使用，交给真实调用报错
+      }
+    }
+
+    // 一次确定主+子：预检两者（主变了才测主、子非"自动"才测子，合并为一次请求），
+    // 不可用则整体回滚并提示；可用则落库、更新按钮、重连 WS 使新组合生效。
+    async function selectCombo(mainId, liteId) {
+      liteId = liteId || "";
+      if (mainId === selectedModelId && liteId === selectedLiteId) {
+        closeMenus();
+        return;
+      }
+      const params = {};
+      if (mainId !== selectedModelId) params.model = mainId;
+      if (liteId) params.lite = liteId;
+
+      if (Object.keys(params).length) {
+        const prevLabel = modelCurrentEl.textContent;
+        modelCurrentEl.textContent = "测试中…";
+        // 预检期间禁用发送，避免"切换悬而未决"时用旧模型误发；测完还原原有发送态
+        const wasSending = sendButton.disabled;
+        setSending(true);
+        let failed;
+        try {
+          failed = await preflightTest(params);
+        } finally {
+          setSending(wasSending);
+        }
+        if (failed) {
+          modelCurrentEl.textContent = prevLabel; // 恢复原选择（会话不变，换个可用模型重发即可）
+          closeMenus();
+          showToast(`模型「${failed}」不可用`);
+          return;
+        }
+      }
+
+      selectedModelId = mainId;
+      selectedLiteId = liteId;
+      try {
+        localStorage.setItem(MODEL_KEY, mainId);
+        localStorage.setItem(LITE_KEY, liteId);
+      } catch (_e) {}
+      updateButtonLabel();
+      closeMenus();
+      // 模型经 WS 连接的 query 传入，切换后重连使新组合生效（HTTP 路径每条消息即时带上）
+      closeSocket(false);
+      connectWebSocket();
+    }
+
+    // 轻量瞬时提示（非聊天气泡、不入历史，几秒后自动消失）：用于模型不可用这类一次性告知
+    let toastTimer = null;
+    function showToast(text) {
+      let el = document.getElementById("app-toast");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "app-toast";
+        el.className = "app-toast";
+        document.body.appendChild(el);
+      }
+      el.textContent = text;
+      el.classList.add("is-visible");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove("is-visible"), 3000);
+    }
+
     function setupComposer() {
       inputEl.addEventListener("input", autoResize);
       inputEl.addEventListener("keydown", (event) => {
@@ -210,16 +464,6 @@
         }
       });
       sendButton.addEventListener("click", sendMessage);
-    }
-
-    function setupQuickActions() {
-      document.querySelectorAll("[data-prompt]").forEach((button) => {
-        button.addEventListener("click", () => {
-          inputEl.value = button.dataset.prompt || "";
-          autoResize();
-          sendMessage();
-        });
-      });
     }
 
     function setupSessionActions() {
@@ -322,26 +566,25 @@
       }
 
       function handleReadingScroll() {
-        if (document.activeElement === inputEl) {
+        if (document.activeElement === inputEl || !isMessagesScrollable()) {
           showChatChrome();
           return;
         }
 
-        if (!isMessagesScrollable()) {
-          showChatChrome();
-          return;
-        }
-
+        // 滚动过程中收起头部/输入框（腾出阅读空间），滚到顶部或底部时自动重新显示
+        // （底部必须显示，否则用户到底后无法继续输入）。不做"停下定时重现"以免闪烁。
         const currentScrollTop = messagesEl.scrollTop;
-        const delta = Math.abs(currentScrollTop - lastScrollTop);
+        const delta = currentScrollTop - lastScrollTop;
         lastScrollTop = currentScrollTop;
-        if (delta < 2) {
-          return;
-        }
 
-        hideChatChrome();
-        if (!isTouchHolding) {
-          scheduleReveal();
+        const atTop = currentScrollTop <= 4;
+        const atBottom =
+          messagesEl.scrollHeight - (currentScrollTop + messagesEl.clientHeight) <= 8;
+
+        if (atTop || atBottom) {
+          showChatChrome();
+        } else if (Math.abs(delta) > 2) {
+          hideChatChrome();
         }
       }
 
@@ -363,9 +606,8 @@
         isTouchHolding = false;
         if (document.activeElement === inputEl || !isMessagesScrollable()) {
           showChatChrome();
-          return;
         }
-        scheduleReveal();
+        // 其余情况保持当前显隐，由后续上/下滚动的方向决定，不做停顿重现
       }
 
       messagesEl.addEventListener("scroll", handleReadingScroll, { passive: true });
@@ -395,7 +637,8 @@
 
     function setSending(isSending) {
       sendButton.disabled = isSending;
-      sendButton.textContent = isSending ? "发送中" : "发送";
+      sendButton.setAttribute("aria-busy", isSending ? "true" : "false");
+      sendButton.title = isSending ? "发送中…" : "发送";
     }
 
     function resolveActiveRequest(reply) {
@@ -577,6 +820,19 @@
         body.textContent = text;
       }
       item.appendChild(body);
+
+      // 用户消息：加「重发」按钮，可再次发送（失败的消息也能重发）
+      if (role === "user") {
+        const resend = document.createElement("button");
+        resend.type = "button";
+        resend.className = "message__resend";
+        resend.title = "重新发送";
+        resend.setAttribute("aria-label", "重新发送");
+        resend.textContent = "↻";
+        resend.addEventListener("click", () => submitMessage(text));
+        item.appendChild(resend);
+      }
+
       messagesEl.appendChild(item);
       messagesEl.scrollTop = messagesEl.scrollHeight;
 
@@ -655,12 +911,20 @@
       if (!message) {
         return;
       }
+      inputEl.value = "";
+      autoResize();
+      await submitMessage(message);
+    }
+
+    // 发送一条消息（供输入框发送与「重发」复用）
+    async function submitMessage(message) {
+      if (!message) {
+        return;
+      }
 
       refreshExpiredSession("上一会话已过期，已自动开启新会话。本次提问将作为新会话开始。");
 
       addMessage("user", message, { asHtml: false });
-      inputEl.value = "";
-      autoResize();
       setSending(true);
 
       const pendingObj = addPendingProgress();
@@ -670,6 +934,10 @@
         const reply = socketReady ? await sendViaWebSocket(message, pendingObj.onProgress) : await sendViaHttp(message);
         updateTypingIndicator(pending, reply);
         await loadReports();
+        // agent 可能在本轮通过 add_favorite 新增收藏 → 同步收藏栏
+        if (window.GitHubHotFavorites) {
+          window.GitHubHotFavorites.refresh();
+        }
       } catch (error) {
         pending.remove();
         addMessage("system", `请求失败：${error.message}`, { asHtml: false });
@@ -741,7 +1009,14 @@
       updateConnectionStatus("连接中", "connecting");
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const currentSessionId = sessionId;
-      const url = `${protocol}//${window.location.host}/ws/chat/${encodeURIComponent(currentSessionId)}`;
+      const uid = (window.HotUser && window.HotUser.getId()) || "";
+      const params = new URLSearchParams();
+      if (uid) params.set("user_id", uid);
+      if (getSelectedModel()) params.set("model", getSelectedModel());
+      if (getSelectedLite()) params.set("lite", getSelectedLite());
+      const qs = params.toString();
+      const url = `${protocol}//${window.location.host}/ws/chat/${encodeURIComponent(currentSessionId)}`
+        + (qs ? `?${qs}` : "");
 
       try {
         socket = new WebSocket(url);
@@ -866,7 +1141,7 @@
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, message }),
+        body: JSON.stringify({ session_id: sessionId, message, user_id: (window.HotUser && window.HotUser.getId()) || "", model: getSelectedModel(), lite: getSelectedLite() }),
       });
 
       if (!response.ok) {
@@ -968,6 +1243,76 @@
           }
         });
       });
+    }
+
+    // 顶部 Tab：点某个标签，激活对应内容面板（报告 / 收藏），其余隐藏
+    function setupPanelTabs() {
+      const tabs = Array.prototype.slice.call(document.querySelectorAll(".panel-tab"));
+      if (!tabs.length) {
+        return;
+      }
+      tabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          tabs.forEach(function (t) {
+            const on = t === tab;
+            t.classList.toggle("is-active", on);
+            t.setAttribute("aria-selected", String(on));
+            const pane = document.getElementById(t.getAttribute("data-pane"));
+            if (pane) {
+              pane.classList.toggle("is-active", on);
+            }
+          });
+        });
+      });
+    }
+
+    function setupFavorites() {
+      const favList = document.getElementById("fav-list");
+      const favCount = document.getElementById("fav-count");
+      if (!favList || !favCount) {
+        return;
+      }
+
+      // 点击移除（事件委托）
+      favList.addEventListener("click", function (e) {
+        const btn = e.target.closest(".fav-item__remove");
+        if (!btn) {
+          return;
+        }
+        const repo = btn.getAttribute("data-repo");
+        if (repo && window.GitHubHotFavorites) {
+          window.GitHubHotFavorites.toggle(repo);
+        }
+      });
+
+      function render(list) {
+        favCount.textContent = String(list.length);
+        if (!list.length) {
+          favList.innerHTML = '<div class="fav-empty">还没有收藏。在对话里让我分析后说“收藏它”，或在报告页点⭐。</div>';
+          return;
+        }
+        favList.innerHTML = list.map(function (item) {
+          const repo = escapeHtml(item.repo);
+          const desc = escapeHtml(item.short_desc || "");
+          const descRow = desc
+            ? `<span class="fav-item__desc" title="${desc}">${desc}</span>`
+            : `<span class="fav-item__desc fav-item__desc--empty">暂无描述</span>`;
+          return `
+            <div class="fav-item">
+              <div class="fav-item__main">
+                <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
+                ${descRow}
+              </div>
+              <button type="button" class="fav-item__remove" data-repo="${repo}" title="取消收藏" aria-label="取消收藏">✕</button>
+            </div>
+          `;
+        }).join("");
+      }
+
+      if (window.GitHubHotFavorites) {
+        window.GitHubHotFavorites.subscribe(render);
+        window.GitHubHotFavorites.ready();
+      }
     }
 
     // 仅把"真实存在的报告名（latestReports 里有的 *.md）"转成链接，

@@ -59,14 +59,15 @@ def main() -> None:
     except SystemExit:
         print("启动失败：未配置 GitHub Token。请先设置环境变量后重试：")
         print("  export GITHUB_TOKENS='ghp_xxx,ghp_yyy'")
-        print("  export LLM_A_KEY='你的 Azure key'   # 主力 LLM")
-        print("  export LLM_B_KEY='你的 SiliconFlow key'  # 选填，回退用")
+        print("  export LLM_A_KEY='...'   # 至少配置 config.py 中任一平台对应的 key")
         print(f"详情见日志: {log_path}")
         return
 
-    if not (os.environ.get("LLM_A_KEY") or os.environ.get("LLM_B_KEY")):
-        print("提示：未检测到 LLM_A_KEY / LLM_B_KEY，涉及增长描述/对话推理会失败。")
-        print("  export LLM_A_KEY='你的 Azure key'\n")
+    # CLI 无网页选模型：按 config.LLM_MODELS 顺序取第一个可用平台，失败自动顺延兜底。
+    from .infra.llm_client import get_client
+    if not get_client().usable():
+        print("提示：未检测到任何可用 LLM（config.py 中所有平台都没配 key）。")
+        print("  涉及增长描述/对话推理会失败，请设置对应平台的 LLM_x_KEY 后重试。\n")
 
     while True:
         try:

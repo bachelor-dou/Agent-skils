@@ -1031,7 +1031,7 @@ def fetch_trending(
       - 综合榜/新项目榜候选补充 → 使用 "all"
       - 用户指定"日榜/周榜/月榜" → 对应 "daily"/"weekly"/"monthly"
     """
-    from ..datasource.github.trending import TRENDING_PERIODS, fetch_trending, merge_trending_period_results
+    from ...datasource.github.trending import TRENDING_PERIODS, fetch_trending, merge_trending_period_results
 
     validated = validate_tool_args(
         "fetch_trending",
@@ -1079,7 +1079,7 @@ def fetch_trending(
             for r in repos
         ]
         # 用 LLM 批量浓缩描述
-        from ..infra.llm import batch_condense_descriptions
+        from ...infra.llm import batch_condense_descriptions
         condensed = batch_condense_descriptions(repos, max_chars=70)
         for i, r in enumerate(display_repos):
             r["description"] = condensed[i]
@@ -1096,7 +1096,7 @@ def fetch_trending(
         repos = fetch_trending(since=trending_range)
 
         # 用 LLM 批量浓缩描述
-        from ..infra.llm import batch_condense_descriptions
+        from ...infra.llm import batch_condense_descriptions
         condensed = batch_condense_descriptions(repos, max_chars=70)
 
         growth_field = period_label.get(trending_range, "增长")

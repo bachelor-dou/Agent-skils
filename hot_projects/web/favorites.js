@@ -7,7 +7,7 @@
   const OLD_KEY = "gh-hot-favorites-v1";
   const listeners = new Set();
 
-  let repos = new Set();          // 已收藏的 repo 集合（内存缓存）
+  let items = new Map();          // repo -> {repo, short_desc, ...}（内存缓存，保序）
   let readyPromise = null;
 
   function userId() {
@@ -35,8 +35,15 @@
       throw new Error("load favorites failed");
     }
     const data = await resp.json();
-    return (data.favorites || []).map(function (x) {
-      return x.repo;
+    return (data.favorites || []).filter(function (x) {
+      return x && x.repo;
+    });
+  }
+
+  function loadItems(list) {
+    items = new Map();
+    (list || []).forEach(function (x) {
+      items.set(x.repo, x);
     });
   }
 
@@ -89,9 +96,9 @@
         const uid = userId();
         await migrateLegacy(uid);
         try {
-          repos = new Set(await apiGet(uid));
+          loadItems(await apiGet(uid));
         } catch (_e) {
-          repos = new Set();
+          items = new Map();
         }
         notify();
       })();
@@ -99,14 +106,21 @@
     return readyPromise;
   }
 
+  // 从服务端重新拉取（agent 在对话中新增收藏后调用，使收藏栏同步）
+  async function refresh() {
+    try {
+      loadItems(await apiGet(userId()));
+      notify();
+    } catch (_e) {}
+    return getAll();
+  }
+
   function isFavorite(repo) {
-    return repos.has(String(repo || "").trim());
+    return items.has(String(repo || "").trim());
   }
 
   function getAll() {
-    return Array.from(repos).map(function (repo) {
-      return { repo: repo };
-    });
+    return Array.from(items.values());
   }
 
   // 乐观更新：先改内存并通知，失败再回滚
@@ -115,25 +129,35 @@
     if (!name) {
       return isFavorite(name);
     }
-    const wasFav = repos.has(name);
+    const wasFav = items.has(name);
+    const prev = items.get(name);
     const action = wasFav ? "remove" : "add";
     if (wasFav) {
-      repos.delete(name);
+      items.delete(name);
     } else {
-      repos.add(name);
+      // 新增置顶，短描述待服务端刷新补齐
+      const next = new Map([[name, { repo: name, short_desc: "" }]]);
+      items.forEach(function (v, k) {
+        next.set(k, v);
+      });
+      items = next;
     }
     notify();
     try {
       await apiSet(userId(), name, action);
     } catch (_e) {
       if (wasFav) {
-        repos.add(name);
+        const restore = new Map([[name, prev]]);
+        items.forEach(function (v, k) {
+          restore.set(k, v);
+        });
+        items = restore;
       } else {
-        repos.delete(name);
+        items.delete(name);
       }
       notify();
     }
-    return repos.has(name);
+    return items.has(name);
   }
 
   // 登录时把旧身份收藏合并到新身份（HotUser.login 调用）
@@ -144,9 +168,9 @@
     } catch (_e) {
       return;
     }
-    for (const repo of list) {
+    for (const item of list) {
       try {
-        await apiSet(newId, repo, "add");
+        await apiSet(newId, item.repo, "add");
       } catch (_e) {}
     }
   }
@@ -164,6 +188,7 @@
 
   global.GitHubHotFavorites = {
     ready: ready,
+    refresh: refresh,
     isFavorite: isFavorite,
     getAll: getAll,
     toggle: toggle,

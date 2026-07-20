@@ -68,6 +68,67 @@ body {
   box-shadow: var(--shadow);
   backdrop-filter: blur(14px);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* 固定视口高度：报告/收藏各自内部滚动，而非把整页往下撑。
+     与左侧 chat-panel 同为 stretch 网格项，高度/顶部对齐（不用 sticky，否则会偏移）。 */
+  max-height: calc(100vh - 36px);
+}
+
+/* 报告 / 收藏 顶部横向 Tab：点哪个下面显示哪个，选中项各自内部滚动 */
+.panel-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 250, 243, 0.9), rgba(255, 244, 228, 0.82));
+}
+
+.panel-tab {
+  position: relative;
+  flex: 1 1 0;
+  padding: 18px 16px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--muted);
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.panel-tab:hover {
+  color: var(--brand);
+  background: rgba(215, 136, 58, 0.06);
+}
+
+.panel-tab.is-active {
+  color: var(--brand);
+}
+
+.panel-tab.is-active::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: -1px;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent);
+}
+
+.panel-tab strong {
+  color: var(--accent);
+  margin-left: 2px;
+}
+
+.panel-pane {
+  display: none;
+}
+
+.panel-pane.is-active {
+  display: grid;
 }
 
 .chat-panel {
@@ -81,7 +142,8 @@ body {
 .hero {
   --chrome-height: 0px;
   position: relative;
-  padding: 24px 22px 18px;
+  /* 纵向内边距随视口高度流式缩放：矮屏(笔记本)紧凑，高屏(显示器)舒展 */
+  padding: clamp(8px, 1.6vh, 20px) 22px;
   background:
     linear-gradient(135deg, rgba(23, 50, 77, 0.96), rgba(43, 79, 113, 0.9)),
     linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
@@ -123,9 +185,11 @@ body {
 }
 
 h1 {
-  margin: 14px 0 8px;
-  font-size: clamp(28px, 4vw, 40px);
-  line-height: 1.05;
+  margin: 0;
+  /* 主要按视口高度流式缩放：笔记本(~680-720px高)≈28px，大显示器(~1440px高)≈上限 40px，
+     中间连续过渡。 */
+  font-size: clamp(26px, 4vh, 40px);
+  line-height: 1.1;
   font-weight: 800;
   letter-spacing: -0.03em;
 }
@@ -587,6 +651,37 @@ h1 {
   border-bottom-right-radius: 8px;
 }
 
+/* 重发按钮：悬停用户消息时在其左下角浮现 */
+.message__resend {
+  position: absolute;
+  left: -30px;
+  bottom: 2px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel-strong);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 140ms ease, color 140ms ease;
+}
+
+.message.user:hover .message__resend,
+.message.user:focus-within .message__resend {
+  opacity: 1;
+}
+
+.message__resend:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .message.system {
   align-self: center;
   max-width: 92%;
@@ -619,6 +714,7 @@ h1 {
 
 .composer {
   --chrome-height: 0px;
+  --input-h: 48px;  /* 输入框单行高度 */
   position: absolute;
   right: 0;
   bottom: 0;
@@ -626,7 +722,7 @@ h1 {
   z-index: 14;
   width: auto;
   min-width: 0;
-  padding: 16px 18px 18px;
+  padding: 12px 18px 14px;
   border-top: 1px solid var(--border);
   background: rgba(255, 250, 243, 0.92);
   overflow: hidden;
@@ -651,136 +747,299 @@ h1 {
   pointer-events: auto;
 }
 
-.quick-actions {
-  display: flex;
-  gap: 10px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-  margin-bottom: 12px;
-  padding-bottom: 4px;
-}
-
-.quick-actions button,
 .composer button,
-.mobile-tabs button,
-.session-actions button {
+.mobile-tabs button {
   appearance: none;
   border: 0;
   cursor: pointer;
   transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
 }
 
-.quick-actions button {
-  padding: 10px 14px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, var(--accent), #b9611d);
-  color: #fff;
-  border: 1px solid rgba(185, 97, 29, 0.18);
-  box-shadow: 0 8px 18px rgba(183, 104, 35, 0.18);
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.quick-actions button:hover,
-.composer button:hover,
-.session-actions button:hover {
+.composer button:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 22px rgba(23, 50, 77, 0.12);
 }
 
-.composer-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
-  align-items: stretch;
+/* 输入外框：textarea 与底栏(模型/发送)同处一个圆角框内（Cursor 式） */
+.input-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid rgba(23, 50, 77, 0.12);
+  border-radius: 18px;
+  background: #fffdf8;
+}
+
+.input-shell:focus-within {
+  border-color: rgba(47, 91, 130, 0.48);
+  box-shadow: 0 0 0 4px rgba(47, 91, 130, 0.08);
+}
+
+/* 框内底栏：左侧模型选择器 + 右侧发送按钮 */
+.composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.model-select {
+  position: relative;
+}
+
+.model-select__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--brand);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 240px;
+}
+
+.model-select__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-select__chev {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.model-select__menu {
+  /* 定位与 left/bottom 由 JS 设置（菜单被移到 body 下，用 fixed 脱离 composer 裁切） */
+  position: fixed;
+  min-width: 220px;
+  max-width: min(360px, 92vw);
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  z-index: 1000;
+}
+
+.model-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;  /* 长模型名（如 qwen3.5-35b-a3b）无空格也能换行，不撑爆/裁切菜单 */
+}
+
+.model-option:hover {
+  background: rgba(215, 136, 58, 0.1);
+}
+
+.model-option.is-active {
+  color: var(--brand);
+  font-weight: 700;
+}
+
+.model-option__tick {
+  color: var(--accent);
+  visibility: hidden;
+}
+
+.model-option.is-active .model-option__tick {
+  visibility: visible;
+}
+
+/* 轻量瞬时提示（模型不可用等一次性告知）：屏幕底部居中，几秒自动淡出 */
+.app-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%) translateY(8px);
+  max-width: 90vw;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: rgba(23, 50, 77, 0.92);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 24px rgba(23, 50, 77, 0.24);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2000;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+.app-toast.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* 主菜单行右侧的展开箭头（›），指示可展开子模型 */
+.model-option__arrow {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+/* 当前已展开子菜单的主模型行高亮 */
+.model-option.is-open {
+  background: rgba(215, 136, 58, 0.14);
 }
 
 textarea {
   width: 100%;
   min-width: 0;
-  min-height: 58px;
+  box-sizing: border-box;
+  min-height: 26px;
   max-height: 150px;
   resize: none;
-  border: 1px solid rgba(23, 50, 77, 0.12);
-  border-radius: 18px;
-  padding: 16px 18px;
-  background: #fffdf8;
+  border: 0;
+  padding: 4px 4px 0;
+  background: transparent;
   color: var(--ink);
   font: inherit;
   line-height: 1.5;
   outline: none;
 }
 
-textarea:focus {
-  border-color: rgba(47, 91, 130, 0.48);
-  box-shadow: 0 0 0 4px rgba(47, 91, 130, 0.08);
-}
-
 .composer-primary-button {
-  min-width: 112px;
-  height: 58px;
-  padding: 0 20px;
-  border-radius: 18px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 底栏右侧的圆形发送按钮 */
+  width: 40px;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
   background: linear-gradient(135deg, var(--accent), #b9611d);
   color: #fff;
-  font-size: 15px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
 }
 
-.composer button[disabled],
-.session-actions button[disabled] {
+.composer-primary-button svg {
+  width: 48%;
+  height: auto;
+}
+
+.composer button[disabled] {
   opacity: 0.6;
   cursor: not-allowed;
   transform: none;
   box-shadow: none;
 }
 
-.session-actions {
-  display: flex;
-  justify-content: stretch;
-  margin-top: 10px;
-}
-
-.session-actions button {
-  width: 100%;
-}
-
 .report-panel {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: calc(100vh - 36px);
-}
-
-.report-head {
-  padding: 22px 20px 16px;
-  background: linear-gradient(180deg, rgba(255, 250, 243, 0.9), rgba(255, 244, 228, 0.82));
-  border-bottom: 1px solid var(--border);
-}
-
-.report-head h2 {
-  margin: 10px 0 6px;
-  font-size: 22px;
-  color: var(--brand);
-  letter-spacing: -0.02em;
-}
-
-.report-head p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.6;
 }
 
 .report-list {
   padding: 16px;
   overflow: auto;
-  display: grid;
   gap: 12px;
   align-content: start;
+  flex: 1 1 auto;
+  min-height: 0;
   background: linear-gradient(180deg, rgba(255, 251, 245, 0.68), rgba(241, 234, 223, 0.5));
+}
+
+.fav-list {
+  flex: 1 1 auto;
+  overflow: auto;
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+  min-height: 0;
+  background: linear-gradient(180deg, rgba(255, 251, 245, 0.68), rgba(241, 234, 223, 0.5));
+}
+
+.fav-empty {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 6px 4px 2px;
+}
+
+.fav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(23, 50, 77, 0.09);
+}
+
+.fav-item__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.fav-item__repo {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--brand-soft);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fav-item__repo:hover {
+  text-decoration: underline;
+}
+
+.fav-item__desc {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fav-item__desc--empty {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.fav-item__remove {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.fav-item__remove:hover {
+  background: rgba(215, 136, 58, 0.15);
+  color: var(--accent);
 }
 
 .report-card {
@@ -817,44 +1076,62 @@ textarea:focus {
 
 /* 报告卡片包装器 + 删除按钮 */
 .report-card-wrapper {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
+  position: relative;
   margin-bottom: 12px;
 }
 
 .report-card-wrapper .report-card {
-  flex: 1;
+  display: block;
   min-width: 0;
 }
 
+/* 删除按钮：小图标悬浮在卡片右上角，桌面端悬停卡片才显现（防误触），
+   触屏设备无 hover 则常显（见下方 hover:none 媒体查询）。confirm 弹窗仍兜底。 */
 .report-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.82);
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.85);
   border: 1px solid rgba(185, 28, 28, 0.18);
   color: #b91c1c;
   cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease;
-  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.report-card-wrapper:hover .report-delete-btn,
+.report-card-wrapper:focus-within .report-delete-btn {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .report-delete-btn:hover {
-  background: rgba(254, 202, 202, 0.45);
+  background: rgba(254, 202, 202, 0.6);
   border-color: rgba(185, 28, 28, 0.35);
 }
 
 .report-delete-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 
 .report-delete-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+@media (hover: none) {
+  .report-delete-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .empty {
@@ -1043,6 +1320,9 @@ textarea:focus {
   .report-panel {
     min-height: 0;
     height: calc(100dvh - 48px);
+    position: static;
+    top: auto;
+    max-height: none;
   }
 
   .chat-panel[hidden],
@@ -1110,39 +1390,16 @@ textarea:focus {
   }
 
   .composer {
+    --input-h: 40px;
     padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
     overflow-x: hidden;
   }
 
-  .quick-actions {
-    display: flex;
-    gap: 5px;
-    width: 100%;
-    margin-bottom: 6px;
-    padding-bottom: 2px;
-  }
-
-  .quick-actions button {
-    width: auto;
-    min-width: max-content;
-    min-height: 28px;
-    padding: 5px 8px;
-    white-space: nowrap;
-    line-height: 1.2;
-    font-size: 11px;
-    text-align: center;
-  }
-
   .composer-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0;
-    width: 100%;
-    align-items: stretch;
+    gap: 8px;
   }
 
   textarea {
-    min-height: 40px;
     max-height: 100px;
     padding: 8px 12px;
     border-radius: 12px;
@@ -1150,21 +1407,10 @@ textarea:focus {
   }
 
   .composer-primary-button {
-    width: 100%;
+    width: 38px;
     min-width: 0;
-    height: 36px;
-    padding: 0 10px;
-    border-radius: 12px;
-    font-size: 13px;
-  }
-
-  .session-actions {
-    margin-top: 4px;
-  }
-
-  .session-actions button {
-    min-height: 34px;
-    font-size: 12px;
+    padding: 0;
+    border-radius: 999px;
   }
 
   .message {
@@ -1182,17 +1428,9 @@ textarea:focus {
     border-bottom-right-radius: 6px;
   }
 
-  .report-head {
-    padding: 14px 14px 10px;
-  }
-
-  .report-head h2 {
-    margin: 6px 0 4px;
-    font-size: 18px;
-  }
-
-  .report-head p {
-    font-size: 13px;
+  .panel-tab {
+    padding: 14px 12px;
+    font-size: 16px;
   }
 
   .report-list {
@@ -1548,15 +1786,32 @@ textarea:focus {
     background: rgba(30, 34, 44, 0.94);
   }
 
-  textarea {
-    background: #20242e;
-    border-color: rgba(200, 210, 225, 0.12);
+  .model-select__btn {
+    background: rgba(40, 44, 55, 0.8);
+    border-color: rgba(200, 210, 225, 0.14);
+  }
+
+  .model-select__menu {
+    background: #262a34;
+    border-color: rgba(200, 210, 225, 0.14);
+  }
+
+  .model-option {
     color: var(--ink);
   }
 
-  textarea:focus {
+  .input-shell {
+    background: #20242e;
+    border-color: rgba(200, 210, 225, 0.12);
+  }
+
+  .input-shell:focus-within {
     border-color: rgba(100, 160, 220, 0.45);
     box-shadow: 0 0 0 4px rgba(100, 160, 220, 0.1);
+  }
+
+  textarea {
+    color: var(--ink);
   }
 
   .status-help-button {
@@ -1595,12 +1850,7 @@ textarea:focus {
   }
 
 
-  .quick-actions button {
-    background: linear-gradient(135deg, #9c6230, #7a4a1d);
-    border-color: rgba(160, 100, 40, 0.3);
-  }
-
-  .report-head {
+  .panel-tabs {
     background: linear-gradient(180deg, rgba(30, 34, 44, 0.9), rgba(35, 39, 48, 0.85));
   }
 
@@ -1609,6 +1859,15 @@ textarea:focus {
   }
 
   .report-card {
+    background: rgba(40, 44, 55, 0.75);
+    border-color: rgba(200, 210, 225, 0.08);
+  }
+
+  .fav-list {
+    background: linear-gradient(180deg, rgba(25, 28, 36, 0.7), rgba(20, 23, 30, 0.5));
+  }
+
+  .fav-item {
     background: rgba(40, 44, 55, 0.75);
     border-color: rgba(200, 210, 225, 0.08);
   }
@@ -1660,7 +1919,6 @@ textarea:focus {
   .mobile-tabs,
   .composer,
   .report-panel,
-  .quick-actions,
   .status-strip,
   .fullscreen-overlay,
   .usage-help-overlay {

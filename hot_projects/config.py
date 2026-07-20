@@ -79,25 +79,79 @@ SECURITY_IP_BLACKLIST: list[str] = _parse_csv_env("SECURITY_IP_BLACKLIST") or _D
 SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "")
 
 # ──────────────────────────────────────────────────────────────
-# LLM A/B 双后端配置（兼容 OpenAI /v1/chat/completions 格式）
-#   逐调用回退：每次先调方案 A，失败再回退方案 B。
-#   两方案可配置不同平台、账号、模型与参数风格（azure / openai）。
+# LLM 多后端配置（兼容 OpenAI /v1/chat/completions 格式）
+#   - 用户可在网页按 id 选用具体模型（硬切换，失败即报错，不自动回退）。
+#   - 未指定 model_id 的内部调用（历史摘要 / 项目描述浓缩）按列表顺序逐个回退，保留韧性。
+#   - 新增模型 = 往 LLM_MODELS 追加一条；id 需唯一。URL/后端/模型名固定在此，
+#     仅 KEY 从环境变量读取（export LLM_A_KEY / LLM_B_KEY / ...）。
+#   - enabled: 该平台配置是否开启，1=开启 / 0=关闭（也接受 True/False）；关闭的条目全局
+#     不可用（前端不显示、内部回退也跳过）。
+#   - lite_model: 该平台的子模型，逗号分隔可配多个（也可留空 ""，lite 调用回退用主模型）。
+#     前端子模型选择跨平台共享：所有开启平台的子模型融合成一个池，任意主模型可搭配任意子模型。
 # ──────────────────────────────────────────────────────────────
-# URL、后端类型、模型名均固定在此；仅 KEY 从环境变量读取（export LLM_A_KEY / LLM_B_KEY）。
+LLM_MODELS = [
+    {
+        "id": "azure01",
+        "label": "GPT-5.4",
+        "backend": "azure",
+        "url": "https://ceshi-001.openai.azure.com/openai/v1/chat/completions?api-version=preview",
+        "model": "gpt-5.4",
+        "lite_model": "gpt-5.4-mini",
+        "key": os.environ.get("LLM_A_KEY", ""),
+        "enabled": 1,
+        "desc":"三组测试用"
+    },
+    {
+        "id": "azure02",
+        "label": "GPT-5.5",
+        "backend": "azure",
+        "url": "https://project003003.openai.azure.com/openai/v1/chat/completions?api-version=preview",
+        "model": "gpt-5.5",
+        "lite_model": "gpt-5.4-mini",
+        "key": os.environ.get("LLM_B_KEY", ""),
+        "enabled": 1,
+        "desc":"三组专用"
+    },
+    {
+        "id": "siliconflow",
+        "label": "GLM-5.1",
+        "backend": "openai",
+        "url": "https://api.siliconflow.cn/v1/chat/completions",
+        "model": "Pro/zai-org/GLM-5.1",
+        "lite_model": "Qwen/Qwen3.6-35B-A3B,Qwen/Qwen3.5-35B-A3B",
+        "key": os.environ.get("LLM_C_KEY", ""),
+        "enabled": 1,
+        "desc":"开源个人"
+    },
+    {
+        "id": "aliyun01",
+        "label": "GLM-5.1（阿里A）",
+        "backend": "openai",  # 阿里百炼兼容模式即 OpenAI 格式，字段与 build_payload 的 openai 分支一致
+        "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "model": "glm-5.1",           # 平台模型很多，可换成 qwen3.7-max / deepseek-v4-pro 等
+        "lite_model": "qwen3.6-35b-a3b",
+        "key": os.environ.get("LLM_D_KEY", ""),
+        "enabled": 1,
+        "desc":"阿里百炼-账号D"
+    },
+    {
+        "id": "aliyun02",
+        "label": "Qwen3.7-Max（阿里B）",
+        "backend": "openai",
+        "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "model": "qwen3.7-max",
+        "lite_model": "qwen-flash",
+        "key": os.environ.get("LLM_E_KEY", ""),
+        "enabled": 0,
+        "desc":"阿里百炼-账号E"
+    },
+]
 
-# ===== LLM 方案 A（主力）: Azure OpenAI =====
-LLM_A_BACKEND = "azure"
-LLM_A_URL = "https://ceshi-001.openai.azure.com/openai/v1/chat/completions?api-version=preview"
-LLM_A_MODEL = "gpt-5.4"
-LLM_A_LITE_MODEL = "gpt-5.4-mini"
-LLM_A_KEY = os.environ.get("LLM_A_KEY", "")
 
-# ===== LLM 方案 B（备选）: SiliconFlow =====
-LLM_B_BACKEND = "openai"
-LLM_B_URL = "https://api.siliconflow.cn/v1/chat/completions"
-LLM_B_MODEL = "Pro/zai-org/GLM-5.1"
-LLM_B_LITE_MODEL = "Qwen/Qwen3.5-35B-A3B"
-LLM_B_KEY = os.environ.get("LLM_B_KEY", "")
+# 归一化（补默认值 / 剔除 enabled=0 / 校验 id / 解析 lite_models）逻辑集中在 llm_client，
+# 这里保持声明式：上面手改列表，下面一行归一化。
+from .infra.llm_client import normalize_models  # noqa: E402
+LLM_MODELS = normalize_models(LLM_MODELS)
 
 # ──────────────────────────────────────────────────────────────
 # 阈值与数量

@@ -12,25 +12,17 @@ pip install -r hot_projects/requirements.txt
 
 ## 2. 配置环境变量（仅需 export key）
 
-URL、后端类型、模型名都已写死在 `config.py`，**只需 export 三个 key**：
+平台的 URL、后端类型、模型名都写死在 `config.py`，运行时只需 export 对应的 key：
 
 ```bash
 # GitHub Token（必填，逗号分隔多个，ghp_ 开头的 PAT）
 export GITHUB_TOKENS="ghp_xxx,ghp_yyy"
 
-# 方案 A = Azure OpenAI（主力，必填）—— key 不带 sk- 前缀
-export LLM_A_KEY="<azure-key>"
-
-# 方案 B = SiliconFlow（备选，选填）—— key 是 sk- 开头
-export LLM_B_KEY="<siliconflow-key>"
+# LLM key（每个平台一个，未设置的平台自动跳过）
+export LLM_A_KEY="..."
 ```
 
-> ⚠️ 别把 A/B 两个 key 写反：**A 是 Azure（无 `sk-`）、B 是 SiliconFlow（`sk-` 开头）**。
-> LLM 调用逐次先用 A，A 失败自动回退 B；B 不填则只用 A。
-
-固定的默认（如需改在 `config.py`）：
-- A：`gpt-5.4`（主对话）/ `gpt-5.4-mini`（描述压缩）
-- B：`Pro/zai-org/GLM-5` / `Qwen/Qwen3.5-35B-A3B`
+有哪些平台、各用什么主/子模型，见 `config.py` 的 `LLM_MODELS`。
 
 ## 3. 启动方式
 
@@ -125,7 +117,7 @@ hot_projects/
 │       ├── report.py     报告生成   scoring.py 评分   report_parse.py 报告解析
 │       └── resolve.py    单仓库输入消歧
 ├── datasource/       数据源适配层：Provider 接口 + 归一化 Repo；datasource/github/ 为 GitHub 实现
-├── infra/            LLM 双后端客户端 + llm(描述生成) + db + favorites + 并发调度框架
+├── infra/            LLM 多平台客户端 + llm(描述生成) + db + favorites + 并发调度框架
 ├── data/             运行时数据(Github_DB.json / favorites.json / 断点，已 gitignore)
 ├── config.py         全局配置(阈值/关键词/路径写死/安全/LLM)
 └── 入口: agent_cli / cron_scheduled_update / api_server(含报告 HTML 渲染+上期对比) / __main__
