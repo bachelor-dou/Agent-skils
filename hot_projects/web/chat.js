@@ -880,7 +880,37 @@
         }
       }
 
-      return { item, onProgress };
+      // 正文流式：首个 delta 到达时把进度条换成正文容器，之后累积、节流重渲染 Markdown。
+      // reply 到达时由 updateTypingIndicator 用权威全文做最终渲染（内容与流式累积一致）。
+      let streaming = false;
+      let acc = "";
+      let renderTimer = null;
+      function flush() {
+        renderTimer = null;
+        body.innerHTML = enhanceReply(acc);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+      function onDelta(text, reset) {
+        if (reset) {
+          // 新一轮正文开始：丢弃上一轮（调工具那轮）流出的过渡正文，从头重渲染。
+          acc = "";
+          streaming = true;
+          body.innerHTML = "";
+        }
+        if (!text) {
+          return;
+        }
+        if (!streaming) {
+          streaming = true;
+          body.innerHTML = "";
+        }
+        acc += text;
+        if (renderTimer === null) {
+          renderTimer = window.setTimeout(flush, 120);
+        }
+      }
+
+      return { item, onProgress, onDelta };
     }
 
     // 渲染一条非应答（重连推送 / 服务端主动消息）的 Agent 回复
@@ -931,7 +961,7 @@
       const pending = pendingObj.item;
 
       try {
-        const reply = socketReady ? await sendViaWebSocket(message, pendingObj.onProgress) : await sendViaHttp(message);
+        const reply = socketReady ? await sendViaWebSocket(message, pendingObj.onProgress, pendingObj.onDelta) : await sendViaHttp(message);
         updateTypingIndicator(pending, reply);
         await loadReports();
         // agent 可能在本轮通过 add_favorite 新增收藏 → 同步收藏栏
@@ -1069,6 +1099,12 @@
             }
             return;
           }
+          if (envelope.type === "delta") {
+            if (activeRequest && typeof activeRequest.onDelta === "function") {
+              activeRequest.onDelta(envelope.text || "", !!envelope.reset);
+            }
+            return;
+          }
           if (envelope.type === "reply") {
             const replyText = normalizeAgentReplyText(envelope.reply || "");
             if (resolveActiveRequest(replyText)) return;
@@ -1113,7 +1149,7 @@
       });
     }
 
-    function sendViaWebSocket(message, onProgress) {
+    function sendViaWebSocket(message, onProgress, onDelta) {
       return new Promise((resolve, reject) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
           sendViaHttp(message).then(resolve).catch(reject);
@@ -1126,7 +1162,7 @@
         }
 
         const requestSocket = socket;
-        activeRequest = { resolve, reject, socket: requestSocket, onProgress };
+        activeRequest = { resolve, reject, socket: requestSocket, onProgress, onDelta };
         requestSocket._hasActiveRequest = true;
 
         try {
@@ -1245,25 +1281,47 @@
       });
     }
 
-    // 顶部 Tab：点某个标签，激活对应内容面板（报告 / 收藏），其余隐藏
+    // 顶部 Tab：点某个标签，激活对应内容面板（报告 / 收藏），其余隐藏。
+    // 当前所选 Tab 记到 localStorage，刷新后恢复，不再跳回默认「报告」。
     function setupPanelTabs() {
       const tabs = Array.prototype.slice.call(document.querySelectorAll(".panel-tab"));
       if (!tabs.length) {
         return;
       }
+      const ACTIVE_PANE_KEY = "gh-hot-active-pane";
+
+      function activate(pane, persist) {
+        let matched = false;
+        tabs.forEach(function (t) {
+          const on = t.getAttribute("data-pane") === pane;
+          matched = matched || on;
+          t.classList.toggle("is-active", on);
+          t.setAttribute("aria-selected", String(on));
+          const el = document.getElementById(t.getAttribute("data-pane"));
+          if (el) {
+            el.classList.toggle("is-active", on);
+          }
+        });
+        if (persist && matched) {
+          try {
+            window.localStorage.setItem(ACTIVE_PANE_KEY, pane);
+          } catch (_e) {}
+        }
+      }
+
       tabs.forEach(function (tab) {
         tab.addEventListener("click", function () {
-          tabs.forEach(function (t) {
-            const on = t === tab;
-            t.classList.toggle("is-active", on);
-            t.setAttribute("aria-selected", String(on));
-            const pane = document.getElementById(t.getAttribute("data-pane"));
-            if (pane) {
-              pane.classList.toggle("is-active", on);
-            }
-          });
+          activate(tab.getAttribute("data-pane"), true);
         });
       });
+
+      let saved = "";
+      try {
+        saved = window.localStorage.getItem(ACTIVE_PANE_KEY) || "";
+      } catch (_e) {}
+      if (saved && document.getElementById(saved)) {
+        activate(saved, false);
+      }
     }
 
     function setupFavorites() {
@@ -1273,17 +1331,68 @@
         return;
       }
 
-      // 点击移除（事件委托）
+      // 事件委托：改分类标签 / 移除收藏
       favList.addEventListener("click", function (e) {
-        const btn = e.target.closest(".fav-item__remove");
-        if (!btn) {
+        const api = window.GitHubHotFavorites;
+        if (!api) {
           return;
         }
-        const repo = btn.getAttribute("data-repo");
-        if (repo && window.GitHubHotFavorites) {
-          window.GitHubHotFavorites.toggle(repo);
+        const copyBtn = e.target.closest(".fav-item__copy");
+        if (copyBtn) {
+          const repo = copyBtn.getAttribute("data-repo");
+          if (repo) {
+            window.HotCommon.copyText(repo).then(function () {
+              copyBtn.classList.add("is-copied");
+              copyBtn.textContent = "✓";
+              window.setTimeout(function () {
+                copyBtn.classList.remove("is-copied");
+                copyBtn.textContent = "⧉";
+              }, 1200);
+            }).catch(function () {});
+          }
+          return;
+        }
+        const tagBtn = e.target.closest(".fav-item__tag");
+        if (tagBtn) {
+          const repo = tagBtn.getAttribute("data-repo");
+          if (repo) {
+            api.retag(repo, tagBtn);
+          }
+          return;
+        }
+        const rmBtn = e.target.closest(".fav-item__remove");
+        if (rmBtn) {
+          const repo = rmBtn.getAttribute("data-repo");
+          if (repo) {
+            api.toggle(repo);
+          }
         }
       });
+
+      const UNCATEGORIZED = "未分类";
+
+      function renderItem(item) {
+        const repo = escapeHtml(item.repo);
+        const desc = escapeHtml(item.short_desc || "");
+        const cat = (item.category || "").trim();
+        const descRow = desc
+          ? `<span class="fav-item__desc" title="${desc}">${desc}</span>`
+          : `<span class="fav-item__desc fav-item__desc--empty">暂无描述</span>`;
+        const tagLabel = cat ? escapeHtml(cat) : "＋ 标签";
+        return `
+            <div class="fav-item">
+              <div class="fav-item__main">
+                <div class="fav-item__name">
+                  <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
+                  <button type="button" class="fav-item__copy" data-repo="${repo}" title="复制名字" aria-label="复制 ${repo}">⧉</button>
+                </div>
+                ${descRow}
+              </div>
+              <button type="button" class="fav-item__tag" data-repo="${repo}" title="修改分类">${tagLabel}</button>
+              <button type="button" class="fav-item__remove" data-repo="${repo}" title="取消收藏" aria-label="取消收藏">✕</button>
+            </div>
+          `;
+      }
 
       function render(list) {
         favCount.textContent = String(list.length);
@@ -1291,21 +1400,30 @@
           favList.innerHTML = '<div class="fav-empty">还没有收藏。在对话里让我分析后说“收藏它”，或在报告页点⭐。</div>';
           return;
         }
-        favList.innerHTML = list.map(function (item) {
-          const repo = escapeHtml(item.repo);
-          const desc = escapeHtml(item.short_desc || "");
-          const descRow = desc
-            ? `<span class="fav-item__desc" title="${desc}">${desc}</span>`
-            : `<span class="fav-item__desc fav-item__desc--empty">暂无描述</span>`;
-          return `
-            <div class="fav-item">
-              <div class="fav-item__main">
-                <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
-                ${descRow}
-              </div>
-              <button type="button" class="fav-item__remove" data-repo="${repo}" title="取消收藏" aria-label="取消收藏">✕</button>
-            </div>
-          `;
+        // 按分类分组，组内保持原有（收藏时间倒序）顺序；「未分类」始终排最后
+        const groups = new Map();
+        list.forEach(function (item) {
+          const key = (item.category || "").trim() || UNCATEGORIZED;
+          if (!groups.has(key)) {
+            groups.set(key, []);
+          }
+          groups.get(key).push(item);
+        });
+        const keys = Array.from(groups.keys()).sort(function (a, b) {
+          if (a === UNCATEGORIZED) {
+            return 1;
+          }
+          if (b === UNCATEGORIZED) {
+            return -1;
+          }
+          return 0;  // 其余保持首次出现顺序（稳定排序）
+        });
+        favList.innerHTML = keys.map(function (key) {
+          const groupItems = groups.get(key);
+          return `<div class="fav-group">
+              <div class="fav-group__head">${escapeHtml(key)} <span class="fav-group__count">${groupItems.length}</span></div>
+              ${groupItems.map(renderItem).join("")}
+            </div>`;
         }).join("");
       }
 

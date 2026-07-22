@@ -9,6 +9,7 @@
   - 其它(openai 兼容): 用 max_tokens/temperature/enable_thinking/thinking_budget。
 """
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -119,6 +120,102 @@ class LLMScheme:
     label: str = ""
 
 
+def _merge_tool_call_fragment(acc: dict, frag: dict) -> None:
+    """把一个流式 tool_call 增量片段按 index 合并进累加器 acc（index -> 槽位）。
+
+    OpenAI 流式约定：首片带 id/type/function.name，后续片仅带 function.arguments 的
+    局部 JSON 串，须按 index 拼接。逐片处理天然也修复了「同一 chunk 内重复 index」的坑
+    （vLLM/推测解码会这样发），因为相同 index 落到同一槽位而非各成一项。
+    """
+    idx = frag.get("index", 0)
+    slot = acc.setdefault(idx, {"id": "", "type": "function",
+                                "function": {"name": "", "arguments": ""}})
+    if frag.get("id"):
+        slot["id"] = frag["id"]
+    if frag.get("type"):
+        slot["type"] = frag["type"]
+    fn = frag.get("function") or {}
+    if fn.get("name"):
+        slot["function"]["name"] += fn["name"]
+    if fn.get("arguments"):
+        slot["function"]["arguments"] += fn["arguments"]
+
+
+def _stream_once(
+    scheme: LLMScheme,
+    model: str,
+    *,
+    messages: list[dict],
+    tools: list[dict] | None,
+    max_tokens: int | None,
+    temperature: float | None,
+    enable_thinking: bool | None,
+    thinking_budget: int | None,
+    on_delta,
+    timeout: int,
+) -> tuple[dict | None, bool]:
+    """单次流式请求（SSE），边收边把正文增量喂给 on_delta；不做重试。
+
+    返回 (data, emitted)：data 为组装成的、与非流式同结构的响应 dict（失败为 None）；
+    emitted 表示是否已向 on_delta 外发过内容——一旦外发，上层就不能再重试（否则前端重复）。
+    """
+    headers = build_headers(scheme.backend, scheme.key)
+    payload = build_payload(
+        scheme.backend, model, messages,
+        max_tokens=max_tokens, temperature=temperature,
+        enable_thinking=enable_thinking, thinking_budget=thinking_budget, tools=tools,
+    )
+    payload["stream"] = True
+    content_parts: list[str] = []
+    tool_acc: dict = {}
+    finish_reason = None
+    emitted = False
+    resp = None
+    try:
+        resp = requests.post(scheme.url, headers=headers, json=payload,
+                             timeout=timeout, stream=True)
+        if resp.status_code != 200:
+            logger.warning("[LLM] %s 流式 HTTP %s: %s",
+                           scheme.backend, resp.status_code, resp.text[:200])
+            return None, emitted
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue  # 跳过空行、注释行与 SSE event: 行
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                obj = json.loads(chunk)
+            except ValueError:
+                continue  # 半个 JSON / 混淆填充行，忽略
+            choice = (obj.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
+            if piece:
+                content_parts.append(piece)
+                emitted = True
+                on_delta(piece)
+            for frag in (delta.get("tool_calls") or []):
+                _merge_tool_call_fragment(tool_acc, frag)
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+    except requests.RequestException as e:
+        logger.warning("[LLM] %s 流式请求异常: %s", scheme.backend, e)
+        return None, emitted
+    finally:
+        if resp is not None:
+            resp.close()  # 归还连接：非 200 早退、[DONE] 提前 break、异常等各路径都释放
+
+    message: dict = {"role": "assistant"}
+    tool_calls = [tool_acc[i] for i in sorted(tool_acc)]
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    message["content"] = "".join(content_parts) or (None if tool_calls else "")
+    if not ("".join(content_parts).strip() or tool_calls):
+        return None, emitted  # 全空：视为失败（未外发则可重试）
+    return {"choices": [{"message": message, "finish_reason": finish_reason}]}, emitted
+
+
 def _request_once(
     scheme: LLMScheme,
     model: str,
@@ -131,11 +228,34 @@ def _request_once(
     thinking_budget: int | None,
     timeout: int = 300,
     max_attempts: int | None = None,
+    on_delta=None,
 ) -> dict | None:
-    """单次请求单个后端（含退避重试，默认 3 次）；成功返回 data dict，失败返回 None。"""
+    """单次请求单个后端（含退避重试，默认 3 次）；成功返回 data dict，失败返回 None。
+
+    传入 on_delta 时走 SSE 流式：正文增量实时回调外发。流式下的重试仅在「尚未外发任何
+    内容」前允许——一旦开始外发就不再重试，避免前端出现重复文字（宁可返回已收部分）。
+    """
     if not scheme.key or not scheme.url:
         logger.warning("[LLM] 方案 %s 未配置 url/key，跳过。", scheme.backend)
         return None
+    attempts = max_attempts or len(LLM_RETRY_BACKOFF_SECONDS)
+    if on_delta is not None:
+        for attempt in range(attempts):
+            data, emitted = _stream_once(
+                scheme, model, messages=messages, tools=tools,
+                max_tokens=max_tokens, temperature=temperature,
+                enable_thinking=enable_thinking, thinking_budget=thinking_budget,
+                on_delta=on_delta, timeout=timeout,
+            )
+            if data is not None:
+                return data
+            if emitted:
+                return None  # 已外发过内容，不能重试
+            logger.warning("[LLM] %s 流式空响应/失败, attempt=%d", scheme.backend, attempt + 1)
+            if attempt < attempts - 1:
+                time.sleep(LLM_RETRY_BACKOFF_SECONDS[min(attempt, len(LLM_RETRY_BACKOFF_SECONDS) - 1)])
+        return None
+
     headers = build_headers(scheme.backend, scheme.key)
     payload = build_payload(
         scheme.backend,
@@ -147,7 +267,6 @@ def _request_once(
         thinking_budget=thinking_budget,
         tools=tools,
     )
-    attempts = max_attempts or len(LLM_RETRY_BACKOFF_SECONDS)
     for attempt in range(attempts):
         try:
             resp = requests.post(scheme.url, headers=headers, json=payload, timeout=timeout)
@@ -222,6 +341,7 @@ class LLMClient:
         thinking_budget: int | None = None,
         timeout: int = 300,
         max_attempts: int | None = None,
+        on_delta=None,
     ) -> dict | None:
         usable = self.usable()
         # (scheme, 实际请求的模型名) 的尝试顺序
@@ -256,6 +376,7 @@ class LLMClient:
                 thinking_budget=thinking_budget,
                 timeout=timeout,
                 max_attempts=max_attempts,
+                on_delta=on_delta,
             )
             if data is not None:
                 return data

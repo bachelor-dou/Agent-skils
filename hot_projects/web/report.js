@@ -367,7 +367,7 @@
       event.preventDefault();
       event.stopPropagation();
       if (favoritesApi) {
-        favoritesApi.toggle(repo);
+        favoritesApi.toggle(repo, star);
       }
     });
     // 放在增长数与排名变化(↑/↓)之间：紧跟增长数之后
@@ -422,7 +422,7 @@
     button.addEventListener("click", function () {
       const repo = button.getAttribute("data-repo") || "";
       if (repo && favoritesApi) {
-        favoritesApi.toggle(repo);
+        favoritesApi.toggle(repo, button);
       }
     });
   });

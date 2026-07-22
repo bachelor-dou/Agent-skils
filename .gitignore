@@ -13,7 +13,7 @@ logs/
 *.lock
 # hot_projects 运行时产物（数据/报告/断点，不入库）
 hot_projects/report/
-hot_projects/data/
+hot_projects/graphify-out/
 # Environment
 .env
 .venv/
@@ -27,3 +27,4 @@ venv/
 *.swp
 *.swo
 .cursor/
+

@@ -114,7 +114,7 @@ LLM_MODELS = [
     },
     {
         "id": "siliconflow",
-        "label": "GLM-5.1",
+        "label": "GLM-5.1(开源)",
         "backend": "openai",
         "url": "https://api.siliconflow.cn/v1/chat/completions",
         "model": "Pro/zai-org/GLM-5.1",
@@ -208,6 +208,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE_PATH = os.path.join(DATA_DIR, "Github_DB.json")
 FAVORITES_FILE_PATH = os.path.join(DATA_DIR, "favorites.json")
 CHECKPOINT_FILE_PATH = os.path.join(DATA_DIR, ".pipeline_checkpoint.json")
+
+# 收藏默认标签：点 ★ 收藏时下方可选的分类。用户仍可自定义新标签，此处只是预置项。
+# 增改直接改这个列表即可，服务启动时自动读取（前端经 /api/favorite-tags 拉取）。
+FAVORITE_DEFAULT_TAGS = ["效率", "工具"]
 
 # ──────────────────────────────────────────────────────────────
 # 搜索关键词词典（AI 重点 + 通用全覆盖）

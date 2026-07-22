@@ -8,7 +8,6 @@ Task 子类（继承 task_base.Task）由 tools/basic/core.py 中的能力函数
 """
 
 import logging
-import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -252,7 +251,8 @@ class KeywordSearchTask(Task):
                     "repo_item": repo_item,
                     "created_at": repo_item.get("created_at", ""),
                 })
-            await asyncio.sleep(SEARCH_REQUEST_INTERVAL)
+            # 页间配速已由 async_search_github_repos 内的 token_mgr.throttle_search（按 token、
+            # 跨任务延续）统一处理，这里不再逐页 sleep（否则与 throttle 重复）。
 
         return collected
 
@@ -432,7 +432,8 @@ class ScanSegmentTask(Task):
                     "repo_item": repo_item,
                     "created_at": repo_item.get("created_at", ""),
                 })
-            await asyncio.sleep(SEARCH_REQUEST_INTERVAL)
+            # 页间配速已由 async_search_github_repos 内的 token_mgr.throttle_search（按 token、
+            # 跨任务延续）统一处理，这里不再逐页 sleep（否则与 throttle 重复）。
 
         return collected
 

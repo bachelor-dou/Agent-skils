@@ -285,6 +285,8 @@ async def async_search_github_repos(
                     attempt_token_idx = await token_mgr.acquire()
                     borrowed_token = True
 
+                # 按 token 主动配速，压在 Search API 30/min 之下，避免撞 429 后被罚长冷却。
+                await token_mgr.throttle_search(attempt_token_idx)
                 headers = token_mgr.get_rest_headers(attempt_token_idx)
                 caller = (
                     f"worker={worker_idx}, token={attempt_token_idx}"
@@ -381,6 +383,7 @@ async def async_get_stargazers_page(
     owns_client = client is None
     async_client = client or _build_async_client(timeout_seconds=60.0)
 
+    last_status: int | None = None  # 诊断用：耗尽重试返回 None 时区分 422(真上限) vs 403/其它
     try:
         for attempt in range(3):
             attempt_token_idx = token_idx
@@ -428,6 +431,7 @@ async def async_get_stargazers_page(
                         time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
                         f"stargazers {owner}/{repo} page={page} server {resp.status_code}",
                     )
+                last_status = resp.status_code
                 logger.debug(
                     "异步 stargazers 请求失败: %s/%s page=%s, status=%s",
                     owner,
@@ -477,6 +481,14 @@ async def async_get_stargazers_page(
                     await token_mgr.release(attempt_token_idx)
                 raise
 
+        # 耗尽 3 次重试仍失败。这里的 None 不是 422（422 已在上面直接 return），
+        # 大概率是 403 二级限流/滥用检测或 4xx——上层会把它当"超大仓库"降级采样，
+        # 但其实本可精确。打一条 WARNING 暴露真实状态，便于区分"真上限"和"被误降级"。
+        logger.warning(
+            "[STARGAZERS] %s/%s page=%s 3 次重试仍失败，last_status=%s（非422，疑似二级限流/网络，"
+            "上层将误降级为采样外推）。",
+            owner, repo, page, last_status,
+        )
         return None
     finally:
         if owns_client and hasattr(async_client, "aclose"):

@@ -259,6 +259,92 @@ def test_enabled_accepts_int_bool_and_string():
     assert kept == ["a", "c", "f", "g"]
 
 
+# ── SSE 流式解析 ──
+
+class _FakeStreamResp:
+    """模拟 requests 的流式响应：iter_lines 逐行吐出预设 SSE 行。"""
+    def __init__(self, lines, status_code=200):
+        self._lines = lines
+        self.status_code = status_code
+        self.text = ""
+
+    def iter_lines(self, decode_unicode=True):
+        yield from self._lines
+
+    def close(self):
+        self.closed = True
+
+
+def _sse(lines):
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        assert json.get("stream") is True  # 流式路径必须带 stream:true
+        return _FakeStreamResp(lines)
+    return fake_post
+
+
+def test_stream_content_deltas_assemble_and_callback():
+    a, _ = _schemes()
+    got = []
+    lines = [
+        'data: {"choices":[{"delta":{"role":"assistant","content":"你"}}]}',
+        'data: {"choices":[{"delta":{"content":"好"}}]}',
+        'data: {"choices":[{"delta":{"content":"！"},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+    ]
+    with patch.object(llm_client.requests, "post", side_effect=_sse(lines)):
+        resp = LLMClient([a]).chat([{"role": "user", "content": "hi"}],
+                                   model_id="gpt5", on_delta=got.append)
+    assert got == ["你", "好", "！"]  # 逐 token 外发
+    msg = resp["choices"][0]["message"]
+    assert msg["content"] == "你好！"
+    assert resp["choices"][0]["finish_reason"] == "stop"
+
+
+def test_stream_tool_calls_accumulate_by_index():
+    a, _ = _schemes()
+    got = []
+    # tool_calls 分片：首片带 id/name，后续片拼 arguments；含同一 chunk 内重复 index
+    lines = [
+        'data: {"choices":[{"delta":{"tool_calls":['
+        '{"index":0,"id":"call_1","type":"function","function":{"name":"rank"}},'
+        '{"index":0,"function":{"arguments":"{\\"top"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":['
+        '{"index":0,"function":{"arguments":"_n\\": 5}"}}]}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        'data: [DONE]',
+    ]
+    with patch.object(llm_client.requests, "post", side_effect=_sse(lines)):
+        resp = LLMClient([a]).chat([{"role": "user", "content": "hi"}],
+                                   model_id="gpt5", on_delta=got.append)
+    assert got == []  # 纯工具调用无正文外发
+    tcs = resp["choices"][0]["message"]["tool_calls"]
+    assert len(tcs) == 1
+    assert tcs[0]["id"] == "call_1"
+    assert tcs[0]["function"]["name"] == "rank"
+    assert tcs[0]["function"]["arguments"] == '{"top_n": 5}'
+    assert resp["choices"][0]["message"]["content"] is None
+
+
+def test_stream_no_retry_after_emitted():
+    # 已外发过内容后中途断流 → 不重试（避免前端重复），返回已收部分
+    a, _ = _schemes()
+    got = []
+    calls = {"n": 0}
+
+    def flaky_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        return _FakeStreamResp([
+            'data: {"choices":[{"delta":{"content":"半句"}}]}',
+        ])  # 无 [DONE]，无 finish：视为中断
+
+    with patch.object(llm_client.requests, "post", side_effect=flaky_post):
+        resp = LLMClient([a]).chat([{"role": "user", "content": "hi"}],
+                                   model_id="gpt5", on_delta=got.append)
+    assert got == ["半句"]
+    assert calls["n"] == 1  # 外发后不重试
+    assert resp["choices"][0]["message"]["content"] == "半句"
+
+
 def test_api_models_lite_pool_dedup_across_platforms(monkeypatch):
     # /api/models 的融合池按名字跨平台去重，保留先出现的平台；各平台内部 lite_models 不受影响
     import asyncio

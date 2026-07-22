@@ -46,14 +46,19 @@ class HotProjectAgent:
         self.state.conversation.append({"role": "system", "content": SYSTEM_PROMPT})
         self._model_id = ""  # 本会话当前选用的模型 id（网页可切换）；空=按配置顺序回退
         self._lite_id = ""   # 本会话选用的子模型 id（"平台id:模型名"）；空=跟随主模型平台
+        self._delta_cb = None  # 正文流式回调；仅 WS 路径的 chat() 传入，其余为空=非流式
 
     def chat(self, user_message: str, progress_cb=None, user_id: str = "",
-             model: str = "", lite: str = "") -> str:
+             model: str = "", lite: str = "", delta_cb=None) -> str:
         if len(user_message) > 2000:
             return "消息过长（超过 2000 字符），请缩短后重试。"
 
         # 进度回调（仅 WS 路径传入）：榜单复合工具执行期间逐阶段回传百分比
         self.ctx.progress_cb = progress_cb
+        # 正文流式回调（仅 WS 路径传入，签名 (text, reset=False)）：最终回答逐 token 外发。
+        # 每轮通过 _round_delta 包一层，本轮首个增量带 reset，避免个别模型在调工具那轮先吐的
+        # 过渡正文与最终回答拼接串味。
+        self._delta_cb = delta_cb
         self.ctx.user_id = user_id
         self._model_id = model or ""
         self._lite_id = lite or ""
@@ -63,7 +68,7 @@ class HotProjectAgent:
 
         for _ in range(MAX_AGENT_STEPS):
             resp = self.llm.chat(list(self.state.conversation), tools=self.registry.schemas(),
-                                 model_id=self._model_id or None)
+                                 model_id=self._model_id or None, on_delta=self._round_delta())
             if resp is None:
                 msg = ("抱歉，所选模型调用失败，请稍后重试或在下方切换其他模型。"
                        if self._model_id else
@@ -98,9 +103,25 @@ class HotProjectAgent:
         # 命中步数护栏：不再给工具，强制模型基于已有观察给出最终回答，而非死胡同话术。
         return self._finalize_without_tools()
 
+    def _round_delta(self):
+        """每轮 LLM 调用发一个独立的正文流式回调：本轮首个增量带 reset 标志，
+        让前端清掉上一轮（决定调用工具那轮）可能已流出的过渡正文，只保留最终回答。
+        无外部回调（非 WS 路径）时返回 None，保持非流式。"""
+        cb = self._delta_cb
+        if not cb:
+            return None
+        first = [True]
+
+        def _cb(piece: str) -> None:
+            cb(piece, first[0])
+            first[0] = False
+
+        return _cb
+
     def _finalize_without_tools(self) -> str:
         logger.warning("[Agent] 已达最大步数 %d，强制无工具收口。", MAX_AGENT_STEPS)
-        resp = self.llm.chat(list(self.state.conversation), model_id=self._model_id or None)
+        resp = self.llm.chat(list(self.state.conversation), model_id=self._model_id or None,
+                             on_delta=self._round_delta())
         content = ""
         if resp:
             content = ((resp.get("choices") or [{}])[0]

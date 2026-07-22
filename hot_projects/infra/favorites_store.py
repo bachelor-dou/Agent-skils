@@ -25,6 +25,7 @@ _lock = threading.Lock()
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_FAVORITES_PER_USER = 500
+MAX_CATEGORY_LEN = 20
 
 
 def valid_user_id(user_id: str) -> bool:
@@ -33,6 +34,18 @@ def valid_user_id(user_id: str) -> bool:
 
 def valid_repo(repo: str) -> bool:
     return bool(repo and REPO_RE.match(repo))
+
+
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def clean_category(category: str) -> str:
+    """规整分类标签：剔除控制字符、折叠空白、截断长度；空则返回 ''（未分类）。"""
+    if not category:
+        return ""
+    # 先把非空白控制字符（\x00-\x08、\x0b\x0c、\x0e-\x1f、\x7f 等）换成空格，
+    # 再用 split() 折叠所有空白，避免残留不可见字符污染标签。
+    return " ".join(_CTRL_RE.sub(" ", str(category)).split())[:MAX_CATEGORY_LEN]
 
 
 def _now() -> str:
@@ -81,8 +94,13 @@ def _write_all(data: dict) -> None:
 
 
 def set_favorite(user_id: str, repo: str, action: str,
-                 source_report: str = "", short_desc: str = "") -> list[dict]:
-    """add / remove 单个收藏，返回更新后的清单。非法输入抛 ValueError。"""
+                 source_report: str = "", short_desc: str = "",
+                 category: str | None = None) -> list[dict]:
+    """add / remove 单个收藏，返回更新后的清单。非法输入抛 ValueError。
+
+    category 为单一分类标签：None 表示「不改动」（新增则存空串=未分类，已存在则保留原值），
+    显式传字符串（含 ""）会覆盖，其中 "" 表示归到「未分类」。
+    """
     if not valid_user_id(user_id):
         raise ValueError("invalid user_id")
     if not valid_repo(repo):
@@ -97,11 +115,13 @@ def set_favorite(user_id: str, repo: str, action: str,
 
         if action == "remove":
             items = [x for x in items if x.get("repo") != repo]
-        else:  # add：幂等去重，新收藏置顶；已存在则补写概要
+        else:  # add：幂等去重，新收藏置顶；已存在则补写概要/分类
             existing = next((x for x in items if x.get("repo") == repo), None)
             if existing is not None:
                 if short_desc:
                     existing["short_desc"] = short_desc
+                if category is not None:
+                    existing["category"] = clean_category(category)
             else:
                 if len(items) >= MAX_FAVORITES_PER_USER:
                     raise ValueError("favorites limit reached")
@@ -110,6 +130,7 @@ def set_favorite(user_id: str, repo: str, action: str,
                     "favorited_at": _now(),
                     "source_report": source_report or "",
                     "short_desc": short_desc or "",
+                    "category": clean_category(category or ""),
                 })
 
         users[user_id] = items

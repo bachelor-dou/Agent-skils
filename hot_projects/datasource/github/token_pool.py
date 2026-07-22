@@ -27,6 +27,13 @@ logger = logging.getLogger("hot_projects")
 AUTH_FAIL_STRIKES = 3
 AUTH_FAIL_COOLDOWN_SECONDS = 60.0
 
+# 每 token 的 Search API 主动配速间隔（池内部常量，由 GitHub 固定的 30 次/分/token 推导，
+# 不是可调偏好，故不放入 config）。token 是"按任务"借还的，多数关键词搜索 <3 页、遇空页
+# 就 break（无尾部 sleep），token 立刻被下一个任务重新借走并马上发第一页——这种跨任务边界
+# 的突发，页间 sleep 再大也拦不住。按 token 维护"下次可发搜索的时刻"（跨任务延续）才压得住。
+# 取 2.1s（略高于 30/min 的 2.0s）留余量 → 每 token ≈28.5/min，12 token 聚合 ≈342/min。
+SEARCH_TOKEN_MIN_INTERVAL = 2.1
+
 
 @dataclass(slots=True)
 class _TokenState:
@@ -52,12 +59,16 @@ class AsyncTokenPool:
         wait_log_interval_seconds: float = 10.0,
         auth_fail_strikes: int = AUTH_FAIL_STRIKES,
         auth_fail_cooldown_seconds: float = AUTH_FAIL_COOLDOWN_SECONDS,
+        search_min_interval: float = 0.0,
     ) -> None:
         normalized = [t.strip() for t in tokens if t and t.strip()]
         if not normalized:
             raise ValueError("AsyncTokenPool requires at least one token")
 
         self._states: list[_TokenState] = [_TokenState(token=t) for t in normalized]
+        # 按 token 的 Search API 配速：每个 token 下一次允许发搜索请求的最早时刻。
+        self._search_min_interval = max(0.0, search_min_interval)
+        self._search_next_at: list[float] = [0.0] * len(normalized)
         self._condition = asyncio.Condition()
         self._condition_loop: asyncio.AbstractEventLoop | None = None
         self._recovery_buffer_seconds = max(0.0, recovery_buffer_seconds)
@@ -123,6 +134,25 @@ class AsyncTokenPool:
                 except asyncio.TimeoutError:
                     # Wake up and re-scan availability.
                     pass
+
+    async def throttle_search(self, token_idx: int) -> None:
+        """按 token 主动配速 Search API：在发起搜索请求前调用。
+
+        GitHub Search 限额是 30 次/分/token，且限额窗口不随任务边界重置。此处按 token 维护
+        「下一次允许发搜索的时刻」，同一 token 两次搜索至少间隔 search_min_interval 秒。
+        调用方必须已独占该 token（A 模式任务级持有，或 B 模式 acquire 之后），因此无需加锁：
+        同一 token_idx 不会有并发协程同时进入。主动等待可避免撞 429 后被罚 60s 到点冷却，
+        总时长通常反而更短。
+        """
+        if self._search_min_interval <= 0:
+            return
+        self._validate_token_idx(token_idx)
+        now = self._time_fn()
+        next_at = self._search_next_at[token_idx]
+        if next_at > now:
+            await asyncio.sleep(next_at - now)
+            now = self._time_fn()
+        self._search_next_at[token_idx] = now + self._search_min_interval
 
     async def release(self, token_idx: int) -> None:
         """释放已借出的 token。"""
@@ -340,6 +370,7 @@ class GitHubTokenPool(AsyncTokenPool):
             time_fn=time_fn,
             health_degrade_threshold=health_degrade_threshold,
             health_penalty_seconds=health_penalty_seconds,
+            search_min_interval=SEARCH_TOKEN_MIN_INTERVAL,
         )
         logger.info("GitHubTokenPool 初始化: 共 %d 个 token 可用。", len(normalized))
 

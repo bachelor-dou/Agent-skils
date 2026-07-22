@@ -50,6 +50,39 @@ def test_newest_first(fresh_store):
     assert [x["repo"] for x in fresh_store.get_favorites("blue")] == ["c/d", "a/b"]
 
 
+# ── 分类标签 ──
+
+def test_category_stored_and_cleaned(fresh_store):
+    fresh_store.set_favorite("blue", "a/b", "add", category="  效率  标签 ")
+    item = fresh_store.get_favorites("blue")[0]
+    assert item["category"] == "效率 标签"  # 折叠空白 + 去首尾
+
+    # 非空白控制字符（\x00 \x07 \x1f \x7f）应被剔除，不残留不可见字符
+    assert fresh_store.clean_category("效\x00率\x1f工\x7f具") == "效 率 工 具"
+
+    # 超长截断到 MAX_CATEGORY_LEN
+    fresh_store.set_favorite("blue", "c/d", "add", category="x" * 40)
+    cat = next(x for x in fresh_store.get_favorites("blue") if x["repo"] == "c/d")["category"]
+    assert len(cat) == fresh_store.MAX_CATEGORY_LEN
+
+
+def test_category_none_keeps_existing_str_overwrites(fresh_store):
+    fresh_store.set_favorite("blue", "a/b", "add", category="工具")
+    fresh_store.set_favorite("blue", "a/b", "add")  # category=None → 不改动
+    assert fresh_store.get_favorites("blue")[0]["category"] == "工具"
+
+    fresh_store.set_favorite("blue", "a/b", "add", category="效率")  # 显式覆盖
+    assert fresh_store.get_favorites("blue")[0]["category"] == "效率"
+
+    fresh_store.set_favorite("blue", "a/b", "add", category="")  # 显式清空 → 未分类
+    assert fresh_store.get_favorites("blue")[0]["category"] == ""
+
+
+def test_new_favorite_defaults_to_empty_category(fresh_store):
+    fresh_store.set_favorite("blue", "a/b", "add")
+    assert fresh_store.get_favorites("blue")[0]["category"] == ""
+
+
 # ── API 集成 ──
 
 @pytest.fixture
@@ -78,3 +111,17 @@ def test_api_rejects_bad_user(client):
     assert client.get("/api/favorites", params={"user_id": "x"}).status_code == 400
     r = client.post("/api/favorites", json={"user_id": "x", "repo": "a/b", "action": "add"})
     assert r.status_code == 400
+
+
+def test_api_category_roundtrip(client):
+    r = client.post("/api/favorites",
+                    json={"user_id": "blue", "repo": "a/b", "action": "add", "category": "工具"})
+    assert r.status_code == 200
+    assert r.json()["favorites"][0]["category"] == "工具"
+
+
+def test_api_favorite_tags(client):
+    from hot_projects.config import FAVORITE_DEFAULT_TAGS
+    r = client.get("/api/favorite-tags")
+    assert r.status_code == 200
+    assert r.json()["tags"] == list(FAVORITE_DEFAULT_TAGS)

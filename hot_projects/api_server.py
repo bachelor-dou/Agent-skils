@@ -61,6 +61,7 @@ from .config import (
     CORS_ALLOWED_ORIGINS,
     CORS_ALLOW_CREDENTIALS,
     SECURITY_IP_BLACKLIST,
+    FAVORITE_DEFAULT_TAGS,
 )
 
 logger = logging.getLogger("hot_projects")
@@ -138,6 +139,7 @@ class FavoriteRequest(BaseModel):
     repo: str
     action: str  # "add" | "remove"
     source_report: str = ""
+    category: str | None = None  # 单一分类标签；None=不改动，""=未分类
 
 
 # ══════════════════════════════════════════════════════════════
@@ -950,6 +952,12 @@ async def star_trend_api(repo: str):
     return star_trend(repo)
 
 
+@app.get("/api/favorite-tags")
+async def favorite_tags():
+    """收藏分类的预置标签（前端点 ★ 时下方可选，用户仍可自定义）。"""
+    return {"tags": list(FAVORITE_DEFAULT_TAGS)}
+
+
 @app.get("/api/favorites")
 async def list_favorites(user_id: str):
     """获取用户全局收藏清单。"""
@@ -964,6 +972,7 @@ async def update_favorite(req: FavoriteRequest):
     try:
         items = favorites_store.set_favorite(
             req.user_id, req.repo, req.action, source_report=req.source_report,
+            category=req.category,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -984,8 +993,8 @@ async def delete_session(session_id: str):
 
 # ══════════════════════════════════════════════════════════════
 # WebSocket 实时对话
-#   执行期间流式推送 进度(progress) + 心跳(heartbeat)；回复正文在末尾以单条
-#   reply 整段返回（当前不做 token 级流式，agent.chat 同步返回完整文本）。
+#   执行期间流式推送 进度(progress) + 心跳(heartbeat) + 正文增量(delta)；末尾再以单条
+#   reply 整段返回作为权威全文（前端据此做最终渲染、断线待发缓存、会话历史）。
 # ══════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/chat/{session_id}")
@@ -1017,7 +1026,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
                 _pending_replies.setdefault(session_id, []).append(reply)
             break
 
-    def _chat_with_lock(message: str, progress_cb) -> str:
+    def _chat_with_lock(message: str, progress_cb, delta_cb) -> str:
         agent = get_agent(session_id)
         logger.info("WebSocket 尝试获取执行锁: session=%s", session_id)
         acquired = _tool_execution_lock.acquire(timeout=90)
@@ -1027,7 +1036,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
         logger.info("WebSocket 已获取执行锁: session=%s", session_id)
         try:
             return agent.chat(message, progress_cb=progress_cb, user_id=user_id,
-                              model=model, lite=lite)
+                              model=model, lite=lite, delta_cb=delta_cb)
         finally:
             _tool_execution_lock.release()
             logger.info("WebSocket 已释放执行锁: session=%s", session_id)
@@ -1061,9 +1070,14 @@ async def _run_chat_with_progress(websocket, session_id, message, chat_fn):
     def progress_cb(percent: int, label: str) -> None:
         progress_queue.put({"type": "progress", "percent": percent, "label": label})
 
+    def delta_cb(text: str, reset: bool = False) -> None:
+        # 最终回答的正文增量：入同一队列，随现有轮询实时推给前端（粒度约 _WS_POLL_SECONDS）。
+        # reset=True 表示新一轮正文开始，前端应清掉上一轮流出的过渡正文。
+        progress_queue.put({"type": "delta", "text": text, "reset": reset})
+
     def worker() -> None:
         try:
-            holder["reply"] = chat_fn(message, progress_cb)
+            holder["reply"] = chat_fn(message, progress_cb, delta_cb)
         except SystemExit:
             holder["reply"] = ("未配置任何 GitHub Token，当前只能预览页面与报告渲染效果。"
                                "请先设置 GITHUB_TOKENS 环境变量后再发起 Agent 对话。")

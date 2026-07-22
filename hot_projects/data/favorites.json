@@ -1,0 +1,48 @@
+{
+  "users": {
+    "dou": [
+      {
+        "repo": "obra/superpowers",
+        "favorited_at": "2026-07-21T09:06:26Z",
+        "source_report": "2026-07-15.md",
+        "short_desc": "",
+        "category": "效率"
+      },
+      {
+        "repo": "laoma2053/awesome-zhuiju-free",
+        "favorited_at": "2026-07-21T08:37:51Z",
+        "source_report": "2026-07-15.md",
+        "short_desc": "",
+        "category": "娱乐"
+      },
+      {
+        "repo": "Graphify-Labs/graphify",
+        "favorited_at": "2026-07-20T14:17:47Z",
+        "source_report": "2026-07-15.md",
+        "short_desc": ""
+      },
+      {
+        "repo": "iOfficeAI/OfficeCLI",
+        "favorited_at": "2026-07-19T12:43:13Z",
+        "source_report": "2026-07-15.md",
+        "short_desc": ""
+      },
+      {
+        "repo": "JustVugg/colibri",
+        "favorited_at": "2026-07-17T01:47:03Z",
+        "source_report": "2026-07-15.md"
+      },
+      {
+        "repo": "multica-ai/multica",
+        "favorited_at": "2026-07-16T09:08:45Z",
+        "source_report": "2026-07-15.md"
+      },
+      {
+        "repo": "baidu/Unlimited-OCR",
+        "favorited_at": "2026-07-16T02:38:25Z",
+        "source_report": "2026-07-01.md"
+      }
+    ],
+    "demoUser": []
+  }
+}
