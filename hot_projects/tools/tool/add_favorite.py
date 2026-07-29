@@ -46,10 +46,10 @@ def add_favorite_handler(ctx, args: dict) -> dict:
         save_db(ctx.db)
         proj = db_projects.get(repo, {})
 
-    short_desc = _make_short_desc(repo, proj.get("short_desc", ""))
+    short_desc = _make_short_desc(repo, proj.get("gh_desc", ""))
 
     try:
-        favorites_store.set_favorite(user_id, repo, "add", short_desc=short_desc)
+        favorites_store.set_favorite(user_id, repo, "add", short_desc=short_desc or None)
     except ValueError as exc:
         return {"error": str(exc)}
 

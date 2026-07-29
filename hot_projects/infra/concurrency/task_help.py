@@ -13,16 +13,23 @@ import logging
 import os
 from typing import Any
 
+from datetime import timedelta
+
 from ...config import (
     CHECKPOINT_FILE_PATH,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
     DB_DIFF_TOLERANCE_HOURS,
+    DB_DIFF_SCALE_MIN_RATIO,
+    DB_DIFF_SCALE_MAX_RATIO,
+    SNAPSHOT_ANCHOR_TOLERANCE_DAYS,
 )
 from ..db import (
     get_db_age_days,
     is_project_window_match,
+    timestamp_age_days,
 )
+from ..snapshots import find_anchor, utc_today
 from ...datasource.github.token_pool import GitHubTokenPool
 
 logger = logging.getLogger("hot_projects")
@@ -92,6 +99,98 @@ def _remove_checkpoint() -> None:
             os.remove(CHECKPOINT_FILE_PATH)
     except IOError:
         pass
+
+
+def _load_growth_anchor(time_window: int) -> tuple[dict[str, int], int] | None:
+    """取 T−time_window 那天的每日快照作为本轮锚点，全部仓库共用。
+
+    一轮只挑一次：所有仓库因此落在同一个窗口上，相对排名不受个体刷新时间影响。
+    没有可用快照（刚接入、还没攒够历史）返回 None，逐项回退到 DB 差值那几条路。
+
+    Returns:
+        (锚点 star 表, 锚点的实际天龄)。漏采几天时实际天龄会大于请求窗口，
+        调用方必须据此改写 effective_growth_calc_days——否则 9 天的增长会被当成
+        7 天来算速率，打分虚高 29%。
+    """
+    target = utc_today() - timedelta(days=time_window)
+    found = find_anchor(target, SNAPSHOT_ANCHOR_TOLERANCE_DAYS)
+    if found is None:
+        logger.info(
+            "每日快照：找不到 %s ±%d 天的锚点，本轮回退 DB 差值路径。",
+            target, SNAPSHOT_ANCHOR_TOLERANCE_DAYS,
+        )
+        return None
+
+    anchor_day, stars = found
+    actual_window = (utc_today() - anchor_day).days
+    logger.info(
+        "每日快照锚点: %s（含 %d 个仓库，实际窗口 %d 天，请求 %d 天）。",
+        anchor_day, len(stars), actual_window, time_window,
+    )
+    if actual_window != time_window:
+        logger.warning(
+            "锚点日期偏离请求窗口 %+d 天（漏采导致），本轮按实际 %d 天口径统计："
+            "全部仓库共用同一锚点，窗口一致、相对排名不受影响，但报告里的增长是 %d 天的。",
+            actual_window - time_window, actual_window, actual_window,
+        )
+    return stars, actual_window
+
+
+def _resolve_growth_without_timestamps(
+    full_name: str,
+    current_star: int,
+    created_at: str,
+    prev: dict | None,
+    time_window: int,
+    anchor_stars: dict[str, int] | None = None,
+) -> tuple[int, str] | None:
+    """不发任何请求就能定下来的窗口增长，按精确度递降四条：
+
+      1. 快照锚点   — T−N 那天的每日快照里有这个仓库 → current − 锚点 star，精确。
+                     全部仓库共用同一份锚点，窗口长度一致，是唯一不受个体刷新时间影响的路径。
+      2. DB 差值   — 快照年龄 ≈ 窗口（±5h）→ current − 旧 star，精确。
+      3. 窗口内新建 — 仓库创建于窗口内 → 全部 star 都是窗口内涨的，精确。
+      4. DB 折算   — 快照年龄在窗口的 [0.4, 3.0] 倍内 → 按年龄线性折算到窗口，近似。
+
+    第 2~4 条是 GitHub 2026-06-30 把 stargazers 列表限权给 admin/collaborator 后的过渡方案：
+    原先窗口不匹配的项目会落到二分法/采样外推，而那两条路对他人仓库已不可用。
+    每日快照攒够一个窗口后，第 1 条会接管绝大多数仓库，第 4 条的近似可以退役。
+    返回 None 表示无法在本地定下来，交由调用方走实时估算。
+    """
+    if anchor_stars:
+        anchor_star = anchor_stars.get(full_name)
+        if anchor_star is not None:
+            return current_star - anchor_star, "快照"
+
+    saved_star = prev.get("star") if prev else None
+    refreshed_at = prev.get("refreshed_at", "") if prev else ""
+
+    if saved_star is not None and is_project_window_match(
+        refreshed_at, time_window, DB_DIFF_TOLERANCE_HOURS
+    ):
+        return current_star - saved_star, "DB"
+
+    repo_age = timestamp_age_days(created_at)
+    if repo_age is not None and repo_age <= time_window:
+        return current_star, "窗口内新建"
+
+    if saved_star is None:
+        return None
+    snapshot_age = timestamp_age_days(refreshed_at)
+    if snapshot_age is None or snapshot_age <= 0:
+        return None
+    if not (
+        time_window * DB_DIFF_SCALE_MIN_RATIO
+        <= snapshot_age
+        <= time_window * DB_DIFF_SCALE_MAX_RATIO
+    ):
+        return None
+
+    delta = current_star - saved_star
+    if delta <= 0:
+        # 掉星/持平无需折算：放大负增长只会制造假象，按原值报即可。
+        return delta, "DB折算"
+    return round(delta * time_window / snapshot_age), "DB折算"
 
 
 def _submit_growth_tasks(
@@ -180,29 +279,41 @@ def _submit_growth_tasks(
     # 新项目榜(is_hot_new) 仍全部实时。
     allow_diff = not is_hot_new
 
+    scaled_count = 0
+    fresh_repo_count = 0
+    anchor_count = 0
+    anchor_stars = None
     if allow_diff:
-        for full_name in list(pending.keys()):
-            prev = prev_snapshot.get(full_name)
-            if not prev:
-                continue
-            saved_star = prev.get("star")
-            if saved_star is None:
-                continue
-            if not is_project_window_match(
-                prev.get("refreshed_at", ""), time_window, DB_DIFF_TOLERANCE_HOURS
-            ):
-                continue
+        anchor = _load_growth_anchor(time_window)
+        if anchor is not None:
+            anchor_stars, anchor_window = anchor
+            # 锚点顺延（漏采）时窗口会变长，统计口径必须跟着改，否则速率按 7 天算而增长是 9 天的。
+            growth_ctx["effective_growth_calc_days"] = anchor_window
 
+        for full_name in list(pending.keys()):
             info = pending[full_name]
             current_star = info["star"]
             created_at = info.get("created_at", "")
-            growth = current_star - saved_star
+            resolved = _resolve_growth_without_timestamps(
+                full_name, current_star, created_at,
+                prev_snapshot.get(full_name), time_window, anchor_stars,
+            )
+            if resolved is None:
+                continue
+
+            growth, source = resolved
+            if source == "快照":
+                anchor_count += 1
+            elif source == "DB折算":
+                scaled_count += 1
+            elif source == "窗口内新建":
+                fresh_repo_count += 1
             if use_checkpoint:
                 checkpoint[full_name] = {"growth": growth, "star": current_star}
                 checkpoint_dirty = True
             db_count += 1
             if growth >= growth_threshold:
-                _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, "DB",
+                _upsert_candidate(candidate_map, full_name, growth, current_star, created_at, source,
                                   log_threshold=log_threshold)
             del pending[full_name]
 
@@ -231,7 +342,8 @@ def _submit_growth_tasks(
     db_age_info = f"(距上次更新≈{db_age}天)" if db_age is not None else ""
     logger.info(
         f"批量增长计算: {len(pending)} 个任务入队 "
-        f"(DB差值{db_age_info} {db_count}, 续传 {resumed_count}, "
+        f"(本地定案{db_age_info} {db_count}，其中每日快照锚点 {anchor_count}、"
+        f"窗口内新建 {fresh_repo_count}、按快照年龄折算 {scaled_count}, 续传 {resumed_count}, "
         f"跳过已入选 {len(raw_repos) - len(pending) - db_count - resumed_count})"
     )
 

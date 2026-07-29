@@ -14,7 +14,7 @@ def test_report_fetches_readme_when_no_desc(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "fetch_repo_readme_excerpt", lambda tm, o, r, i: {"text": "README 真实内容"})
     monkeypatch.setattr(R, "fetch_repo_recent_commits", lambda tm, o, r, i, n: [])
 
-    db = {"projects": {"a/b": {"short_desc": ""}}}  # 无 desc、无简介
+    db = {"projects": {"a/b": {"gh_desc": ""}}}  # 无 desc、无简介
     path = R.step3_generate_report(
         [("a/b", {"growth": 100, "star": 1500})], db, token_mgr=object()
     )

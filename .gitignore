@@ -12,8 +12,11 @@ logs/
 # Data
 *.lock
 # hot_projects 运行时产物（数据/报告/断点，不入库）
-hot_projects/report/
 hot_projects/graphify-out/
+# 每日 star 快照只存在于专用 snapshots 分支，不进 main：
+# 在 main 上忽略它，避免本地 git add . 误把快照提交到主分支。
+# 出榜前用 sync_snapshots.sh 从 snapshots 分支把文件取到工作区（取完会 unstage，保持不可见）。
+hot_projects/data/snapshots/
 # Environment
 .env
 .venv/

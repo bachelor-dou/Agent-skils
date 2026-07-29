@@ -126,3 +126,22 @@ def test_diff_none_when_no_previous(tmp_path, monkeypatch):
     html = S._render_report_html("2026-07-01.md", (tmp_path / "2026-07-01.md").read_text())
     assert "上新" not in html
     assert "较上期" not in html
+
+
+# ── 上榜次数（收藏栏角标）──
+
+def test_appearance_counts_only_the_cron_weekly_reports(tmp_path, monkeypatch):
+    """只数无尾缀的 {日期}.md（cron 周报）；按需跑出来的带尾缀报告不能把次数顶高。"""
+    _write_reports(tmp_path, monkeypatch, {
+        "2026-06-24.md": _report_md("2026-06-24", ["a/reg", "b/once"]),
+        "2026-07-01.md": _report_md("2026-07-01", ["a/reg"]),
+        "2026-07-01_NEW.md": _report_md("2026-07-01", ["a/reg"], title="GitHub 新项目热度榜"),
+        "2026-07-01_KEY_向量库.md": _report_md("2026-07-01", ["a/reg"]),
+        "2026-06-17_10d.md": _report_md("2026-06-17", ["a/reg"]),  # 自定义窗口=按需跑的
+        "notes.txt": "a/reg a/reg a/reg",  # 非报告文件不计入
+    })
+    counts, total = S._report_appearance_counts()
+    assert total == 2  # 分母同样只认周报，否则角标会出现 3/5 这种对不上的数
+    assert counts["a/reg"] == 2
+    assert counts["b/once"] == 1
+    assert counts["never/seen"] == 0

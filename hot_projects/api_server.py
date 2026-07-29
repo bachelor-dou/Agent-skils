@@ -55,6 +55,7 @@ from .infra import favorites_store
 from .tools.basic.report_parse import parse_structured_report
 from .config import (
     DATA_DIR,
+    DB_FILE_PATH,
     LOG_DIR,
     REPORT_DIR,
     LLM_MODELS,
@@ -140,6 +141,7 @@ class FavoriteRequest(BaseModel):
     action: str  # "add" | "remove"
     source_report: str = ""
     category: str | None = None  # 单一分类标签；None=不改动，""=未分类
+    short_desc: str | None = None  # 用户手动编辑概要；None=按需自动生成，字符串(含"")=直接采用/清空
 
 
 # ══════════════════════════════════════════════════════════════
@@ -413,6 +415,76 @@ _LANG_COLORS = {
 }
 
 
+# ── 报告描述与 DB 实时同步 ──
+# 报告 .md 里的四段描述是生成当天写死的快照。为让描述随 DB 修正/重刷而更新（star、增长等
+# 统计仍保持当时快照），渲染时用 DB 的 desc 覆盖同名项目的对应小节。
+# DB 有 29MB，绝大部分是 star 历史；这里只抽取非空 desc 建索引（体量小），并按文件 mtime 缓存，
+# 仅在 DB 变更后重载一次。
+
+_DB_DESC_SECTION_TITLES = (
+    "项目定位与用途",
+    "解决的问题",
+    "使用场景",
+    "技术架构与特性",
+    "核心依赖与生态",
+    "已知局限或注意事项",
+)
+
+# {db_path: (mtime, {repo: desc})}
+_db_desc_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _db_desc_index() -> dict[str, str]:
+    """从 Github_DB.json 抽取 {repo: desc}（仅非空），按 mtime 缓存。失败时回退旧缓存/空。"""
+    try:
+        mtime = os.path.getmtime(DB_FILE_PATH)
+    except OSError:
+        return {}
+    cached = _db_desc_cache.get(DB_FILE_PATH)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    index: dict[str, str] = {}
+    try:
+        with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
+            db = json.load(f)
+        for repo, info in (db.get("projects") or {}).items():
+            if isinstance(info, dict):
+                desc = (info.get("desc") or "").strip()
+                if desc:
+                    index[repo] = desc
+    except (OSError, ValueError) as exc:
+        logger.warning("加载 DB 描述索引失败: %s", exc)
+        return cached[1] if cached else {}
+    _db_desc_cache[DB_FILE_PATH] = (mtime, index)
+    logger.info("DB 描述索引已刷新: %d 条非空描述", len(index))
+    return index
+
+
+def _split_db_desc_sections(desc: str) -> dict[str, str]:
+    """把 DB 里“标题：内容”分段的 desc 拆成 {标题: 内容}，标题限定为已知小节名。"""
+    sections: dict[str, str] = {}
+    current = ""
+    for raw in desc.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        matched = ""
+        for title in _DB_DESC_SECTION_TITLES:
+            for sep in ("：", ":"):
+                if line.startswith(f"{title}{sep}"):
+                    matched = title
+                    sections[title] = line.split(sep, 1)[1].strip()
+                    break
+            if matched:
+                break
+        if matched:
+            current = matched
+            continue
+        if current:
+            sections[current] = f"{sections[current]} {line}".strip()
+    return sections
+
+
 def _render_structured_report_html(parsed: dict, diff: dict | None = None) -> tuple[str, str]:
     """主从布局：返回 (详情面板集合 article_html, 侧栏项目列表 toc_html)。
 
@@ -421,9 +493,19 @@ def _render_structured_report_html(parsed: dict, diff: dict | None = None) -> tu
     article_parts: list[str] = []
     nav_items: list[str] = []
     prev_ranks = diff["prev_ranks"] if diff else None
+    desc_index = _db_desc_index()
 
     for repo in parsed["repos"]:
         repo_name = repo["repo"]
+        # 用 DB 最新 desc 覆盖 .md 里写死的描述小节（保持与 DB 同步）
+        db_desc = desc_index.get(repo_name)
+        if db_desc:
+            db_sections = _split_db_desc_sections(db_desc)
+            if db_sections:
+                for section in repo["sections"]:
+                    override = db_sections.get(section["title"])
+                    if override:
+                        section["content"] = override
         metadata = repo["metadata"]
         repo_link = _safe_report_href(repo.get("link") or f"https://github.com/{repo_name}")
         readme_link = _safe_report_href(f"{repo_link}#readme") if repo_link != "#" else "#"
@@ -958,21 +1040,71 @@ async def favorite_tags():
     return {"tags": list(FAVORITE_DEFAULT_TAGS)}
 
 
+def _report_appearance_counts() -> tuple[collections.Counter, int]:
+    """返回 (每个项目上过多少期定时周报, 周报总期数)；同一期内重复出现只算一次。
+
+    只数无尾缀的 {日期}.md —— 那是 cron 的标准周报。带尾缀的（_NEW 新项目榜、_KEY 关键词榜、
+    _10d 自定义窗口）都是按需跑出来的，计入会让「上榜次数」随临时查询虚高。
+    总期数与计数走同一次遍历，保证分子分母口径一致（都只认解析成功的周报）。
+    走 _load_structured_report_cached（按 mtime 缓存解析结果），故只有新报告需要重解析。
+    """
+    counts: collections.Counter = collections.Counter()
+    total = 0
+    for path in glob.glob(os.path.join(REPORT_DIR, "*.md")):
+        matched = _REPORT_NAME_RE.match(os.path.basename(path))
+        if not matched or matched.group("suffix"):
+            continue
+        parsed = _load_structured_report_cached(path)
+        if parsed:
+            total += 1
+            counts.update({r["repo"] for r in parsed.get("repos", []) if r.get("repo")})
+    return counts, total
+
+
 @app.get("/api/favorites")
 async def list_favorites(user_id: str):
-    """获取用户全局收藏清单。"""
+    """获取用户全局收藏清单（附带「上榜期数 / 周报总期数」）。"""
     if not favorites_store.valid_user_id(user_id):
         raise HTTPException(status_code=400, detail="无效的 user_id")
-    return {"user_id": user_id, "favorites": favorites_store.get_favorites(user_id)}
+    counts, total = _report_appearance_counts()
+    return {
+        "user_id": user_id,
+        "report_total": total,
+        "favorites": [
+            dict(x, report_count=counts.get(x.get("repo", ""), 0), report_total=total)
+            for x in favorites_store.get_favorites(user_id)
+        ],
+    }
+
+
+def _favorite_short_desc(repo: str) -> str:
+    """收藏用一句话中文概要：从 DB 的 GitHub 原始描述实时浓缩；无描述则空。
+
+    与 add_favorite 工具同一套逻辑（复用 _make_short_desc），保证网页 ★ 收藏
+    与 Agent 收藏得到一致的中文概要。短描述仅收藏展示用，故在收藏时按需生成，
+    不在 cron/报告阶段为大量不入收藏的项目预生成。
+    """
+    from .infra.db import load_db
+    from .tools.tool.add_favorite import _make_short_desc
+    proj = load_db().get("projects", {}).get(repo, {})
+    gh_desc = proj.get("gh_desc", "")
+    return _make_short_desc(repo, gh_desc) if gh_desc else ""
 
 
 @app.post("/api/favorites")
 async def update_favorite(req: FavoriteRequest):
     """添加 / 取消收藏（全局，按 user_id 存储）。"""
+    from starlette.concurrency import run_in_threadpool
+    short_desc = None
+    if req.action == "add":
+        if req.short_desc is not None:
+            short_desc = req.short_desc.strip()[:60]  # 用户手动编辑（含 "" 清空），不再走 LLM
+        else:
+            short_desc = (await run_in_threadpool(_favorite_short_desc, req.repo)) or None
     try:
         items = favorites_store.set_favorite(
             req.user_id, req.repo, req.action, source_report=req.source_report,
-            category=req.category,
+            short_desc=short_desc, category=req.category,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1054,8 +1186,9 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 
 # 执行期间无新进度时的心跳间隔（秒），防止反代/网关掐断空闲连接
 _WS_HEARTBEAT_SECONDS = 15
-# 进度队列轮询间隔（秒）
-_WS_POLL_SECONDS = 0.2
+# 进度队列轮询间隔（秒）：也是正文流式增量推送的最小粒度。
+# 调细到 50ms 让逐 token 流式更连贯（对话进行时才空转，开销可忽略）。
+_WS_POLL_SECONDS = 0.05
 
 
 async def _run_chat_with_progress(websocket, session_id, message, chat_fn):

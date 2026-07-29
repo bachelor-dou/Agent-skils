@@ -94,12 +94,14 @@ def _write_all(data: dict) -> None:
 
 
 def set_favorite(user_id: str, repo: str, action: str,
-                 source_report: str = "", short_desc: str = "",
+                 source_report: str = "", short_desc: str | None = None,
                  category: str | None = None) -> list[dict]:
     """add / remove 单个收藏，返回更新后的清单。非法输入抛 ValueError。
 
     category 为单一分类标签：None 表示「不改动」（新增则存空串=未分类，已存在则保留原值），
     显式传字符串（含 ""）会覆盖，其中 "" 表示归到「未分类」。
+
+    short_desc 与 category 同语义：None=不改动，字符串（含 ""）=覆盖（"" 即清空概要）。
     """
     if not valid_user_id(user_id):
         raise ValueError("invalid user_id")
@@ -118,7 +120,7 @@ def set_favorite(user_id: str, repo: str, action: str,
         else:  # add：幂等去重，新收藏置顶；已存在则补写概要/分类
             existing = next((x for x in items if x.get("repo") == repo), None)
             if existing is not None:
-                if short_desc:
+                if short_desc is not None:
                     existing["short_desc"] = short_desc
                 if category is not None:
                     existing["category"] = clean_category(category)

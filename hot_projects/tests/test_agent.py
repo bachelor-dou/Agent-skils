@@ -46,6 +46,18 @@ def test_react_executes_tool_then_replies():
     assert llm.calls == 2
 
 
+def test_needs_confirmation_short_circuits():
+    # 工具返回 needs_confirmation → agent 直接把 message 回显给用户，不再走一轮 LLM 转述
+    msg = "将执行【关键词热榜】，参数：Top 10；最低 star=1；增长阈值=0（不过滤增长）。确认无误请回复『开始』。"
+    reg = _registry_with("keyword_ranking",
+                         lambda ctx, args: {"needs_confirmation": True, "message": msg})
+    llm = FakeLLM([_toolcall("keyword_ranking")])
+    agent = HotProjectAgent(llm=llm, registry=reg, provider=None, db={"projects": {}})
+    reply = agent.chat("跑个关键词榜")
+    assert reply == msg
+    assert llm.calls == 1  # 短路：没有第二轮 LLM
+
+
 def test_direct_text_reply_no_tool():
     reg = _registry_with("get_db_info", lambda ctx, args: {})
     llm = FakeLLM([_text("你好，我可以帮你查 GitHub 热门项目。")])

@@ -64,7 +64,7 @@ def test_existing_db_project_not_refetched(monkeypatch, tmp_path):
                         lambda *a: (_ for _ in ()).throw(AssertionError("不应联网")))
     monkeypatch.setattr(AF, "batch_condense_descriptions", lambda repos, max_chars=60: ["缓存概要"])
 
-    db = {"projects": {"a/b": {"star": 5, "short_desc": "cached desc"}}}
+    db = {"projects": {"a/b": {"star": 5, "gh_desc": "cached desc"}}}
     ctx = _Ctx(db, "bob")
     out = add_favorite_handler(ctx, {"repo": "a/b"})
     assert out["ok"] is True and out["short_desc"] == "缓存概要"

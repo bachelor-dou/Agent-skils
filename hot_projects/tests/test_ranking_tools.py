@@ -46,3 +46,82 @@ def test_param_change_requires_new_confirmation(monkeypatch):
     h(ctx, {"min_star": 1200})            # 执行，清空签名
     out = h(ctx, {"min_star": 2000})      # 新参数 → 再次确认
     assert out.get("needs_confirmation") is True
+
+
+def test_confirm_true_executes_stored_params_ignoring_drift(monkeypatch):
+    # 用户"开始"→ 模型带 confirm=true 复调但关键词漂移；应按首次存下的参数执行（展示=执行）
+    seen = {}
+
+    def fake_run(provider, mode, params, db, **k):
+        seen["params"] = params
+        return {"ranked": [], "report_path": "", "mode": mode,
+                "candidates_count": 0, "growth_calc_days": 7}
+
+    monkeypatch.setattr(RT, "run_ranking", fake_run)
+    monkeypatch.setattr(RT, "save_db_desc_only", lambda db: 0)
+    ctx = _Ctx()
+    h = make_ranking_handler("keyword")
+    first = h(ctx, {"keywords": ["a", "b"], "top_n": 10, "growth_threshold": 0})
+    assert first.get("needs_confirmation") is True
+    # confirm=true，但关键词漂移成 4 个
+    h(ctx, {"keywords": ["a", "b", "c", "d"], "top_n": 10, "growth_threshold": 0, "confirm": True})
+    assert seen["params"]["keywords"] == ["a", "b"]  # 按首次回显执行，忽略漂移
+    assert ctx.state.pending_confirmation_signature is None
+
+
+def test_keyword_ranking_growth_threshold_defaults_zero():
+    from hot_projects.tools.arg_validator import validate_tool_args_strict
+    kw, errs = validate_tool_args_strict("keyword_ranking", {"keywords": ["x"]})
+    assert errs == []
+    assert kw["growth_threshold"] == 0             # 关键词榜默认不过滤增长
+    comp, _ = validate_tool_args_strict("comprehensive_ranking", {})
+    assert comp["growth_threshold"] == 1000        # 综合榜保持 1000
+
+
+def test_format_confirm_lists_all_effective_params():
+    from hot_projects.tools.tool.ranking import _format_confirm
+    msg = _format_confirm("keyword", {"keywords": ["a"], "top_n": 10,
+                                      "min_star": 1, "growth_threshold": 0})
+    assert "增长阈值=0" in msg and "Top 10" in msg and "最低 star=1" in msg
+
+
+# ── 报告开关：默认不落报告文件，用户明确要才生成 ──
+
+def _run_confirmed(monkeypatch, mode, args):
+    """跑完「确认 → 执行」两步，返回传给 run_ranking 的 do_report。"""
+    seen = {}
+
+    def fake_run(provider, mode, params, db, **kwargs):
+        seen["do_report"] = kwargs.get("do_report")
+        return {"ranked": [], "report_path": "", "mode": mode,
+                "candidates_count": 0, "growth_calc_days": 7}
+
+    monkeypatch.setattr(RT, "run_ranking", fake_run)
+    monkeypatch.setattr(RT, "save_db_desc_only", lambda db: 0)
+    ctx = _Ctx()
+    h = make_ranking_handler(mode)
+    first = h(ctx, dict(args))
+    h(ctx, dict(args, confirm=True))
+    return seen["do_report"], first["message"]
+
+
+def test_ranking_skips_report_by_default(monkeypatch):
+    for mode in ("comprehensive", "hot_new", "keyword"):
+        do_report, msg = _run_confirmed(monkeypatch, mode, {"min_star": 1200})
+        assert do_report is False, f"{mode} 默认不该生成报告"
+        assert "不生成报告文件" in msg  # 确认文案要说清楚，展示=执行
+
+
+def test_ranking_generates_report_when_asked(monkeypatch):
+    do_report, msg = _run_confirmed(
+        monkeypatch, "comprehensive", {"min_star": 1200, "generate_report": True})
+    assert do_report is True
+    assert "生成报告文件" in msg
+
+
+def test_generate_report_defaults_false_in_schema():
+    from hot_projects.tools.arg_validator import validate_tool_args_strict
+    for tool in ("comprehensive_ranking", "hot_new_ranking", "keyword_ranking"):
+        args, errs = validate_tool_args_strict(tool, {})
+        assert errs == []
+        assert args["generate_report"] is False, f"{tool} 的报告开关默认必须是关"

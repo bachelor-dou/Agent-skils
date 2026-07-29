@@ -2,45 +2,112 @@
   "users": {
     "dou": [
       {
+        "repo": "headroomlabs-ai/headroom",
+        "favorited_at": "2026-07-28T05:13:01Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "压缩工具输出、日志、文件和RAG分块，减少LLM输入token，提供库、代理和MCP服务。",
+        "category": "工具"
+      },
+      {
+        "repo": "tt-a1i/archify",
+        "favorited_at": "2026-07-26T00:07:02Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "生成架构图，支持暗亮主题切换及PNG/JPEG/WebP/SVG导出",
+        "category": "工具"
+      },
+      {
+        "repo": "msitarzewski/agency-agents",
+        "favorited_at": "2026-07-25T23:44:52Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "单机多角色 AI 团队，协同完成前端、社区、内容等专业任务。",
+        "category": "多agent"
+      },
+      {
+        "repo": "schollz/croc",
+        "favorited_at": "2026-07-25T14:33:20Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "电脑间安全便捷传输文件与数据",
+        "category": "工具"
+      },
+      {
+        "repo": "moonshine-ai/moonshine",
+        "favorited_at": "2026-07-25T14:26:18Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "超低延迟语音识别、意图识别和语音合成框架。",
+        "category": "工具"
+      },
+      {
+        "repo": "emilkowalski/skills",
+        "favorited_at": "2026-07-23T14:44:09Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "面向设计工程师的技能集合。",
+        "category": "效率"
+      },
+      {
+        "repo": "stupside/castor",
+        "favorited_at": "2026-07-23T14:41:04Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "网页视频抓取、转码并投屏到电视，支持字幕",
+        "category": "娱乐"
+      },
+      {
+        "repo": "oblien/openship",
+        "favorited_at": "2026-07-23T14:31:58Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "自托管部署平台。",
+        "category": "工具"
+      },
+      {
+        "repo": "diegosouzapw/OmniRoute",
+        "favorited_at": "2026-07-23T14:23:05Z",
+        "source_report": "2026-07-22.md",
+        "short_desc": "多模型LLM网关，支持路由、负载均衡、重试、回退、限流、缓存与监控。",
+        "category": "工具"
+      },
+      {
         "repo": "obra/superpowers",
         "favorited_at": "2026-07-21T09:06:26Z",
         "source_report": "2026-07-15.md",
-        "short_desc": "",
+        "short_desc": "Agent 技能框架与软件开发方法",
         "category": "效率"
       },
       {
         "repo": "laoma2053/awesome-zhuiju-free",
         "favorited_at": "2026-07-21T08:37:51Z",
         "source_report": "2026-07-15.md",
-        "short_desc": "",
+        "short_desc": "免费无广告追剧资源导航",
         "category": "娱乐"
       },
       {
         "repo": "Graphify-Labs/graphify",
         "favorited_at": "2026-07-20T14:17:47Z",
         "source_report": "2026-07-15.md",
-        "short_desc": ""
+        "short_desc": "将代码、数据、文档等转为可查询知识图谱的 AI 编程助手技能。"
       },
       {
         "repo": "iOfficeAI/OfficeCLI",
         "favorited_at": "2026-07-19T12:43:13Z",
         "source_report": "2026-07-15.md",
-        "short_desc": ""
+        "short_desc": "供 AI 读写并自动化处理 Word、Excel、PPT"
       },
       {
         "repo": "JustVugg/colibri",
         "favorited_at": "2026-07-17T01:47:03Z",
-        "source_report": "2026-07-15.md"
+        "source_report": "2026-07-15.md",
+        "short_desc": "低依赖C语言大模型推理引擎，支持超大模型本地运行"
       },
       {
         "repo": "multica-ai/multica",
         "favorited_at": "2026-07-16T09:08:45Z",
-        "source_report": "2026-07-15.md"
+        "source_report": "2026-07-15.md",
+        "short_desc": "多机开源托管智能体平台，用于分配任务、跟踪进度并提升协作能力",
+        "category": "多agent"
       },
       {
         "repo": "baidu/Unlimited-OCR",
         "favorited_at": "2026-07-16T02:38:25Z",
-        "source_report": "2026-07-01.md"
+        "source_report": "2026-07-01.md",
+        "short_desc": "单次处理长文档的 OCR 解析引擎。"
       }
     ],
     "demoUser": []

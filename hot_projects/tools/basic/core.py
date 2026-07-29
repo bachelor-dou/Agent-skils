@@ -29,6 +29,8 @@ from ...config import (
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
     MAX_DYNAMIC_SEARCH_KEYWORDS,
+    PAGE_COMPENSATION_ROUNDS,
+    PAGE_COMPENSATION_MAX_WAIT,
 )
 from ...infra.db import update_db_project, get_db_age_days
 from ...datasource.github.token_pool import AsyncTokenPool, GitHubTokenPool
@@ -99,6 +101,51 @@ def _resolve_dispatcher_token_pool(token_mgr: GitHubTokenPool) -> AsyncTokenPool
     if isinstance(token_mgr, AsyncTokenPool):
         return token_mgr
     return AsyncTokenPool(list(getattr(token_mgr, "tokens", [])))
+
+
+async def _compensate_failed_pages(
+    dispatcher,
+    token_pool: AsyncTokenPool,
+    tasks: list,
+    clone_for_retry,
+    format_failure,
+    label: str,
+) -> None:
+    """重跑失败页，每轮开跑前先等 token 脱离限流冷却。
+
+    只补偿一轮、且紧接着在冷却期内重跑时，任务一命中限流就把剩余页整批丢回失败集，
+    补偿等于白跑（2026-07-22/29 两期各残留 80/74 个失败页，约 1800 个仓库没被收集）。
+    """
+    pending = [task for task in tasks if task.failed_pages]
+    for round_no in range(1, PAGE_COMPENSATION_ROUNDS + 1):
+        if not pending:
+            return
+        failed_page_count = sum(len(task.failed_pages) for task in pending)
+        retry_tasks = [clone_for_retry(task, list(task.failed_pages), round_no) for task in pending]
+        cooldown = min(token_pool.seconds_until_all_cool(), PAGE_COMPENSATION_MAX_WAIT)
+        logger.warning(
+            f"{label}发现 {failed_page_count} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务"
+            f"（第 {round_no}/{PAGE_COMPENSATION_ROUNDS} 轮，先等 token 冷却 {cooldown:.0f}s）。"
+        )
+        if cooldown > 0:
+            await asyncio.sleep(cooldown)
+
+        for task in retry_tasks:
+            await dispatcher.submit(task)
+        await dispatcher.wait_all_done()
+        await dispatcher.drain_results()
+
+        pending = [task for task in retry_tasks if task.failed_pages]
+
+    final_failed = [format_failure(task, page) for task in pending for page in task.failed_pages]
+    if final_failed:
+        failed_preview = ", ".join(final_failed[:10])
+        if len(final_failed) > 10:
+            failed_preview += ", ..."
+        logger.error(
+            f"{label}补偿 {PAGE_COMPENSATION_ROUNDS} 轮后仍有 {len(final_failed)} 个失败页，"
+            f"结果可能不完整: {failed_preview}"
+        )
 
 
 def _run_coroutine_sync(coro):
@@ -247,8 +294,9 @@ def search_by_keywords(
     # ── 并行搜索：提交 KeywordSearchTask 到异步调度器 ──
     async def _run_keyword_tasks() -> None:
         async with build_github_async_client(timeout_seconds=60.0) as async_client:
+            token_pool = _resolve_dispatcher_token_pool(token_mgr)
             dispatcher = AsyncTaskDispatcher(
-                token_pool=_resolve_dispatcher_token_pool(token_mgr),
+                token_pool=token_pool,
                 worker_count=_resolve_async_worker_count(token_mgr),
             )
             await dispatcher.start()
@@ -273,13 +321,11 @@ def search_by_keywords(
                 await dispatcher.wait_all_done()
                 await dispatcher.drain_results()
 
-                retry_tasks: list[KeywordSearchTask] = []
-                retried_pages = 0
-                for task in keyword_tasks:
-                    if not task.failed_pages:
-                        continue
-                    retried_pages += len(task.failed_pages)
-                    retry_task = KeywordSearchTask(
+                await _compensate_failed_pages(
+                    dispatcher,
+                    token_pool,
+                    keyword_tasks,
+                    lambda task, pages, round_no: KeywordSearchTask(
                         _token_mgr=token_mgr,
                         keyword=task.keyword,
                         category=task.category,
@@ -287,38 +333,14 @@ def search_by_keywords(
                         total_keywords=task.total_keywords,
                         created_after=task.created_after,
                         min_star=task.min_star,
-                        page_numbers=list(task.failed_pages),
-                        retry_round=1,
+                        page_numbers=pages,
+                        retry_round=round_no,
                         _async_http_client=async_client,
                         _raw_repos=raw_repos,
-                    )
-                    retry_tasks.append(retry_task)
-
-                if retry_tasks:
-                    logger.warning(
-                        f"关键词搜索发现 {retried_pages} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务。"
-                    )
-                    for task in retry_tasks:
-                        await dispatcher.submit(task)
-
-                    await dispatcher.wait_all_done()
-                    await dispatcher.drain_results()
-
-                    final_failed = [
-                        (task.keyword, task.category, page)
-                        for task in retry_tasks
-                        for page in task.failed_pages
-                    ]
-                    if final_failed:
-                        failed_preview = ", ".join(
-                            f"{keyword}/{category}/page={page}"
-                            for keyword, category, page in final_failed[:10]
-                        )
-                        if len(final_failed) > 10:
-                            failed_preview += ", ..."
-                        logger.error(
-                            f"关键词搜索补偿后仍有 {len(final_failed)} 个失败页，结果可能不完整: {failed_preview}"
-                        )
+                    ),
+                    lambda task, page: f"{task.keyword}/{task.category}/page={page}",
+                    "关键词搜索",
+                )
             finally:
                 await dispatcher.shutdown()
 
@@ -408,8 +430,9 @@ def scan_star_range(
     # ── Phase 1: 并行扫描各子区间（异步调度器）──
     async def _run_scan_tasks() -> None:
         async with build_github_async_client(timeout_seconds=60.0) as async_client:
+            token_pool = _resolve_dispatcher_token_pool(token_mgr)
             dispatcher = AsyncTaskDispatcher(
-                token_pool=_resolve_dispatcher_token_pool(token_mgr),
+                token_pool=token_pool,
                 worker_count=_resolve_async_worker_count(token_mgr),
             )
             await dispatcher.start()
@@ -433,13 +456,11 @@ def scan_star_range(
                 await dispatcher.wait_all_done()
                 await dispatcher.drain_results()
 
-                retry_tasks: list[ScanSegmentTask] = []
-                retried_pages = 0
-                for task in segment_tasks:
-                    if not task.failed_pages:
-                        continue
-                    retried_pages += len(task.failed_pages)
-                    retry_task = ScanSegmentTask(
+                await _compensate_failed_pages(
+                    dispatcher,
+                    token_pool,
+                    segment_tasks,
+                    lambda task, pages, round_no: ScanSegmentTask(
                         _token_mgr=token_mgr,
                         seg_idx=task.seg_idx,
                         low=task.low,
@@ -447,38 +468,14 @@ def scan_star_range(
                         total_segments=task.total_segments,
                         created_after=task.created_after,
                         min_star=task.min_star,
-                        page_numbers=list(task.failed_pages),
-                        retry_round=1,
+                        page_numbers=pages,
+                        retry_round=round_no,
                         _async_http_client=async_client,
                         _raw_repos=raw_repos,
-                    )
-                    retry_tasks.append(retry_task)
-
-                if retry_tasks:
-                    logger.warning(
-                        f"区间扫描发现 {retried_pages} 个失败页，提交 {len(retry_tasks)} 个页级补偿任务。"
-                    )
-                    for task in retry_tasks:
-                        await dispatcher.submit(task)
-
-                    await dispatcher.wait_all_done()
-                    await dispatcher.drain_results()
-
-                    final_failed = [
-                        (task.low, task.high, page)
-                        for task in retry_tasks
-                        for page in task.failed_pages
-                    ]
-                    if final_failed:
-                        failed_preview = ", ".join(
-                            f"stars:{low}..{high}/page={page}"
-                            for low, high, page in final_failed[:10]
-                        )
-                        if len(final_failed) > 10:
-                            failed_preview += ", ..."
-                        logger.error(
-                            f"页级补偿后仍有 {len(final_failed)} 个失败页，结果可能不完整: {failed_preview}"
-                        )
+                    ),
+                    lambda task, page: f"stars:{task.low}..{task.high}/page={page}",
+                    "区间扫描",
+                )
             finally:
                 await dispatcher.shutdown()
 
@@ -580,7 +577,7 @@ def check_repo_growth(
     # 单仓库查询：不读 DB desc，始终实时抓取并生成描述
     html_url = repo_item.get("html_url", f"https://github.com/{repo}")
     repo_info = {
-        "short_desc": repo_item.get("description", ""),
+        "gh_desc": repo_item.get("description", ""),
         "language": repo_item.get("language", ""),
         "topics": repo_item.get("topics", []),
         "readme_url": f"{html_url}#readme",
@@ -597,7 +594,7 @@ def check_repo_growth(
         "meets_threshold": meets_threshold,
         "warning": growth_warning,
         "language": repo_item.get("language", ""),
-        "short_desc": (repo_item.get("description") or "")[:200],
+        "gh_desc": (repo_item.get("description") or "")[:200],
         "created_at": repo_item.get("created_at", ""),
         "topics": repo_item.get("topics", []),
         "description": description or "描述生成失败",
@@ -940,7 +937,7 @@ def describe_project(repo: str, db: dict, token_mgr: GitHubTokenPool | None = No
     )
 
     repo_info = {
-        "short_desc": repo_item.get("description", ""),
+        "gh_desc": repo_item.get("description", ""),
         "topics": repo_item.get("topics", []),
         "readme_url": f"{html_url}#readme",
         "readme_excerpt": readme.get("text", ""),

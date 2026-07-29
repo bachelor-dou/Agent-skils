@@ -39,6 +39,7 @@ from hot_projects.config import (
     GROWTH_CALC_DAYS,
     MIN_STAR,
     MAX_STAR,
+    BURST_PROBE_ENABLED,
 )
 from hot_projects.infra.db import load_db, save_db
 from hot_projects.datasource.github.token_pool import GitHubTokenPool
@@ -170,10 +171,11 @@ def log_pipeline_funnel(funnel: dict | None) -> None:
     logger.info(f"  · 实时 API 计算: {funnel.get('realtime', 0)}")
     logger.info(f"增长候选池(增长≥0): {funnel.get('growth_pool', 0)}")
     logger.info(f"达标(增长≥阈值) → 进入排名: {funnel.get('qualified', 0)}")
-    logger.info(
-        f"最近爆发探针: {funnel.get('recent_probe', 0)} 个"
-        f"（爆发加成生效 {funnel.get('boost_applied', 0)}）"
-    )
+    if BURST_PROBE_ENABLED:
+        logger.info(
+            f"最近爆发探针: {funnel.get('recent_probe', 0)} 个"
+            f"（爆发加成生效 {funnel.get('boost_applied', 0)}）"
+        )
     logger.info(f"榜单输出: Top {funnel.get('ranked', 0)}")
     logger.info("=" * 70)
 
@@ -196,7 +198,7 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
         "refreshed_at": {"changed": 0, "new_filled": 0},
         "star": {"changed": 0, "increased": 0, "decreased": 0},
         "forks": {"changed": 0, "increased": 0, "decreased": 0},
-        "short_desc": {
+        "gh_desc": {
             "changed": 0,
             "empty_to_filled": 0,
             "filled_to_empty": 0,
@@ -216,8 +218,8 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
     for name in new_added:
         new_p = new_projects[name]
         stats["refreshed_at"]["new_filled"] += 1
-        if new_p.get("short_desc"):
-            stats["short_desc"]["new_filled"] += 1
+        if new_p.get("gh_desc"):
+            stats["gh_desc"]["new_filled"] += 1
         if new_p.get("desc"):
             stats["desc"]["new_filled"] += 1
 
@@ -250,17 +252,17 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
             else:
                 stats["forks"]["decreased"] += 1
 
-        # short_desc - 区分变化类型
-        old_sd = old_p.get("short_desc", "")
-        new_sd = new_p.get("short_desc", "")
+        # gh_desc - 区分变化类型
+        old_sd = old_p.get("gh_desc", "")
+        new_sd = new_p.get("gh_desc", "")
         if old_sd != new_sd:
-            stats["short_desc"]["changed"] += 1
+            stats["gh_desc"]["changed"] += 1
             if not old_sd and new_sd:
-                stats["short_desc"]["empty_to_filled"] += 1
+                stats["gh_desc"]["empty_to_filled"] += 1
             elif old_sd and not new_sd:
-                stats["short_desc"]["filled_to_empty"] += 1
+                stats["gh_desc"]["filled_to_empty"] += 1
             else:
-                stats["short_desc"]["content_changed"] += 1
+                stats["gh_desc"]["content_changed"] += 1
 
         # desc - 区分变化类型
         old_d = old_p.get("desc", "")
@@ -311,8 +313,8 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
     else:
         logger.info("  forks: 无变化")
 
-    # short_desc: 已有项目变化 + 新增项目填充
-    sd = stats["short_desc"]
+    # gh_desc: 已有项目变化 + 新增项目填充
+    sd = stats["gh_desc"]
     total_sd = sd["changed"] + sd["new_filled"]
     if total_sd:
         parts = [f"共 {total_sd} 个"]
@@ -324,9 +326,9 @@ def log_update_summary(old_db: dict, new_db: dict) -> None:
             parts.append(f"有内容→空 {sd['filled_to_empty']}")
         if sd["content_changed"]:
             parts.append(f"内容变更 {sd['content_changed']}")
-        logger.info(f"  short_desc: {', '.join(parts)}")
+        logger.info(f"  gh_desc: {', '.join(parts)}")
     else:
-        logger.info("  short_desc: 无变化")
+        logger.info("  gh_desc: 无变化")
 
     # desc: 已有项目变化 + 新增项目填充
     d = stats["desc"]

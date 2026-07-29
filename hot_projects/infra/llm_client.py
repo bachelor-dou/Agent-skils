@@ -120,6 +120,54 @@ class LLMScheme:
     label: str = ""
 
 
+# content 通道里可能混入的「工具调用 JSON 泄漏」特征键：某些推理模型偶尔把本该走
+# tool_calls 结构化通道的调用，当成一段 JSON 文本吐在正文开头（如
+# {"tool_uses":[{"recipient_name":"functions.xxx","parameters":{...}}]}）。这类内容不该
+# 展示给用户，需在流式外发与最终组装前从正文开头剥离。
+_TOOLCALL_LEAK_KEYS = ('"tool_uses"', '"recipient_name"', '"tool_calls"', '"parameters"')
+
+
+def _strip_leading_toolcall_blob(text: str) -> str | None:
+    """剥离正文开头疑似「工具调用 JSON 泄漏」的一段。
+
+    返回值三态：
+    - str：开头是（或不是）一段完整 JSON——含工具调用特征键则返回剥离后的剩余正文，
+      否则原样返回（开头 JSON 不是工具泄漏，保留）；
+    - None：开头以 '{' 起始但花括号尚未闭合，暂无法判定（流式中需继续缓冲）。
+    """
+    s = text.lstrip()
+    if not s.startswith("{"):
+        return text
+    depth = 0
+    in_str = False
+    esc = False
+    end = None
+    for i, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end is None:
+        return None  # 尚未闭合，无法判定
+    blob = s[:end]
+    if not any(k in blob for k in _TOOLCALL_LEAK_KEYS):
+        return text  # 开头的 JSON 不是工具调用泄漏，原样保留
+    return s[end:].lstrip()
+
+
 def _merge_tool_call_fragment(acc: dict, frag: dict) -> None:
     """把一个流式 tool_call 增量片段按 index 合并进累加器 acc（index -> 槽位）。
 
@@ -171,6 +219,47 @@ def _stream_once(
     finish_reason = None
     emitted = False
     resp = None
+    t0 = time.time()
+    first_at = None  # 首个正文 token 到达耗时；诊断"转圈半天才吐字"是思考期还是流式假死
+    n_pieces = 0     # 正文增量条数：接近字符数=逐 token 流；远小于=被网关整块缓冲
+
+    # 正文开头 head-gate：只对「以 '{' 起始、疑似工具调用 JSON 泄漏」的开头做缓冲判定，
+    # 其余正文（绝大多数答案以散文/Markdown 开头）零延迟照常 live 外发。
+    head_done = False
+    head_buf = ""
+
+    def _emit(text: str) -> None:
+        nonlocal first_at, n_pieces, emitted
+        if not text:
+            return
+        if first_at is None:
+            first_at = time.time() - t0
+        n_pieces += 1
+        content_parts.append(text)
+        emitted = True
+        on_delta(text)
+
+    def _feed_content(piece: str) -> None:
+        nonlocal head_done, head_buf
+        if head_done:
+            _emit(piece)
+            return
+        head_buf += piece
+        stripped = head_buf.lstrip()
+        if not stripped:
+            return  # 目前只有空白，继续等
+        if not stripped.startswith("{"):
+            head_done = True  # 开头不是 JSON，正常答案：放行并转 live
+            _emit(head_buf)
+            head_buf = ""
+            return
+        res = _strip_leading_toolcall_blob(head_buf)
+        if res is None:
+            return  # 开头是未闭合的 JSON，继续缓冲直到能判定
+        head_done = True
+        _emit(res)  # 是工具泄漏→res 为剥离后余文；不是→res 为原文
+        head_buf = ""
+
     try:
         resp = requests.post(scheme.url, headers=headers, json=payload,
                              timeout=timeout, stream=True)
@@ -192,9 +281,7 @@ def _stream_once(
             delta = choice.get("delta") or {}
             piece = delta.get("content")
             if piece:
-                content_parts.append(piece)
-                emitted = True
-                on_delta(piece)
+                _feed_content(piece)
             for frag in (delta.get("tool_calls") or []):
                 _merge_tool_call_fragment(tool_acc, frag)
             if choice.get("finish_reason"):
@@ -205,6 +292,17 @@ def _stream_once(
     finally:
         if resp is not None:
             resp.close()  # 归还连接：非 200 早退、[DONE] 提前 break、异常等各路径都释放
+
+    # 收流结束仍卡在 head-gate（开头 '{' 始终没判定完）：尽力剥离后把残留放行，不丢用户内容。
+    if not head_done and head_buf.strip():
+        res = _strip_leading_toolcall_blob(head_buf)
+        _emit(head_buf if res is None else res)
+
+    chars = sum(len(p) for p in content_parts)
+    if chars:
+        # 首字耗时长=思考期（reasoning 模型正常）；条数≪字符数=网关整块缓冲（伪流式）
+        logger.info("[LLM] %s 流式统计: 首字 %.1fs, 增量 %d 条, 正文 %d 字, 总 %.1fs",
+                    scheme.backend, first_at or 0.0, n_pieces, chars, time.time() - t0)
 
     message: dict = {"role": "assistant"}
     tool_calls = [tool_acc[i] for i in sorted(tool_acc)]

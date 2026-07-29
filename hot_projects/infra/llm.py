@@ -88,7 +88,7 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
 
     Args:
         repo_name: "owner/repo"
-        repo_info: DB 中的仓库信息字典（含 short_desc / language / topics / readme_url）
+        repo_info: DB 中的仓库信息字典（含 gh_desc / language / topics / readme_url）
         html_url:  项目 GitHub 页面 URL
         detail_level: "standard"=260-520字三段式, "detailed"=400-800字四段式
 
@@ -101,8 +101,9 @@ def call_llm_describe(repo_name: str, repo_info: dict, html_url: str,
 
     # 构建信息块供 LLM 参考
     info_parts = [f"项目名称: {repo_name}", f"项目地址: {html_url}"]
-    if short_desc := repo_info.get("short_desc", ""):
-        info_parts.append(f"官方简介: {short_desc}")
+    # 官方简介取 GitHub 原文 gh_desc；旧数据可能仍在 short_desc，回退兼容。
+    if gh_desc := (repo_info.get("gh_desc") or repo_info.get("short_desc") or ""):
+        info_parts.append(f"官方简介: {gh_desc}")
     if topics := repo_info.get("topics", []):
         info_parts.append(f"标签: {', '.join(topics)}")
     if readme_url := repo_info.get("readme_url", ""):

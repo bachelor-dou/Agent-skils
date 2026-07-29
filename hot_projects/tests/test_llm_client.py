@@ -345,6 +345,54 @@ def test_stream_no_retry_after_emitted():
     assert resp["choices"][0]["message"]["content"] == "半句"
 
 
+def test_strip_leading_toolcall_blob():
+    from hot_projects.infra.llm_client import _strip_leading_toolcall_blob as strip
+    leak = ('{"tool_uses":[{"recipient_name":"functions.search_repos",'
+            '"parameters":{"query":"aigc","top_n":10,"min_star":0}}]} 我先按关键词检索。')
+    assert strip(leak) == "我先按关键词检索。"
+    # 开头是普通 JSON（非工具泄漏）→ 原样保留
+    assert strip('{"a":1} 正文') == '{"a":1} 正文'
+    # 不以 { 开头 → 原样
+    assert strip("正常散文答案") == "正常散文答案"
+    # 未闭合 → None（流式中需继续缓冲）
+    assert strip('{"tool_uses":[{"recipient_name":"func') is None
+
+
+def test_stream_strips_leaked_toolcall_json_across_fragments():
+    # 泄漏的工具调用 JSON 跨多个 SSE 分片到达，且后接正文：只应外发正文，JSON 被剥离
+    a, _ = _schemes()
+    got = []
+    lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"tool_uses\\":[{\\"recipient_name\\":"}}]}',
+        'data: {"choices":[{"delta":{"content":"\\"functions.search_repos\\",\\"parameters\\":{\\"q\\":1}}]} "}}]}',
+        'data: {"choices":[{"delta":{"content":"我先按关键词检索。"}}]}',
+        'data: {"choices":[{"delta":{"content":"结果如下。"},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+    ]
+    with patch.object(llm_client.requests, "post", side_effect=_sse(lines)):
+        resp = LLMClient([a]).chat([{"role": "user", "content": "hi"}],
+                                   model_id="gpt5", on_delta=got.append)
+    joined = "".join(got)
+    assert "tool_uses" not in joined and "recipient_name" not in joined
+    assert joined == "我先按关键词检索。结果如下。"
+    assert resp["choices"][0]["message"]["content"] == "我先按关键词检索。结果如下。"
+
+
+def test_stream_normal_answer_streams_live_unbuffered():
+    # 普通散文答案（不以 { 开头）应逐片 live 外发，不被 head-gate 缓冲合并
+    a, _ = _schemes()
+    got = []
+    lines = [
+        'data: {"choices":[{"delta":{"content":"你好"}}]}',
+        'data: {"choices":[{"delta":{"content":"，世界"},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+    ]
+    with patch.object(llm_client.requests, "post", side_effect=_sse(lines)):
+        LLMClient([a]).chat([{"role": "user", "content": "hi"}],
+                            model_id="gpt5", on_delta=got.append)
+    assert got == ["你好", "，世界"]  # 未被缓冲成一坨
+
+
 def test_api_models_lite_pool_dedup_across_platforms(monkeypatch):
     # /api/models 的融合池按名字跨平台去重，保留先出现的平台；各平台内部 lite_models 不受影响
     import asyncio

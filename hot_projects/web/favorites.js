@@ -101,7 +101,7 @@
     });
   }
 
-  async function apiSet(uid, repo, action, category) {
+  async function apiSet(uid, repo, action, category, shortDesc) {
     const body = {
       user_id: uid,
       repo: repo,
@@ -110,6 +110,9 @@
     };
     if (category != null) {
       body.category = category;  // "" 表示未分类；不传则服务端保留原分类
+    }
+    if (shortDesc !== undefined) {
+      body.short_desc = shortDesc;  // 用户手动编辑概要；不传则服务端按需自动生成
     }
     const resp = await fetch("/api/favorites", {
       method: "POST",
@@ -209,6 +212,7 @@
     try {
       await apiSet(userId(), name, "add", category);
       broadcastChange();
+      await refresh();  // 概要与上榜次数由服务端补全，乐观插入的占位项里没有
     } catch (_e) {
       items.delete(name);
       notify();
@@ -272,6 +276,30 @@
       notify();
     }
     return it.category || "";
+  }
+
+  // 手动编辑收藏概要（short_desc 收藏后不会自动更新，供用户自行修改）
+  async function setDesc(repo, text) {
+    const name = String(repo || "").trim();
+    const it = items.get(name);
+    if (!it) {
+      return "";
+    }
+    const prev = it.short_desc || "";
+    const next = String(text == null ? "" : text).trim().slice(0, 60);
+    if (next === prev) {
+      return prev;
+    }
+    it.short_desc = next;
+    notify();
+    try {
+      await apiSet(userId(), name, "add", null, next);
+      broadcastChange();
+    } catch (_e) {
+      it.short_desc = prev;
+      notify();
+    }
+    return it.short_desc;
   }
 
   // ── 标签选择浮层（report / chat 两页共用；同一时刻只开一个）──
@@ -433,6 +461,7 @@
     getAll: getAll,
     toggle: toggle,
     retag: retag,
+    setDesc: setDesc,
     subscribe: subscribe,
     migrateTo: migrateTo,
   };

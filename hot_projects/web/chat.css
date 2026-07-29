@@ -8,6 +8,9 @@
   --brand: #17324d;
   --brand-soft: #2f5b82;
   --accent: #d7883a;
+  /* 深一档的主色：--accent 配白字对比度仅 2.81:1（不达标），
+     实心按钮/图标一律用这个（配白 4.38:1，大字号达 AA） */
+  --accent-deep: #b9611d;
   --accent-soft: #f8d8b0;
   --agent: #f2e6d8;
   --user: #d7e8fb;
@@ -52,10 +55,22 @@ body {
   max-width: var(--content-width);
   margin: 0 auto;
   min-height: calc(100vh - 36px);
+  position: relative;  /* sash 的定位上下文 */
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.95fr);
+  /* 侧栏宽度收敛为一个百分比变量：拖拽改它、收起置 0，
+     两态同为百分比，grid-template-columns 才能被平滑插值 */
+  --sidebar-w: 38%;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-w);
   gap: 18px;
   align-items: stretch;
+  transition: grid-template-columns 200ms cubic-bezier(0.23, 1, 0.32, 1),
+              gap 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* 拖拽中禁用过渡，否则跟手会有迟滞 */
+.shell.is-resizing,
+.shell.is-resizing .sidebar-sash {
+  transition: none;
 }
 
 .chat-panel,
@@ -75,12 +90,206 @@ body {
   max-height: calc(100vh - 36px);
 }
 
+/* 收起态的展开按钮：贴 .shell 右上角，尺寸与标题栏里的 .panel-collapse 一致
+   （36px 宽 × 58px 高 —— 58px 即 .panel-tabs 行高：18px 上下内边距 + 18px 字号的
+   默认行框 ≈ 21.6px），因此两态的箭头落点重合，收起/展开不用换位置去点。
+   展开态不显示（那时主开关在标题栏里），由 JS 的 .is-collapsed 控制出现。 */
+.sidebar-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 58px;
+  padding: 0;
+  border: 0;
+  /* 右上角跟随聊天面板的圆角，读起来像"嵌进面板角上"的控件 */
+  border-radius: 0 var(--radius-xl) 0 12px;
+  /* 收起态下这是唯一的展开入口，且压在深色 hero 上，用主色实心块保证一眼可见 */
+  background: var(--accent-deep);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: -4px 4px 16px rgba(185, 97, 29, 0.42);
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease-out;
+}
+
+/* 用 transform 而非 width 做 hover 反馈：不触发布局，向内探出示意可拉 */
+.sidebar-handle:hover {
+  background: #9d5017;
+  transform: translateX(-3px);
+}
+
+.sidebar-handle:active {
+  transform: translateX(-1px) scale(0.96);
+}
+
+/* 收起后看不到面板内容，用角标提示"里面还有 N 条收藏"。
+   挂在右下角：右上角被 28px 圆角切走了，角标放那儿会显得脱开。
+   底色已是主色，故角标反过来用白底深色字才有对比 */
+.sidebar-handle__badge {
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--brand);  /* 9.5px 属小字号，需 4.5:1；深主色只有 4.38，故用品牌深蓝 */
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.sidebar-handle__badge[hidden] {
+  display: none;
+}
+
+.sidebar-handle__chevron {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  transition: transform 220ms ease;
+}
+
+/* 折叠态：箭头翻转，示意"点我把侧栏拉回来" */
+.sidebar-handle.is-collapsed .sidebar-handle__chevron {
+  transform: rotate(180deg);
+}
+
+@media (max-width: 980px) {
+  /* 手机端已有底部 Tab 切换，不需要侧栏手柄 */
+  .sidebar-handle {
+    display: none;
+  }
+}
+
+/* 分隔线拖拽条：铺在两栏之间的 gap 上，平时隐形，hover/拖拽时露出一条竖线 */
+.sidebar-sash {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: var(--sidebar-w);  /* 右边缘贴住侧栏左沿，18px 宽正好覆盖 gap */
+  width: 18px;
+  display: none;
+  cursor: col-resize;
+  z-index: 50;
+  transition: right 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.sidebar-sash::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 50%;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 3px;
+  background: transparent;
+  transition: background 140ms ease;
+}
+
+.sidebar-sash:hover::before,
+.sidebar-sash:focus-visible::before,
+.sidebar-sash.is-dragging::before {
+  background: var(--accent);
+}
+
+.sidebar-sash:focus-visible {
+  outline: none;
+}
+
+@media (min-width: 981px) {
+  /* 直接覆盖 grid-template-columns，而不是把 --sidebar-w 置 0：
+     拖拽保存的宽度是写在元素 style 上的内联变量，优先级高于类规则，
+     若在这里改变量会被内联值盖掉，导致收不起来。 */
+  .shell.sidebar-collapsed {
+    grid-template-columns: minmax(0, 1fr) 0%;
+    gap: 0;
+  }
+
+  /* 收起用 visibility 而非 display:none —— display 无法参与宽度动画。
+     收起时把隐藏延到动画结束（0s 时长 + 200ms 延迟），展开时立即可见；
+     visibility:hidden 同时把内容移出 Tab 顺序与读屏，不留"看不见却可聚焦"的陷阱。 */
+  .shell.sidebar-collapsed .report-panel {
+    visibility: hidden;
+    transition: visibility 0s linear 200ms;
+  }
+
+  .shell.sidebar-collapsed .sidebar-sash {
+    display: none;
+  }
+
+  .sidebar-sash {
+    display: block;
+  }
+
+  .sidebar-handle.is-collapsed {
+    display: flex;
+  }
+}
+
 /* 报告 / 收藏 顶部横向 Tab：点哪个下面显示哪个，选中项各自内部滚动 */
 .panel-tabs {
   flex: 0 0 auto;
   display: flex;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(255, 250, 243, 0.9), rgba(255, 244, 228, 0.82));
+}
+
+.panel-tabs__list {
+  flex: 1 1 auto;
+  display: flex;
+  min-width: 0;
+}
+
+/* 标题栏右端的收起按钮（移动端有底部 Tab，不需要，故默认不显示） */
+.panel-collapse {
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 36px;
+  padding: 0;
+  border: 0;
+  /* 与收起态的 .sidebar-handle 完全同款（同尺寸、同实心主色、同圆角）：
+     两态是同一个控件、同一个位置，切换时视觉连续。
+     用实心填充而非"淡底+彩色箭头"，是因为填充的对比度不受背景明暗影响，
+     深色模式下 Tab 栏会变暗，彩色箭头会发闷。 */
+  background: var(--accent-deep);
+  color: #fff;
+  border-radius: 0 var(--radius-xl) 0 12px;
+  cursor: pointer;
+  font: inherit;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  transition: color 160ms ease, background 160ms ease, transform 130ms ease-out;
+}
+
+.panel-collapse:hover {
+  background: #9d5017;
+}
+
+.panel-collapse:active {
+  transform: scale(0.9);
+}
+
+.panel-collapse__chevron {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* 桌面端才显示标题栏收起按钮（移动端有底部 Tab）。
+   必须放在上面的基础规则之后：媒体查询不增加优先级，同权重下后写的胜出，
+   若写在前面会被基础规则的 display:none 盖掉。 */
+@media (min-width: 981px) {
+  .panel-collapse {
+    display: flex;
+  }
 }
 
 .panel-tab {
@@ -95,7 +304,7 @@ body {
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--muted);
-  transition: color 160ms ease, background 160ms ease;
+  transition: color 160ms ease, background 160ms ease, transform 130ms ease-out;
 }
 
 .panel-tab:hover {
@@ -612,7 +821,11 @@ h1 {
 .messages {
   min-width: 0;
   min-height: 0;
-  padding: 18px 18px calc(18px + var(--composer-space));
+  /* 对话居中成固定宽度栏：面板变宽（尤其收起侧栏后）时左右自动留等宽外边距，
+     气泡不再只顶着左侧、右边留一大片空白，看起来是刻意的留白而非"没填满的白框"。 */
+  padding-top: 18px;
+  padding-bottom: calc(18px + var(--composer-space));
+  padding-inline: max(18px, calc((100% - 820px) / 2));
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -623,6 +836,45 @@ h1 {
     linear-gradient(90deg, rgba(215, 232, 251, 0.08), rgba(248, 216, 176, 0.08));
 }
 
+/* 滚动条：明显可见但收拾干净——去掉原生上下箭头，轨道用淡淡的可见底色（不再是刺眼白），
+   滑块用棕灰实色。Firefox 用 scrollbar-color 等效处理。 */
+.messages,
+.report-list,
+.fav-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 100, 78, 0.55) rgba(35, 44, 56, 0.07);
+}
+
+.messages::-webkit-scrollbar,
+.report-list::-webkit-scrollbar,
+.fav-list::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.messages::-webkit-scrollbar-track,
+.report-list::-webkit-scrollbar-track,
+.fav-list::-webkit-scrollbar-track {
+  background: rgba(35, 44, 56, 0.07);
+  border-radius: 999px;
+}
+
+.messages::-webkit-scrollbar-thumb,
+.report-list::-webkit-scrollbar-thumb,
+.fav-list::-webkit-scrollbar-thumb {
+  background: rgba(120, 100, 78, 0.5);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.messages::-webkit-scrollbar-thumb:hover,
+.report-list::-webkit-scrollbar-thumb:hover,
+.fav-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 100, 78, 0.72);
+  background-clip: padding-box;
+}
+
 .message {
   max-width: min(82%, 620px);
   padding: 14px 16px 15px;
@@ -630,7 +882,7 @@ h1 {
   line-height: 1.65;
   font-size: 15px;
   position: relative;
-  animation: rise 220ms ease;
+  animation: rise 240ms cubic-bezier(0.23, 1, 0.32, 1);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -970,6 +1222,9 @@ textarea {
   padding: 12px;
   min-height: 0;
   background: linear-gradient(180deg, rgba(255, 251, 245, 0.68), rgba(241, 234, 223, 0.5));
+  /* .panel-pane.is-active 把本元素变成 grid，默认单列按 max-content 撑宽，
+     会被超长 repo 名/描述撑破导致标签、✕ 被裁切；约束为容器宽度以启用内部 min-width:0 截断 */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .fav-empty {
@@ -1041,17 +1296,55 @@ textarea {
   color: var(--ok);
 }
 
+/* 上榜次数：跟在复制按钮后的小角标，数字本身就是全部信息，别抢仓库名的视觉权重 */
+.fav-item__seen {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(23, 50, 77, 0.08);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  cursor: default;
+}
+
 .fav-item__desc {
   font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+}
+
+.fav-item__desc:hover {
+  color: var(--brand-soft);
 }
 
 .fav-item__desc--empty {
   font-style: italic;
   opacity: 0.7;
+}
+
+.fav-item__desc-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  padding: 2px 7px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--brand);
+  background: #fff;
+}
+
+.fav-item__desc-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(215, 136, 58, 0.25);
 }
 
 .fav-item__remove {
@@ -1203,6 +1496,41 @@ textarea {
 
 .tag-picker__add:hover {
   background: var(--brand-soft, #2f5b82);
+}
+
+/* 按压反馈：按下时轻微缩放，符合“可按压”的物理直觉（emilkowalski/skills） */
+.fav-item__copy,
+.fav-item__remove,
+.fav-item__tag,
+.tag-picker__chip,
+.tag-picker__add {
+  transition: transform 130ms ease-out, background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.composer button:active,
+.mobile-tabs button:active,
+.panel-tab:active,
+.fav-item__copy:active,
+.fav-item__remove:active,
+.fav-item__tag:active,
+.tag-picker__chip:active,
+.tag-picker__add:active {
+  transform: scale(0.94);
+}
+
+/* 标签浮层入场：从触发点方向轻微放大淡入，比直接出现更有“打开”感 */
+.tag-picker {
+  animation: tagPickerIn 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  transform-origin: top left;
+}
+
+@keyframes tagPickerIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tag-picker { animation: none; }
 }
 
 .report-card {
@@ -1366,7 +1694,7 @@ textarea {
 
 .agent-progress[data-state="indeterminate"] .agent-progress__fill {
   width: 40%;
-  animation: agentProgressIndet 1.2s ease-in-out infinite;
+  animation: agentProgressIndet 1.2s linear infinite;
 }
 
 @keyframes agentProgressIndet {
@@ -2084,7 +2412,9 @@ textarea {
   .report-panel,
   .status-strip,
   .fullscreen-overlay,
-  .usage-help-overlay {
+  .usage-help-overlay,
+  .sidebar-handle,
+  .sidebar-sash {
     display: none !important;
   }
 

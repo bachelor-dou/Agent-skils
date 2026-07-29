@@ -174,7 +174,7 @@ def _extract_structured_sections(text: str) -> dict[str, str]:
 
 
 def _build_positioning_text(saved: dict, detailed_desc: str) -> str:
-    short_desc = (saved.get("short_desc") or "").strip()
+    short_desc = (saved.get("gh_desc") or "").strip()
     desc_blocks = _split_description_blocks(detailed_desc)
     if short_desc:
         if desc_blocks:
@@ -191,7 +191,7 @@ def _build_problem_text(saved: dict, detailed_desc: str) -> str:
         return desc_blocks[1]
 
     parts: list[str] = []
-    short_desc = (saved.get("short_desc") or "").strip()
+    short_desc = (saved.get("gh_desc") or "").strip()
     language = (saved.get("language") or "").strip()
     topics = [topic for topic in saved.get("topics", []) if topic]
     if short_desc:
@@ -227,7 +227,7 @@ def _build_tech_arch_text(saved: dict, detailed_desc: str) -> str:
     parts: list[str] = []
     language = (saved.get("language") or "").strip()
     topics = [topic for topic in saved.get("topics", []) if topic]
-    short_desc = (saved.get("short_desc") or "").strip()
+    short_desc = (saved.get("gh_desc") or "").strip()
 
     if language:
         parts.append(f"主要使用 {language} 实现。")

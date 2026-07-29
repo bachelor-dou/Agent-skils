@@ -330,6 +330,16 @@ class AsyncTokenPool:
                 return idx
         return None
 
+    def seconds_until_all_cool(self) -> float:
+        """所有未失效 token 都脱离限流冷却所需的秒数（0 = 当前已全部可用）。
+
+        供页级补偿使用：只要还有 token 在冷却，立刻重跑失败页会再撞一次限流，
+        任务一命中限流就把剩余页整批丢回失败集，整轮补偿等于白跑。
+        """
+        now = self._time_fn()
+        waits = [s.available_at - now for s in self._states if not s.invalid]
+        return max(0.0, max(waits, default=0.0))
+
     def _has_non_invalid_tokens(self) -> bool:
         return any(not s.invalid for s in self._states)
 

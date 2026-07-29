@@ -167,6 +167,28 @@ DESC_REFRESH_DAYS: int = 60            # LLM 描述刷新周期（天）—— d
 # DB 差值法：项目 refreshed_at 年龄与计算窗口的最大允许偏差（小时）。
 # 仅当 |项目年龄 − 计算窗口| ≤ 该值时，current_star − DB旧star 才被视为有效的窗口期增长。
 DB_DIFF_TOLERANCE_HOURS: int = 5
+# 快照年龄不等于计算窗口时的折算区间（相对窗口的倍数）。GitHub 2026-06-30 起把 stargazers
+# 列表限权给 admin/collaborator，二分法/采样外推对他人仓库双双失效，窗口不匹配的项目
+# 只能按快照年龄线性折算到窗口，否则整批出不了榜。
+# 下限 0.4：向上放大最多 2.5 倍，再短的快照放大后噪声会盖过信号。
+# 上限 3.0：向下折算不会虚增增长（只会把旧增量摊薄），放宽到 21 天是为了覆盖漏采一两周的项目
+#          （2026-07-29 一期落到实时路径的多为 14 天前的快照，卡在 2.0 会整批漏掉）。
+DB_DIFF_SCALE_MIN_RATIO: float = 0.4
+DB_DIFF_SCALE_MAX_RATIO: float = 3.0
+
+# ──────────────────────────────────────────────────────────────
+# 每日 star 快照（窗口增长的主基线）
+#   star 时间戳被 GitHub 限权后，唯一能还原任意窗口增长的办法是自己每天存一份 star 计数：
+#   增长 = 当前 star − T−N 那天快照里的 star。快照按天存成独立 gz 文件（infra/snapshots.py）。
+#   实测：100 别名/次 = 1 个 GraphQL 点，5.3 万仓库全量 526 点、约 4 分钟。
+# ──────────────────────────────────────────────────────────────
+SNAPSHOT_BATCH_SIZE: int = 100      # 每次 GraphQL 查询的别名数。实测 200 会 HTTP 200 + 全 null 静默退化，勿上调
+SNAPSHOT_CONCURRENCY: int = 8       # 并发批次数
+SNAPSHOT_KEEP_DAYS: int = 35        # 快照保留天数（按日期截断，够覆盖月度窗口）
+SNAPSHOT_MIN_COVERAGE: float = 0.5  # 采集覆盖率低于此值拒绝落盘（防 API 全面变更时写入垃圾锚点）
+# 锚点日期与 T−N 的最大允许偏差（天）。每天都跑时恒为 0；漏跑一两天就顺延到邻近快照，
+# 且全部仓库共用同一锚点，窗口长度一致，相对排名不受影响。
+SNAPSHOT_ANCHOR_TOLERANCE_DAYS: int = 2
 # 关键词榜：LLM 动态补充的搜索关键词数量上限（控制 Search API 配额；预设类别不受此限）
 MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 
@@ -178,6 +200,10 @@ MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 #     boost        = 1 + BURST_ALPHA * min(max(acceleration - 1, 0), BURST_CAP)
 #   acceleration<=1（持平或放缓）→ boost=1，不反向惩罚。
 # ──────────────────────────────────────────────────────────────
+#   GitHub 2026-06-30 起把 stargazers 列表限权给 admin/collaborator 后，短窗口增长已无从实测：
+#   周快照折算到 3 天只是把窗口均速原样搬过来，acceleration 恒为 1，探针必然空转。
+#   故默认关闭，排名完全由窗口总增长决定。若日后接入每日快照，置 True 即可恢复。
+BURST_PROBE_ENABLED: bool = False
 RECENT_GROWTH_DAYS: int = 3       # "最近几天"窗口（天）：候选池额外计算该窗口增长
 BURST_ALPHA: float = 0.15         # 爆发加成强度（越大，最近爆发对排名影响越大）
 BURST_CAP: float = 2.0            # acceleration-1 的封顶（boost 最高 1 + ALPHA*CAP）
@@ -195,6 +221,8 @@ DEFAULT_SCORE_MODE: str = "comprehensive"
 MAX_BINARY_SEARCH_DEPTH: int = 20      # 二分法查 stargazers 最大深度
 SEARCH_REQUEST_INTERVAL: float = 1.3  # Search API 请求最小间隔（秒）
 MAX_GRAPHQL_SAMPLING_BATCHES: int = 45  # GraphQL 采样外推最多翻页批次数（35×100≈3500 条）
+PAGE_COMPENSATION_ROUNDS: int = 3       # 搜索/扫描失败页最多补偿轮数（1 轮时限流期残留几十页）
+PAGE_COMPENSATION_MAX_WAIT: float = 150.0  # 每轮补偿前等 token 冷却的上限（秒）
 
 # ──────────────────────────────────────────────────────────────
 # 路径配置（均写死在包根目录 hot_projects/ 下，不走环境变量）

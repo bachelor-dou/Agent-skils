@@ -14,7 +14,7 @@ DB 结构：
         "refreshed_at": "YYYY-MM-DDTHH:MM:SSZ",  # 项目级快照时间，差值判定依据
         "desc": "LLM 生成的描述",
         "desc_updated_at": "YYYY-MM-DD",          # desc 生成日期，超过 DESC_REFRESH_DAYS 天重刷
-        "short_desc": "GitHub 原始 description",
+        "gh_desc": "GitHub 原始 description",     # 项目自带简介，喂给 LLM 生成 desc；短描述(中文)存于 favorites.json
         "language": "Python",
                 "topics": ["ai", "llm"],
                 "readme_url": "https://github.com/owner/repo/blob/HEAD/README.md"
@@ -282,8 +282,8 @@ def update_db_project(
             db_projects[full_name]["created_at"] = created_at
         if "readme_url" not in db_projects[full_name]:
             db_projects[full_name]["readme_url"] = readme_url
-        if description and not db_projects[full_name].get("short_desc"):
-            db_projects[full_name]["short_desc"] = description[:500]
+        if description and not db_projects[full_name].get("gh_desc"):
+            db_projects[full_name]["gh_desc"] = description[:500]
         if language and not db_projects[full_name].get("language"):
             db_projects[full_name]["language"] = language
         if topics and not db_projects[full_name].get("topics"):
@@ -295,7 +295,7 @@ def update_db_project(
             "created_at": created_at,
             "refreshed_at": _format_utc_timestamp(),
             "desc": "",
-            "short_desc": description[:500],
+            "gh_desc": description[:500],
             "language": language,
             "topics": topics,
             "readme_url": readme_url,
@@ -312,6 +312,17 @@ def get_db_age_days(db: dict) -> int | None:
         return (_utc_now().date() - db_date.date()).days
     except ValueError:
         return None
+
+
+def timestamp_age_days(ts: str) -> float | None:
+    """返回 GitHub 风格时间戳（"YYYY-MM-DDTHH:MM:SSZ"）距今的天数，无法解析返回 None。"""
+    if not ts:
+        return None
+    try:
+        parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (_utc_now() - parsed).total_seconds() / 86400
 
 
 def is_project_window_match(

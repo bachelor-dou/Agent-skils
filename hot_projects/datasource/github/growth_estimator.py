@@ -44,6 +44,49 @@ logger = logging.getLogger("hot_projects")
 
 GROWTH_ESTIMATION_UNRESOLVED = -2
 
+# GitHub 自 2026-06-30 起把 stargazers 列表限权给仓库的 admin/collaborator
+# （changelog: 2026-06-30-upcoming-access-restrictions-to-public-api-endpoints-and-ui-views）：
+# 非协作者读 REST /stargazers 得 404、GraphQL stargazers 得空 edges，二分法与采样外推同时失效。
+# 我们跟踪的是他人仓库，换 token 或加 scope 都拿不到，逐仓库硬试只会空转
+# （2026-07-29 一轮 4906 次 REST + 1636 次 GraphQL 全部无效，白跑 37 分钟，还把 token 推向
+# 二级限流拖累搜索阶段），故连续失败到阈值即熔断。
+# 不永久锁死：留一个重探窗口，GitHub 若放宽策略可自动回到时间戳路径。
+TIMESTAMP_PATH_STRIKE_LIMIT = 5
+TIMESTAMP_PATH_RETRY_AFTER_SECONDS = 1800.0
+
+_timestamp_path_strikes = 0
+_timestamp_path_disabled_until = 0.0
+
+
+def timestamp_path_unavailable() -> bool:
+    """star 时间戳路径当前是否处于熔断状态。"""
+    return time.time() < _timestamp_path_disabled_until
+
+
+def reset_timestamp_path_state() -> None:
+    """清空熔断状态（供测试与手工重试使用）。"""
+    global _timestamp_path_strikes, _timestamp_path_disabled_until
+    _timestamp_path_strikes = 0
+    _timestamp_path_disabled_until = 0.0
+
+
+def _note_timestamp_result(got_timestamps: bool) -> None:
+    """记录一次时间戳采集结果，连续失败到阈值则熔断。"""
+    global _timestamp_path_strikes, _timestamp_path_disabled_until
+    if got_timestamps:
+        reset_timestamp_path_state()
+        return
+
+    _timestamp_path_strikes += 1
+    if _timestamp_path_strikes >= TIMESTAMP_PATH_STRIKE_LIMIT and not timestamp_path_unavailable():
+        _timestamp_path_disabled_until = time.time() + TIMESTAMP_PATH_RETRY_AFTER_SECONDS
+        logger.error(
+            "[GROWTH] 连续 %s 个仓库拿不到 star 时间戳（REST stargazers 404 / GraphQL 空 edges），"
+            "判定该路径不可用，%.0f 分钟内不再实时估算，增长改由 DB 快照差值/折算兜底。",
+            TIMESTAMP_PATH_STRIKE_LIMIT,
+            TIMESTAMP_PATH_RETRY_AFTER_SECONDS / 60,
+        )
+
 
 def _create_growth_async_client():
     if httpx is None:
@@ -68,6 +111,7 @@ def _estimate_growth_from_sampling_timestamps(
     growth_calc_days: int,
 ) -> int:
     """基于采样时间戳估算窗口增长（同步/异步共用核心逻辑）。"""
+    _note_timestamp_result(len(timestamps) >= 2)
     if len(timestamps) < 2:
         logger.warning(
             f"  [GROWTH] {owner}/{repo} 采样数据不足: "
@@ -202,6 +246,8 @@ def _estimate_star_growth_binary_impl(
     """
     if total_stars < STAR_GROWTH_THRESHOLD:
         return 0
+    if timestamp_path_unavailable():
+        return GROWTH_ESTIMATION_UNRESOLVED
 
     per_page = 100
     total_pages = math.ceil(total_stars / per_page)
@@ -219,6 +265,7 @@ def _estimate_star_growth_binary_impl(
     if not last_page_data:
         return 0
 
+    _note_timestamp_result(True)
     # 最新一页的第一条（该页中最老的）
     oldest_on_last = parse_starred_at_from_entry(last_page_data[0])
     if oldest_on_last and oldest_on_last < cutoff:
@@ -350,6 +397,8 @@ async def estimate_star_growth_binary_async(
     """异步版本的 REST 二分法增长估算。"""
     if total_stars < STAR_GROWTH_THRESHOLD:
         return 0
+    if timestamp_path_unavailable():
+        return GROWTH_ESTIMATION_UNRESOLVED
 
     per_page = 100
     total_pages = math.ceil(total_stars / per_page)
@@ -384,6 +433,7 @@ async def estimate_star_growth_binary_async(
         if not last_page_data:
             return 0
 
+        _note_timestamp_result(True)
         oldest_on_last = parse_starred_at_from_entry(last_page_data[0])
         if oldest_on_last and oldest_on_last < cutoff:
             count = _count_entries_since_cutoff(last_page_data, cutoff)

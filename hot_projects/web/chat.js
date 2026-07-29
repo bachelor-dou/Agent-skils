@@ -5,6 +5,26 @@
     const messagesEl = document.getElementById("messages");
     const inputEl = document.getElementById("composer-input");
     const sendButton = document.getElementById("send-button");
+
+    // 自动滚到底（追加消息 / 流式重渲时用）。打个短时间窗，让阅读态的滚动收起逻辑
+    // 忽略这类"程序滚动"，否则流式输出频繁触底会反复收起/展开顶栏底栏导致页面一跳一跳。
+    let programmaticScrollUntil = 0;
+    function scrollMessagesToBottom() {
+      programmaticScrollUntil = performance.now() + 150;
+      // 强制瞬时滚动：.messages 设了 scroll-behavior:smooth，流式每 40ms 触底会各起一次
+      // 平滑动画、目标又在增长，动画不断被打断，表现为页面一跳一跳。这里临时改回 auto。
+      const prev = messagesEl.style.scrollBehavior;
+      messagesEl.style.scrollBehavior = "auto";
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      messagesEl.style.scrollBehavior = prev;
+    }
+
+    // 距底阈值：在此范围内视为「正在追看最新」，流式重渲才自动跟随；
+    // 用户上翻回看时不再把他顶回底部，滚回底部附近即自动恢复跟随。
+    const FOLLOW_BOTTOM_PX = 64;
+    function isNearBottom() {
+      return messagesEl.scrollHeight - (messagesEl.scrollTop + messagesEl.clientHeight) <= FOLLOW_BOTTOM_PX;
+    }
     const endSessionButton = document.getElementById("end-session-button");
     const reportListEl = document.getElementById("report-list");
     const reportCountEl = document.getElementById("report-count");
@@ -150,7 +170,7 @@
         messagesEl.innerHTML = "";
         chatHistory = [];
       }
-      addMessage("agent", introText || "欢迎，你可以点击快捷按钮生成综合榜、新项目榜、查看 Trending，也可以输入框自定义参数（如类别、数量、增长阈值等）。", {
+      addMessage("agent", introText || "欢迎，我可以生成综合榜、新项目榜、查看 Trending，也可以输入框自定义参数（如类别、数量、增长阈值等）。", {
         asHtml: false,
         hideLabel: true,
         variant: "intro",
@@ -207,7 +227,7 @@
               }
               messagesEl.appendChild(item);
             });
-            messagesEl.scrollTop = messagesEl.scrollHeight;
+            scrollMessagesToBottom();
             return;
           }
         }
@@ -515,6 +535,9 @@
       let chromeHidden = false;
       let isTouchHolding = false;
       let lastScrollTop = messagesEl.scrollTop;
+      // 刚显示顶栏后的"禁收起"冷却窗：显示会改变布局高度，触底时会连带触发滚动事件，
+      // 若立刻又允许收起就会 显/隐 反复横跳（用户看到的闪烁连跳）。冷却期内只更新基准不收起。
+      let noHideUntil = 0;
 
       function syncHeights() {
         heroEl.style.setProperty("--chrome-height", `${heroEl.offsetHeight}px`);
@@ -541,10 +564,11 @@
         statusStripEl.classList.remove("is-reading-hidden");
         composerEl.classList.remove("is-reading-hidden");
         chromeHidden = false;
+        noHideUntil = performance.now() + 500;  // 显示后短暂禁收起，避免布局变化引发的横跳
       }
 
       function hideChatChrome() {
-        if (chromeHidden || document.activeElement === inputEl) {
+        if (chromeHidden || document.activeElement === inputEl || performance.now() < noHideUntil) {
           return;
         }
         syncHeights();
@@ -566,6 +590,11 @@
       }
 
       function handleReadingScroll() {
+        if (performance.now() < programmaticScrollUntil) {
+          // 程序自动触底（追加/流式），不当作用户阅读滚动，避免收起顶/底栏引发跳动
+          lastScrollTop = messagesEl.scrollTop;
+          return;
+        }
         if (document.activeElement === inputEl || !isMessagesScrollable()) {
           showChatChrome();
           return;
@@ -834,7 +863,7 @@
       }
 
       messagesEl.appendChild(item);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollMessagesToBottom();
 
       // 持久化（跳过 typing 指示器）
       if (!options.typing) {
@@ -858,7 +887,7 @@
       body.innerHTML =
         '<div class="agent-progress" data-state="indeterminate">' +
           '<div class="agent-progress__head">' +
-            '<span class="agent-progress__label">正在处理…</span>' +
+            '<span class="agent-progress__label">模型思考中…</span>' +
             '<span class="agent-progress__pct"></span>' +
           '</div>' +
           '<div class="agent-progress__track"><div class="agent-progress__fill"></div></div>' +
@@ -867,6 +896,21 @@
       const fill = body.querySelector(".agent-progress__fill");
       const labelEl = body.querySelector(".agent-progress__label");
       const pctEl = body.querySelector(".agent-progress__pct");
+
+      // 等待计时：推理期没有正文可流、进度条只是转圈，显示已用秒数让等待有进展感。
+      // 仅在「不确定态」（没有真实百分比）时占用 pct 位；收到真实进度或开始流正文即让位/停表。
+      const startedAt = Date.now();
+      let elapsedTimer = window.setInterval(function () {
+        if (wrap.getAttribute("data-state") === "indeterminate") {
+          pctEl.textContent = Math.floor((Date.now() - startedAt) / 1000) + "s";
+        }
+      }, 1000);
+      function stopTimer() {
+        if (elapsedTimer !== null) {
+          window.clearInterval(elapsedTimer);
+          elapsedTimer = null;
+        }
+      }
 
       function onProgress(percent, label) {
         if (typeof percent === "number" && isFinite(percent)) {
@@ -887,10 +931,27 @@
       let renderTimer = null;
       function flush() {
         renderTimer = null;
+        // 贴底判定必须在改 DOM 之前：渲染后内容变高，距底距离会失真而误判成"已上翻"。
+        const follow = isNearBottom();
         body.innerHTML = enhanceReply(acc);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        if (follow) {
+          scrollMessagesToBottom();
+        }
+      }
+      // 供收尾复用：流式已渲染出与最终回复一致的全文时，跳过整篇 Markdown 重解析。
+      // 先把挂起的节流渲染补齐，保证 body 反映的是最新 acc，再返回 acc 供比对。
+      function streamedText() {
+        if (!streaming) {
+          return null;
+        }
+        if (renderTimer !== null) {
+          window.clearTimeout(renderTimer);
+          flush();
+        }
+        return acc;
       }
       function onDelta(text, reset) {
+        stopTimer();  // 正文开始流出：进度条即将被替换，停掉计时
         if (reset) {
           // 新一轮正文开始：丢弃上一轮（调工具那轮）流出的过渡正文，从头重渲染。
           acc = "";
@@ -906,11 +967,11 @@
         }
         acc += text;
         if (renderTimer === null) {
-          renderTimer = window.setTimeout(flush, 120);
+          renderTimer = window.setTimeout(flush, 40);  // 重渲节流：40ms≈25fps，逐 token 更顺滑
         }
       }
 
-      return { item, onProgress, onDelta };
+      return { item, onProgress, onDelta, stop: stopTimer, streamedText };
     }
 
     // 渲染一条非应答（重连推送 / 服务端主动消息）的 Agent 回复
@@ -924,11 +985,17 @@
       saveChatHistory();
     }
 
-    function updateTypingIndicator(el, finalText) {
+    function updateTypingIndicator(el, finalText, streamedText) {
       const body = el.lastElementChild;
       body.className = "md-body";
-      const html = enhanceReply(finalText);
-      body.innerHTML = html;
+      let html;
+      if (streamedText != null && streamedText === finalText && body.innerHTML) {
+        // 流式已把与权威全文一致的内容渲染进 DOM：直接复用，省掉一次整篇 Markdown 重解析
+        html = body.innerHTML;
+      } else {
+        html = enhanceReply(finalText);
+        body.innerHTML = html;
+      }
       body.classList.remove("typing");
 
       // 持久化最终回复
@@ -962,7 +1029,11 @@
 
       try {
         const reply = socketReady ? await sendViaWebSocket(message, pendingObj.onProgress, pendingObj.onDelta) : await sendViaHttp(message);
-        updateTypingIndicator(pending, reply);
+        if (typeof pendingObj.stop === "function") {
+          pendingObj.stop();  // 兜底：无流式增量的回复也要停掉等待计时
+        }
+        const streamed = typeof pendingObj.streamedText === "function" ? pendingObj.streamedText() : null;
+        updateTypingIndicator(pending, reply, streamed);
         await loadReports();
         // agent 可能在本轮通过 add_favorite 新增收藏 → 同步收藏栏
         if (window.GitHubHotFavorites) {
@@ -972,6 +1043,9 @@
         pending.remove();
         addMessage("system", `请求失败：${error.message}`, { asHtml: false });
       } finally {
+        if (typeof pendingObj.stop === "function") {
+          pendingObj.stop();  // 无论成功/失败/异常，都不留下空转的计时器
+        }
         setSending(false);
       }
     }
@@ -1366,8 +1440,57 @@
           if (repo) {
             api.toggle(repo);
           }
+          return;
+        }
+        const descEl = e.target.closest(".fav-item__desc");
+        if (descEl) {
+          startEditDesc(descEl);
         }
       });
+
+      // 点击概要就地编辑：Enter/失焦保存，Esc 取消；保存/取消后都由 render 重建 DOM
+      function startEditDesc(descEl) {
+        const repo = descEl.getAttribute("data-repo");
+        if (!repo || descEl.dataset.editing === "1") {
+          return;
+        }
+        descEl.dataset.editing = "1";
+        const cur = descEl.classList.contains("fav-item__desc--empty")
+          ? "" : descEl.textContent.trim();
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "fav-item__desc-input";
+        input.value = cur;
+        input.maxLength = 60;
+        input.placeholder = "一句话概要…";
+        descEl.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        function finish(save) {
+          if (done) {
+            return;
+          }
+          done = true;
+          const api = window.GitHubHotFavorites;
+          if (save && api) {
+            api.setDesc(repo, input.value);  // 改动则乐观更新
+          }
+          render(api ? api.getAll() : []);  // 始终重建，替换掉 input（含未改动/取消）
+        }
+        input.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter") {
+            ev.preventDefault();
+            finish(true);
+          } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            finish(false);
+          }
+        });
+        input.addEventListener("blur", function () {
+          finish(true);
+        });
+      }
 
       const UNCATEGORIZED = "未分类";
 
@@ -1375,20 +1498,31 @@
         const repo = escapeHtml(item.repo);
         const desc = escapeHtml(item.short_desc || "");
         const cat = (item.category || "").trim();
+        // 概要一行截断，完整内容靠 title 悬浮展示（编辑提示附在后面，别把原文挤掉）
         const descRow = desc
-          ? `<span class="fav-item__desc" title="${desc}">${desc}</span>`
-          : `<span class="fav-item__desc fav-item__desc--empty">暂无描述</span>`;
-        const tagLabel = cat ? escapeHtml(cat) : "＋ 标签";
+          ? `<span class="fav-item__desc" data-repo="${repo}" title="${desc}&#10;（点击编辑）">${desc}</span>`
+          : `<span class="fav-item__desc fav-item__desc--empty" data-repo="${repo}" title="点击添加概要">暂无描述</span>`;
+        // 分母是定时周报总期数：单看「上过 3 期」不知道算多算少，配上总数才有参照
+        const seen = Number(item.report_count) || 0;
+        const total = Number(item.report_total) || 0;
+        const seenBadge = total
+          ? `<span class="fav-item__seen" title="共 ${total} 期定时周报，上榜 ${seen} 期">${seen}/${total}</span>`
+          : "";
+        // 已分类项的分类名已在分组标题展示，行内标签冗余；仅未分类项保留「＋ 标签」入口便于后续归类
+        const tagBtn = cat
+          ? ""
+          : `<button type="button" class="fav-item__tag" data-repo="${repo}" title="设置分类">＋ 标签</button>`;
         return `
             <div class="fav-item">
               <div class="fav-item__main">
                 <div class="fav-item__name">
                   <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
                   <button type="button" class="fav-item__copy" data-repo="${repo}" title="复制名字" aria-label="复制 ${repo}">⧉</button>
+                  ${seenBadge}
                 </div>
                 ${descRow}
               </div>
-              <button type="button" class="fav-item__tag" data-repo="${repo}" title="修改分类">${tagLabel}</button>
+              ${tagBtn}
               <button type="button" class="fav-item__remove" data-repo="${repo}" title="取消收藏" aria-label="取消收藏">✕</button>
             </div>
           `;
@@ -1664,4 +1798,159 @@
           }
         }
       });
+    })();
+
+    // ── 桌面端侧栏：折叠/展开 + 拖拽调宽（对齐 VSCode sash 语义）──
+    (function setupSidebarToggle() {
+      const shellEl = document.querySelector(".shell");
+      const handle = document.getElementById("sidebar-toggle");
+      if (!shellEl || !handle) return;
+
+      const headerBtn = document.getElementById("sidebar-collapse");
+      const sash = document.getElementById("sidebar-sash");
+      const badge = document.getElementById("sidebar-fav-badge");
+      const KEY = "gh-hot-sidebar-collapsed";
+      const WIDTH_KEY = "gh-hot-sidebar-width";
+      const DEFAULT_W = 38;  // 与 CSS --sidebar-w 默认值保持一致
+      const MIN_W = 24;
+      const MAX_W = 60;
+      const SNAP_W = 18;     // 拖到此百分比以下松手 → 吸附收起
+      const desktopQuery = window.matchMedia("(min-width: 981px)");
+      const usageOverlay = document.getElementById("usage-help-overlay");
+      const fsOverlay = document.getElementById("fullscreen-overlay");
+
+      function isCollapsed() {
+        return shellEl.classList.contains("sidebar-collapsed");
+      }
+      function apply(collapsed) {
+        shellEl.classList.toggle("sidebar-collapsed", collapsed);
+        handle.classList.toggle("is-collapsed", collapsed);  // 收起态才显示边缘把手
+        handle.setAttribute("aria-expanded", String(!collapsed));
+        if (headerBtn) {
+          headerBtn.setAttribute("aria-expanded", String(!collapsed));
+        }
+      }
+      function persist(collapsed) {
+        try { localStorage.setItem(KEY, collapsed ? "1" : "0"); } catch (error) {}
+      }
+      function toggle() {
+        const next = !isCollapsed();
+        apply(next);
+        persist(next);
+      }
+      function currentWidth() {
+        const raw = parseFloat(shellEl.style.getPropertyValue("--sidebar-w"));
+        return isNaN(raw) ? DEFAULT_W : raw;
+      }
+      function setWidth(pct, save) {
+        const w = Math.min(MAX_W, Math.max(MIN_W, pct));
+        shellEl.style.setProperty("--sidebar-w", w + "%");
+        if (save) {
+          try { localStorage.setItem(WIDTH_KEY, String(w)); } catch (error) {}
+        }
+      }
+
+      let savedW = NaN;
+      try { savedW = parseFloat(localStorage.getItem(WIDTH_KEY)); } catch (error) {}
+      if (!isNaN(savedW)) setWidth(savedW, false);
+
+      let initial = false;
+      try { initial = localStorage.getItem(KEY) === "1"; } catch (error) {}
+      apply(initial);  // 手机端 CSS 未启用折叠规则，此 class 无副作用
+
+      handle.addEventListener("click", toggle);
+      if (headerBtn) headerBtn.addEventListener("click", toggle);
+
+      document.addEventListener("keydown", (event) => {
+        // Ctrl/⌘ + B：编辑器通用的侧栏开关，双向切换
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
+            && (event.key === "b" || event.key === "B")) {
+          if (!desktopQuery.matches) return;
+          event.preventDefault();
+          toggle();
+          return;
+        }
+        // Esc：桌面端、侧栏已折叠且无弹层时，一键展开（退出"放大"态）
+        if (event.key !== "Escape" || !desktopQuery.matches || !isCollapsed()) {
+          return;
+        }
+        if ((usageOverlay && !usageOverlay.hidden) || (fsOverlay && !fsOverlay.hidden)) {
+          return;  // 让位给弹层自己的 Esc 关闭逻辑
+        }
+        apply(false);
+        persist(false);
+      });
+
+      if (sash) {
+        let dragging = false;
+        let rawPct = DEFAULT_W;  // 未截断的拖拽值，用于判断是否吸附收起
+
+        function endDrag(event) {
+          if (!dragging) return;
+          dragging = false;
+          sash.classList.remove("is-dragging");
+          shellEl.classList.remove("is-resizing");
+          document.body.style.userSelect = "";
+          try { sash.releasePointerCapture(event.pointerId); } catch (error) {}
+          if (rawPct < SNAP_W) {
+            setWidth(DEFAULT_W, true);  // 吸附收起：宽度复位，留给下次展开
+            apply(true);
+            persist(true);
+            return;
+          }
+          setWidth(rawPct, true);
+        }
+
+        sash.addEventListener("pointerdown", (event) => {
+          if (!desktopQuery.matches || isCollapsed()) return;
+          dragging = true;
+          rawPct = currentWidth();
+          try { sash.setPointerCapture(event.pointerId); } catch (error) {}
+          sash.classList.add("is-dragging");
+          shellEl.classList.add("is-resizing");  // 拖拽期间关掉过渡，保证跟手
+          document.body.style.userSelect = "none";
+          event.preventDefault();
+        });
+        sash.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          const rect = shellEl.getBoundingClientRect();
+          if (!rect.width) return;
+          rawPct = (rect.right - event.clientX) / rect.width * 100;
+          setWidth(rawPct, false);
+        });
+        sash.addEventListener("pointerup", endDrag);
+        sash.addEventListener("pointercancel", endDrag);
+
+        sash.addEventListener("dblclick", () => {
+          setWidth(DEFAULT_W, true);
+          if (isCollapsed()) {
+            apply(false);
+            persist(false);
+          }
+        });
+
+        // 键盘可达：聚焦分隔条后方向键微调（Shift 加大步长），Home 复位
+        sash.addEventListener("keydown", (event) => {
+          const step = event.shiftKey ? 5 : 2;
+          if (event.key === "ArrowLeft") {
+            setWidth(currentWidth() + step, true);  // 分隔条左移 = 侧栏变宽
+          } else if (event.key === "ArrowRight") {
+            setWidth(currentWidth() - step, true);
+          } else if (event.key === "Home") {
+            setWidth(DEFAULT_W, true);
+          } else {
+            return;
+          }
+          event.preventDefault();
+        });
+      }
+
+      // 收起态角标：提示"侧栏里还有 N 条收藏"，避免收起后信息完全失联
+      if (badge && window.GitHubHotFavorites) {
+        window.GitHubHotFavorites.subscribe((list) => {
+          const n = list.length;
+          badge.textContent = n > 99 ? "99+" : String(n);
+          badge.hidden = n === 0;
+        });
+      }
     })();

@@ -53,6 +53,10 @@ _RANK_COMMON_PARAMS = {
     "min_star": {"type": "int", "min": 1, "default": MIN_STAR},
     "growth_calc_days": {"type": "int", "min": 1, "default": None},
     "growth_threshold": {"type": "int", "min": 0, "default": STAR_GROWTH_THRESHOLD},
+    # 确认执行开关：用户明确回复『开始』后由模型置 true，此时按首次回显的参数执行（见 ranking handler）。
+    "confirm": {"type": "bool", "default": False},
+    # 报告开关：默认只在对话里给榜单，用户明确要报告才落 Markdown 文件（见 ranking handler）。
+    "generate_report": {"type": "bool", "default": False},
 }
 
 TOOL_PARAM_SCHEMA.update({
@@ -69,6 +73,8 @@ TOOL_PARAM_SCHEMA.update({
     },
     "keyword_ranking": {
         **_RANK_COMMON_PARAMS,
+        # 关键词榜是细分定向搜索：默认不做「增长突刺」过滤（阈值 0），否则窄方向几乎必空。
+        "growth_threshold": {"type": "int", "min": 0, "default": 0},
         "keywords": {"type": "list_str", "default": None},
         "topic": {"type": "str", "default": None},
         "top_n": {"type": "int", "min": 1, "max": 200, "default": HOT_PROJECT_COUNT},
@@ -116,10 +122,22 @@ _categories_prop = {
 _min_star_prop = {"type": "integer", "description": f"最低 star 门槛，默认{MIN_STAR}"}
 _growth_calc_days_prop = {"type": "integer", "description": "增长统计窗口（天）；不传则综合/关键词榜用 DB 年龄窗口。与创建时间窗口独立。"}
 _growth_threshold_prop = {"type": "integer", "description": f"增长入选阈值，默认{STAR_GROWTH_THRESHOLD}"}
+# 关键词榜专用：默认 0 = 不做增长突刺过滤（细分方向用增长阈值会几乎必空），按增长量降序返回。
+_kw_growth_threshold_prop = {"type": "integer", "description": "增长入选阈值，默认0（关键词榜不做增长突刺过滤，按增长量降序返回；一般无需设置）"}
+_confirm_prop = {
+    "type": "boolean",
+    "description": "仅在用户已明确确认（如回复『开始』『确认』『go』）时置 true；此时按上一轮回显的参数执行，参数无需重复。首次提出请求时不要设或设 false。",
+}
+_generate_report_prop = {
+    "type": "boolean",
+    "description": "是否额外产出一份 Markdown 报告文件，默认 false。仅当用户明确要报告（『生成报告』『出份报告』『存成报告』『发我一份报告』之类）时才置 true；"
+                   "用户只是想看榜单、找项目、问某方向有什么新东西，一律不要设——出报告要为每个项目逐条调模型写介绍，慢得多也贵得多，"
+                   "不出报告同样会把完整榜单返回给你，你直接在回复里讲清楚即可。",
+}
 
 AGENT_TOOL_SCHEMAS = [
     _fn("comprehensive_ranking",
-        "【综合热榜·昂贵】跑完整发现流程(搜索+扫描+Trending→增长→排序→报告)输出综合 Top N。执行前请先回显参数并等用户确认『开始』。",
+        "【综合热榜·昂贵】跑完整发现流程(搜索+扫描+Trending→增长→排序)输出综合 Top N。执行前请先回显参数并等用户确认『开始』。默认不产报告文件，只把榜单返回给你。",
         {
             "categories": _categories_prop,
             "min_star": _min_star_prop,
@@ -127,9 +145,11 @@ AGENT_TOOL_SCHEMAS = [
             "growth_calc_days": _growth_calc_days_prop,
             "growth_threshold": _growth_threshold_prop,
             "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_PROJECT_COUNT}"},
+            "confirm": _confirm_prop,
+            "generate_report": _generate_report_prop,
         }),
     _fn("hot_new_ranking",
-        "【新项目热榜·昂贵】只看近 days_since_created 天内创建的新项目，按增长排序。执行前先回显参数等用户确认『开始』。",
+        "【新项目热榜·昂贵】只看近 days_since_created 天内创建的新项目，按增长排序。执行前先回显参数等用户确认『开始』。默认不产报告文件，只把榜单返回给你。",
         {
             "categories": _categories_prop,
             "min_star": _min_star_prop,
@@ -138,11 +158,13 @@ AGENT_TOOL_SCHEMAS = [
             "growth_calc_days": _growth_calc_days_prop,
             "growth_threshold": _growth_threshold_prop,
             "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_NEW_PROJECT_COUNT}"},
+            "confirm": _confirm_prop,
+            "generate_report": _generate_report_prop,
         }),
     _fn("keyword_ranking",
         "【关键词热榜·昂贵】按关键词搜索→增长→排序（不做星段扫描/Trending）。"
         "挑词前先调 get_keyword_catalog 获取预设分组表：从相关组挑出关键词，并补充未覆盖到的英文搜索词，一起传入 keywords；"
-        "也可用 categories 选整组（无需查表）。执行前先回显参数等用户确认『开始』。",
+        "也可用 categories 选整组（无需查表）。执行前先回显参数等用户确认『开始』。默认不产报告文件，只把榜单返回给你。",
         {
             "keywords": {
                 "type": "array", "items": {"type": "string"},
@@ -155,8 +177,10 @@ AGENT_TOOL_SCHEMAS = [
             "categories": _categories_prop,
             "min_star": _min_star_prop,
             "growth_calc_days": _growth_calc_days_prop,
-            "growth_threshold": _growth_threshold_prop,
+            "growth_threshold": _kw_growth_threshold_prop,
             "top_n": {"type": "integer", "description": f"返回前 N，默认{HOT_PROJECT_COUNT}"},
+            "confirm": _confirm_prop,
+            "generate_report": _generate_report_prop,
         }),
     _fn("repo_growth",
         "【单仓库增长】查单个仓库近期 star 增长。若精确仓库查不到，会返回相似候选供用户选择。",

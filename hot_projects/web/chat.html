@@ -92,14 +92,35 @@
       </footer>
     </section>
 
-    <aside class="report-panel">
-      <div class="panel-tabs" role="tablist">
-        <button type="button" class="panel-tab is-active" id="tab-reports" data-pane="report-list" role="tab" aria-selected="true">报告</button>
-        <button type="button" class="panel-tab" id="tab-fav" data-pane="fav-list" role="tab" aria-selected="false">⭐ 收藏 <strong id="fav-count">0</strong></button>
+    <!-- 分隔线拖拽条（VSCode sash 语义）：拖动调宽、拖过阈值吸附收起、双击复位 -->
+    <div class="sidebar-sash" id="sidebar-sash" role="separator" tabindex="0"
+         aria-orientation="vertical" aria-label="拖动调整侧栏宽度（方向键微调，双击复位）"></div>
+
+    <aside class="report-panel" id="report-panel">
+      <div class="panel-tabs">
+        <div class="panel-tabs__list" role="tablist">
+          <button type="button" class="panel-tab is-active" id="tab-reports" data-pane="report-list" role="tab" aria-selected="true">报告</button>
+          <button type="button" class="panel-tab" id="tab-fav" data-pane="fav-list" role="tab" aria-selected="false">⭐ 收藏 <strong id="fav-count">0</strong></button>
+        </div>
+        <!-- 主开关：放在面板标题栏右端（用户找收起按钮的第一直觉位置） -->
+        <button type="button" class="panel-collapse" id="sidebar-collapse"
+                aria-label="收起报告收藏侧栏" aria-expanded="true" aria-controls="report-panel"
+                title="收起侧栏（Ctrl/⌘ + B）">
+          <span class="panel-collapse__chevron" aria-hidden="true">&rsaquo;</span>
+        </button>
       </div>
       <section class="report-list panel-pane is-active" id="report-list"></section>
       <div class="fav-list panel-pane" id="fav-list"></div>
     </aside>
+
+    <!-- 收起态的展开按钮：仅折叠后出现。刻意放在 .shell 右上角，与标题栏里的
+         收起按钮同尺寸同位置，两态箭头落点一致，不用来回找 -->
+    <button type="button" class="sidebar-handle" id="sidebar-toggle"
+            aria-label="展开报告收藏侧栏" aria-expanded="true" aria-controls="report-panel"
+            title="展开侧栏（Ctrl/⌘ + B，或 Esc）">
+      <span class="sidebar-handle__chevron" aria-hidden="true">&rsaquo;</span>
+      <span class="sidebar-handle__badge" id="sidebar-fav-badge" aria-hidden="true" hidden></span>
+    </button>
   </main>
 
   <div class="usage-help-overlay" id="usage-help-overlay" hidden>

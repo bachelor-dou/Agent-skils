@@ -8,7 +8,12 @@
 import json
 import logging
 
-from ...config import GROWTH_CALC_DAYS, STAR_GROWTH_THRESHOLD, RECENT_GROWTH_DAYS
+from ...config import (
+    GROWTH_CALC_DAYS,
+    STAR_GROWTH_THRESHOLD,
+    RECENT_GROWTH_DAYS,
+    BURST_PROBE_ENABLED,
+)
 from ..basic.scoring import step2_rank_and_select
 from ..basic.report import step3_generate_report
 from ...infra.db import get_db_age_days, save_db_desc_only
@@ -220,7 +225,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     # 按项目缓存在 cache.aux（不随阶段失效）：阈值/top_n 变化时只对新出现的候选发 API。
     recent_probe_count = 0
     boost_applied_count = 0
-    if rank_mode == "comprehensive" and candidates:
+    if BURST_PROBE_ENABLED and rank_mode == "comprehensive" and candidates:
         recent_by_repo = cache.aux.setdefault("recent_growth", {})
         missing = {fn: info for fn, info in candidates.items() if fn not in recent_by_repo}
         if missing:
@@ -315,36 +320,83 @@ def _confirm_sig(mode: str, params: dict) -> str:
     return json.dumps({"mode": mode, **params}, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _format_confirm(mode: str, params: dict) -> str:
+    """把实际生效的参数原样拼成一句确认文案（展示=执行，不经模型转述、不漏参数）。"""
+    label = _MODE_LABEL.get(mode, mode)
+    bits: list[str] = []
+    kws = params.get("keywords")
+    if kws:
+        shown = "、".join(kws[:6]) + ("…" if len(kws) > 6 else "")
+        bits.append(f"关键词 {len(kws)} 个（{shown}）")
+    if params.get("categories"):
+        bits.append("类别：" + "、".join(params["categories"]))
+    if params.get("topic"):
+        bits.append(f"方向：{params['topic']}")
+    if params.get("top_n") is not None:
+        bits.append(f"Top {params['top_n']}")
+    if params.get("min_star") is not None:
+        bits.append(f"最低 star={params['min_star']}")
+    gt = params.get("growth_threshold")
+    if gt is not None:
+        bits.append(f"增长阈值={gt}" + ("（不过滤增长）" if gt == 0 else "（近窗口需涨够该 star 才入选）"))
+    gcd = params.get("growth_calc_days")
+    bits.append(f"增长窗口={gcd}天" if gcd else "增长窗口=默认(按数据库年龄，通常近几天)")
+    if params.get("days_since_created") is not None:
+        bits.append(f"新项目创建窗口={params['days_since_created']}天")
+    if mode != "keyword" and params.get("max_star") is not None:
+        bits.append(f"星段上限={params['max_star']}")
+    bits.append("生成报告文件（较慢，逐个项目写介绍）" if params.get("generate_report")
+                else "不生成报告文件（榜单直接在对话里给）")
+    return (f"将执行【{label}】，参数：" + "；".join(bits)
+            + "。确认无误请回复『开始』；要改参数（如降低阈值、改关键词）直接说。")
+
+
 def make_ranking_handler(mode: str):
     """构造某个榜单模式的 Agent 工具 handler。
 
-    幂等确认守卫:首次调用(或参数变化)返回"请确认参数"并记录签名;
-    用户确认后 LLM 以相同签名再次调用 → 真正执行。榜单缓存挂在会话的 tool_state。
+    确定性确认守卫：首次调用（或参数变化）记录待确认参数并返回"请确认"，由 agent 层直接把
+    _format_confirm 的完整参数回显给用户（不经模型转述）。用户确认后模型带 confirm=true 再次
+    调用 → 按「首次存下的参数」执行（展示=执行，杜绝二次调用时的参数漂移与重复确认）。
+    兼容旧路径：不带 confirm 但以相同签名复调，同样视为确认执行。榜单缓存挂在会话 tool_state。
     """
     label = _MODE_LABEL.get(mode, mode)
 
     def handler(ctx, args: dict) -> dict:
         params = dict(args)
+        confirm = bool(params.pop("confirm", False))
         sig = _confirm_sig(mode, params)
 
-        if ctx.state.pending_confirmation_signature != sig:
+        pending_sig = ctx.state.pending_confirmation_signature
+        stored = ctx.state.tool_state.get("pending_ranking") or {}
+        # 是否为「确认执行」：有待确认项，且（用户明确 confirm / 或以相同签名复调）
+        is_confirm = bool(pending_sig) and (confirm or pending_sig == sig)
+
+        if not is_confirm:
             ctx.state.pending_confirmation_signature = sig
+            ctx.state.tool_state["pending_ranking"] = {"mode": mode, "sig": sig, "params": params}
             return {
                 "needs_confirmation": True,
                 "mode": mode,
                 "params": params,
-                "message": f"将执行【{label}】，参数={params}。确认请回复『开始』。",
+                "message": _format_confirm(mode, params),
             }
+
+        # 执行：优先用「首次确认时存下的参数」，确保与回显完全一致（confirm 复调时模型可能漂移）
+        exec_params = stored["params"] if stored.get("mode") == mode and "params" in stored else params
         ctx.state.pending_confirmation_signature = None
+        ctx.state.tool_state.pop("pending_ranking", None)
+        params = exec_params
 
         cache = ctx.state.tool_state.get("ranking_cache")
         if cache is None:
             cache = RankingCache()
             ctx.state.tool_state["ranking_cache"] = cache
 
+        # 报告是按需产物：默认只回榜单，避免每次找项目都为 Top N 逐个跑 LLM 写介绍
+        do_report = bool(params.pop("generate_report", False))
         result = run_ranking(
             ctx.provider, mode=mode, params=params, db=ctx.db,
-            cache=cache, do_report=True, force_refresh=False,
+            cache=cache, do_report=do_report, force_refresh=False,
             progress_cb=getattr(ctx, "progress_cb", None),
         )
         save_db_desc_only(ctx.db)  # Agent 路径:仅持久化 desc 字段

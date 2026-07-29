@@ -90,6 +90,7 @@ class HotProjectAgent:
                 "tool_calls": tool_calls,
             })
 
+            confirm_msg = None
             for tc in tool_calls:
                 name = tc.get("function", {}).get("name", "")
                 raw = tc.get("function", {}).get("arguments", "{}")
@@ -99,6 +100,14 @@ class HotProjectAgent:
                     "tool_call_id": tc.get("id", ""),
                     "content": _serialize_result(result),
                 })
+                if isinstance(result, dict) and result.get("needs_confirmation") and confirm_msg is None:
+                    confirm_msg = result.get("message") or "请确认参数后回复『开始』。"
+
+            # 昂贵榜单的确认：由服务端把完整生效参数原样回显给用户（不经模型转述、不漏参数），
+            # 短路本轮，等用户回复『开始』。保证"展示=执行"。
+            if confirm_msg is not None:
+                self.state.conversation.append({"role": "assistant", "content": confirm_msg})
+                return confirm_msg
 
         # 命中步数护栏：不再给工具，强制模型基于已有观察给出最终回答，而非死胡同话术。
         return self._finalize_without_tools()

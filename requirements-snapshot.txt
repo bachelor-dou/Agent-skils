@@ -1,0 +1,4 @@
+# 每日 star 快照任务（cron_daily_star_snapshot.py）在 GitHub Actions 里需要的最小依赖。
+# 刻意不含 fastapi/uvicorn 等只有本地 web/Agent 才用到的包，CI 装得越少跑得越快。
+httpx>=0.27.0
+requests>=2.31.0
