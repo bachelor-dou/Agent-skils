@@ -60,15 +60,7 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      - name: 记一下今天的快照采之前在不在
-        id: before
-        run: |
-          if [ -f "hot_project/data/snapshots/$(date -u +%F).json.gz" ]; then
-            echo "existed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "existed=false" >> "$GITHUB_OUTPUT"
-          fi
-
+      # 幂等在脚本里：当天已有快照就秒退、一个请求都不发，所以这一步一天跑 24 次不心疼。
       - name: 发现新仓库 + 采集当天快照
         env:
           # secret 名不能以 GITHUB_ 开头（GitHub 保留前缀），故用 GH_STAR_TOKENS 再映射过来。
