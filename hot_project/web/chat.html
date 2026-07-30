@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes">
+  <title>GitHub Hot Projects</title>
+  <link rel="stylesheet" href="/web/chat.css?v=__ASSET_VER__">
+  <script src="/web/vendor/marked.min.js?v=__ASSET_VER__"></script>
+  <script src="/web/vendor/purify.min.js?v=__ASSET_VER__"></script>
+</head>
+<body>
+  <nav class="mobile-tabs" id="mobile-tabs">
+    <button type="button" class="active" data-tab="chat">💬 对话</button>
+    <button type="button" data-tab="report">📊 报告</button>
+  </nav>
+  <main class="shell">
+    <section class="chat-panel">
+      <header class="hero">
+        <h1>GitHub Hot Projects</h1>
+      </header>
+
+      <section class="status-strip">
+        <div class="status-cluster status-cluster--user">
+          <button
+            type="button"
+            class="status-user-button"
+            id="user-login-button"
+            aria-haspopup="dialog"
+            aria-controls="user-popover"
+            aria-expanded="false"
+          >登录</button>
+          <div class="user-popover" id="user-popover" hidden>
+            <p class="user-popover__hint">输入用户 ID 即可跨设备同步收藏（无需密码）。仅允许大小写字母和数字，3-32 位。</p>
+            <div class="user-popover__row">
+              <input type="text" id="user-id-input" placeholder="仅字母和数字（3-32 位）"
+                     autocomplete="off" spellcheck="false" maxlength="32"
+                     pattern="[A-Za-z0-9]{3,32}">
+              <button type="button" id="user-login-confirm">登录</button>
+            </div>
+            <button type="button" class="user-popover__logout" id="user-logout" hidden>退出当前 ID</button>
+          </div>
+        </div>
+        <span class="status-sep">·</span>
+        <div class="status-cluster">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="status-text" id="transport-status">连接中</span>
+        </div>
+        <span class="status-sep">·</span>
+        <div class="status-cluster status-cluster--report">
+          <span class="status-text">报告 <strong id="report-count">0</strong></span>
+          <button
+            type="button"
+            class="status-session-button"
+            id="end-session-button"
+          >新会话</button>
+          <div class="status-actions">
+            <button
+              type="button"
+              class="status-help-button"
+              id="usage-help-button"
+              aria-label="查看可指定参数说明"
+              aria-haspopup="dialog"
+              aria-controls="usage-help-overlay"
+              aria-expanded="false"
+            >?</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="messages" id="messages"></section>
+
+      <footer class="composer">
+        <div class="input-shell">
+          <textarea id="composer-input" rows="1" placeholder="例如：生成综合热榜 / 前50名 AI Agent 方向 / 增长>=500的新项目"></textarea>
+          <div class="composer-bar">
+          <div class="model-select">
+            <button type="button" class="model-select__btn" id="model-button" aria-haspopup="menu" aria-expanded="false" title="选择模型（主模型 → 子模型）">
+              <span class="model-select__name" id="model-current">模型</span>
+              <span class="model-select__chev" aria-hidden="true">▾</span>
+            </button>
+            <div class="model-select__menu" id="model-menu" role="menu" hidden></div>
+          </div>
+          <!-- 二级子模型菜单：无独立按钮，点主模型行时在其右侧展开；JS 会移到 body 下定位 -->
+          <div class="model-select__menu model-submenu" id="lite-menu" role="menu" hidden></div>
+          <button id="send-button" class="composer-primary-button" type="button" aria-label="发送" title="发送">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M12 19V5M12 5L6 11M12 5L18 11" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          </div>
+        </div>
+      </footer>
+    </section>
+
+    <!-- 分隔线拖拽条（VSCode sash 语义）：拖动调宽、拖过阈值吸附收起、双击复位 -->
+    <div class="sidebar-sash" id="sidebar-sash" role="separator" tabindex="0"
+         aria-orientation="vertical" aria-label="拖动调整侧栏宽度（方向键微调，双击复位）"></div>
+
+    <aside class="report-panel" id="report-panel">
+      <div class="panel-tabs">
+        <div class="panel-tabs__list" role="tablist">
+          <button type="button" class="panel-tab is-active" id="tab-reports" data-pane="report-list" role="tab" aria-selected="true">报告</button>
+          <button type="button" class="panel-tab" id="tab-fav" data-pane="fav-list" role="tab" aria-selected="false">⭐ 收藏 <strong id="fav-count">0</strong></button>
+        </div>
+        <!-- 主开关：放在面板标题栏右端（用户找收起按钮的第一直觉位置） -->
+        <button type="button" class="panel-collapse" id="sidebar-collapse"
+                aria-label="收起报告收藏侧栏" aria-expanded="true" aria-controls="report-panel"
+                title="收起侧栏（Ctrl/⌘ + B）">
+          <span class="panel-collapse__chevron" aria-hidden="true">&rsaquo;</span>
+        </button>
+      </div>
+      <section class="report-list panel-pane is-active" id="report-list"></section>
+      <div class="fav-list panel-pane" id="fav-list"></div>
+    </aside>
+
+    <!-- 收起态的展开按钮：仅折叠后出现。刻意放在 .shell 右上角，与标题栏里的
+         收起按钮同尺寸同位置，两态箭头落点一致，不用来回找 -->
+    <button type="button" class="sidebar-handle" id="sidebar-toggle"
+            aria-label="展开报告收藏侧栏" aria-expanded="true" aria-controls="report-panel"
+            title="展开侧栏（Ctrl/⌘ + B，或 Esc）">
+      <span class="sidebar-handle__chevron" aria-hidden="true">&rsaquo;</span>
+      <span class="sidebar-handle__badge" id="sidebar-fav-badge" aria-hidden="true" hidden></span>
+    </button>
+  </main>
+
+  <div class="usage-help-overlay" id="usage-help-overlay" hidden>
+    <section class="usage-help-card" role="dialog" aria-modal="true" aria-labelledby="usage-help-title">
+      <div class="usage-help-head">
+        <div>
+          <p class="usage-help-eyebrow">使用说明</p>
+          <h2 id="usage-help-title">对话里可以直接指定这些参数</h2>
+        </div>
+        <button type="button" class="usage-help-close" id="usage-help-close">关闭</button>
+      </div>
+      <p class="usage-help-summary">
+        下面这些是当前可识别的常用参数，你可以直接把条件写进一句话里（不用写参数名）。
+      </p>
+      <p class="usage-help-note">
+        增长统计窗口和新项目创建窗口彼此独立，定时更新脚本会全量更新。
+      </p>
+      <div class="usage-help-grid">
+        <article class="usage-help-item">
+          <h3>任务类型</h3>
+          <p>默认：综合榜流程</p>
+          <p>示例：综合热榜 / 新项目热榜 / GitHub Trending / 查单仓库增长</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>增长窗口</h3>
+          <p>默认：7 天</p>
+          <p>示例：近 10 天热榜、近 30 天综合榜</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>新项目窗口</h3>
+          <p>默认：45 天（仅新项目语义生效）</p>
+          <p>示例：30 天内创建的新项目、一个月内创建的新项目榜</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>榜单数量</h3>
+          <p>默认：综合榜 100，新项目榜 20</p>
+          <p>示例：前 20、前 50</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>增长阈值</h3>
+          <p>默认：增长 &gt;= 800</p>
+          <p>示例：增长&gt;=500 的新项目</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>类别</h3>
+          <p>默认：全部类别</p>
+          <p>示例：AI Agent、Database、RAG</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>项目最低 Star</h3>
+          <p>默认：&gt;= 1200（关键词搜索和范围扫描共用）</p>
+          <p>示例：至少 2000 star</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>Star 扫描上限</h3>
+          <p>默认：45000</p>
+          <p>示例：扫描到 20000 star</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>Trending 周期</h3>
+          <p>默认：weekly</p>
+          <p>示例：daily、weekly、monthly</p>
+        </article>
+        <article class="usage-help-item">
+          <h3>多周期汇总</h3>
+          <p>默认：关闭</p>
+          <p>示例：把 daily、weekly、monthly 一起汇总</p>
+        </article>
+      </div>
+      <div class="usage-help-examples">
+        <strong>示例提问</strong>
+        <p>生成前 20 名 AI Agent 新项目榜，近 30 天创建，增长窗口 10 天，增长&gt;=500</p>
+        <p>看看本周 Trending，也把 daily、weekly、monthly 一起汇总</p>
+        <p>综合热榜前 50，按当前数据实时刷新</p>
+      </div>
+    </section>
+  </div>
+
+  <!-- 全屏阅读 overlay -->
+  <div class="fullscreen-overlay" id="fullscreen-overlay" hidden>
+    <header class="fullscreen-header">
+      <button type="button" id="fullscreen-close">&larr; 返回对话</button>
+    </header>
+    <article class="fullscreen-body" id="fullscreen-body"></article>
+  </div>
+
+  <script src="/web/common.js?v=__ASSET_VER__"></script>
+  <script src="/web/user.js?v=__ASSET_VER__"></script>
+  <script src="/web/favorites.js?v=__ASSET_VER__"></script>
+  <script src="/web/chat.js?v=__ASSET_VER__"></script>
+</body>
+</html>

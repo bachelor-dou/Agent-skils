@@ -70,12 +70,19 @@ def test_confirm_true_executes_stored_params_ignoring_drift(monkeypatch):
 
 
 def test_keyword_ranking_growth_threshold_defaults_zero():
+    """关键词榜默认 0（不过滤增长），综合榜继承配置里的出榜阈值。
+
+    综合榜这条断言比的是配置本身而不是字面量 1000：STAR_GROWTH_THRESHOLD 是预期会往上调的
+    旋钮，写死数字会让调阈值时莫名红一个与阈值无关的测试。本测试要守的是"两榜默认值不同"。
+    """
+    from hot_projects.config import STAR_GROWTH_THRESHOLD
     from hot_projects.tools.arg_validator import validate_tool_args_strict
     kw, errs = validate_tool_args_strict("keyword_ranking", {"keywords": ["x"]})
     assert errs == []
-    assert kw["growth_threshold"] == 0             # 关键词榜默认不过滤增长
+    assert kw["growth_threshold"] == 0
     comp, _ = validate_tool_args_strict("comprehensive_ranking", {})
-    assert comp["growth_threshold"] == 1000        # 综合榜保持 1000
+    assert comp["growth_threshold"] == STAR_GROWTH_THRESHOLD
+    assert STAR_GROWTH_THRESHOLD > 0, "综合榜必须真的过滤增长，否则和关键词榜没区别"
 
 
 def test_format_confirm_lists_all_effective_params():

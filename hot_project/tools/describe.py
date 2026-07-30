@@ -1,0 +1,195 @@
+"""项目介绍生成 —— 抓素材 + 写提示词 + 调 LLM。
+
+旧包里这件事做了三遍:`core.describe_project`(单项目、四段式)、
+`report.step3_generate_report`(报告条目、也是四段式)、`add_favorite`(收藏时的一句话)。
+三份各自抓 GitHub 上下文、各自拼提示词、各自从 LLM 响应里取值,于是「README 摘录截多长」
+在三处是三个数,而修其中一处不会影响另外两处。
+
+现在只有一份:素材由 `provider.github.repo.profile` 给,提示词在这里,取值在
+`LLMClient.text`。
+
+**提示词在工具层而不是 infra/llm。** 「用中文、四段式、不许编造」是产品决定,
+换个项目就得重写;而「怎么把消息发出去、某家挂了换哪家」换个项目照样能用。
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+
+from ..infra import llm
+
+logger = logging.getLogger("hot_project")
+
+STANDARD = "standard"
+DETAILED = "detailed"
+
+# 报告里要的四段。顺序即输出顺序,`core.report_parse` 按标题解析回来。
+SECTIONS = ("项目定位与用途", "解决的问题", "使用场景", "技术架构与特性")
+
+README_IN_PROMPT = 3200     # 塞进提示词的 README 上限
+COMMIT_IN_PROMPT = 60       # 每条提交摘要的上限
+_MAX_TOKENS = {STANDARD: 1536, DETAILED: 2048}
+
+_RULES = (
+    "请基于以下已提供信息,用中文总结这个 GitHub 开源项目。\n"
+    "输出要求:\n"
+    "1. 只能基于下方明确提供的信息,不要把项目地址或 README 链接当作已读取内容。\n"
+    "2. 不要补充未在输入中出现、且无法确认的外部知识;信息不足时使用保守表述。\n"
+    "3. 如果输入中包含 README 摘录、发布记录或提交记录,可以引用;若缺失,请明确说明信息不足。\n"
+)
+
+_FORMAT = {
+    DETAILED: (
+        "4. 必须严格输出以下四个字段,每个字段单独成段,字段间用换行分隔:\n"
+        "项目定位与用途:...(100-200字,说明是什么、做什么,简要介绍核心定位)\n"
+        "解决的问题:...(100-200字,聚焦核心痛点,说明为什么需要这个项目)\n"
+        "使用场景:...(100-200字,列举典型应用场景和目标用户)\n"
+        "技术架构与特性:...(100-200字,关键技术栈、架构特点和核心特性)\n"
+        "5. 总长度控制在 400-800 字,信息详实但不冗余。\n"
+        "6. 不要使用列表、不要加 Markdown 标题、字段名后必须换行。\n\n"
+    ),
+    STANDARD: (
+        "4. 必须严格输出以下三个字段,字段名保持原样:\n"
+        "项目定位与用途:...\n解决的问题:...\n使用场景:...\n"
+        "5. 每个字段建议 80-160 字,总长度控制在 260-520 字。\n"
+        "6. 不要使用列表、不要加 Markdown 标题、不要输出字段以外的说明。\n\n"
+    ),
+}
+
+
+def _clip(text: str, limit: int) -> str:
+    clean = (text or "").strip()
+    return clean if len(clean) <= limit else clean[:limit] + "..."
+
+
+def _releases_line(items: list[dict]) -> str:
+    parts = []
+    for item in items[:5]:
+        tag = str(item.get("tag_name") or item.get("name") or "").strip()
+        if not tag:
+            continue
+        state = "/".join(s for s, on in (("prerelease", item.get("prerelease")),
+                                         ("draft", item.get("draft"))) if on)
+        date = str(item.get("published_at") or "")[:10]
+        parts.append(f"{tag}{f'({state})' if state else ''}{f'@{date}' if date else ''}")
+    return "; ".join(parts)
+
+
+def _commits_line(items: list[dict]) -> str:
+    parts = []
+    for item in items[:8]:
+        date = str(item.get("date") or "")[:10]
+        message = _clip(str(item.get("message") or ""), COMMIT_IN_PROMPT)
+        if bit := ":".join(p for p in (date, message) if p):
+            parts.append(bit)
+    return "; ".join(parts)
+
+
+def build_prompt(name: str, facts: dict, level: str = STANDARD) -> str:
+    """把手上的素材拼成提示词。
+
+    `facts` 可以来自 DB(gh_desc / topics / readme_url)、也可以来自实时抓取
+    (readme / releases / commits),两边字段名一致,所以调用方想混就混。
+    """
+    lines = [f"项目名称: {name}", f"项目地址: https://github.com/{name}"]
+    # gh_desc 是 GitHub 原文简介;short_desc 是旧数据的字段名,读时兼容。
+    if desc := (facts.get("gh_desc") or facts.get("short_desc") or ""):
+        lines.append(f"官方简介: {desc}")
+    if topics := facts.get("topics"):
+        lines.append(f"标签: {', '.join(topics)}")
+    if url := facts.get("readme_url"):
+        lines.append(f"README链接(仅供标识,不能视为已读取内容): {url}")
+    if excerpt := facts.get("readme_excerpt"):
+        lines.append(f"README摘录(已读取文本,可能截断): {_clip(str(excerpt), README_IN_PROMPT)}")
+    if line := _releases_line(facts.get("recent_releases") or []):
+        lines.append(f"近期发布节奏: {line}")
+    if line := _commits_line(facts.get("recent_commits") or []):
+        lines.append(f"近期提交线索: {line}")
+
+    return _RULES + _FORMAT.get(level, _FORMAT[STANDARD]) + "\n".join(lines) + "\n"
+
+
+def merge_profile(facts: dict, pack: dict) -> dict:
+    """把实时抓来的资料包并进已有的事实。原地不改,返回新字典。
+
+    `profile` 的键(readme / releases / commits)和提示词认的键
+    (readme_excerpt / recent_releases / recent_commits)不同名,翻译只在这一处。
+    """
+    merged = dict(facts)
+    if text := (pack.get("readme") or {}).get("text"):
+        merged["readme_excerpt"] = text
+    if items := pack.get("releases"):
+        merged["recent_releases"] = items
+    if items := pack.get("commits"):
+        merged["recent_commits"] = items
+    if info := pack.get("info"):
+        merged.setdefault("gh_desc", info.get("description") or "")
+        merged.setdefault("language", info.get("language") or "")
+        merged.setdefault("topics", info.get("topics") or [])
+    return merged
+
+
+def describe(name: str, facts: dict, level: str = STANDARD) -> str:
+    """生成一段中文介绍。LLM 没配、或全部平台失败 → 空串。
+
+    空串是有意的返回值而不是异常:描述是锦上添花,报告少一段介绍照样能出,
+    抛异常会让整份报告因为一个仓库的描述失败而作废。
+    """
+    client = llm.get()
+    if not client.configured():
+        logger.warning("LLM 未配置,跳过描述生成。")
+        return ""
+    text = client.text(build_prompt(name, facts, level), lite=True,
+                       max_tokens=_MAX_TOKENS.get(level, _MAX_TOKENS[STANDARD]),
+                       temperature=0.2, enable_thinking=False)
+    if not text:
+        logger.warning("描述生成失败(所有平台都失败):%s", name)
+    return text
+
+
+_NUMBERED = re.compile(r"(\d+)\.\s*(.+)")
+CONDENSE_MIN_PARSED = 0.5       # 解析出的条数低于这个比例就整批回退
+
+def condense(repos: list[dict], max_chars: int = 70) -> list[str]:
+    """把一批项目的英文简介批量浓缩成中文短句。返回和输入等长。
+
+    一次请求处理整批,而不是一个项目一次:Trending 一次 75 个项目,逐个调用是 75 次
+    往返。代价是解析要靠序号对齐,所以解析不出一半以上就整批回退截断原文
+    —— 半份结果比没有结果更糟,用户看到的是「一部分中文一部分英文」。
+    """
+    if not repos:
+        return []
+    fallback = [(r.get("description") or "")[:max_chars] for r in repos]
+
+    client = llm.get()
+    if not client.configured():
+        return fallback
+
+    listing = "\n".join(
+        f"{i + 1}. {r['full_name']}: {(r.get('description') or '').strip() or '(无描述)'}"
+        for i, r in enumerate(repos)
+    )
+    text = client.text(
+        f"请将以下 {len(repos)} 个 GitHub 项目的描述各浓缩为不超过{max_chars}字的中文简介。\n"
+        f"要求:保留核心功能和用途,去掉修饰语,每行格式为「序号. 浓缩描述」,不要项目名。\n\n"
+        f"{listing}\n",
+        lite=True, max_tokens=2048, temperature=0.1, enable_thinking=False,
+    )
+    if not text:
+        logger.warning("批量浓缩失败,回退截断原文。")
+        return fallback
+
+    out = [""] * len(repos)
+    for line in text.splitlines():
+        if m := _NUMBERED.match(line.strip()):
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(repos):
+                out[idx] = m.group(2).strip()[:max_chars]
+
+    parsed = sum(1 for item in out if item)
+    if parsed < len(repos) * CONDENSE_MIN_PARSED:
+        logger.warning("批量浓缩只解析出 %d/%d 条,整批回退截断。", parsed, len(repos))
+        return fallback
+    logger.info("批量浓缩完成:解析 %d/%d 条,其余回退截断。", parsed, len(repos))
+    return [item or fallback[i] for i, item in enumerate(out)]

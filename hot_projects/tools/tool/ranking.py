@@ -10,13 +10,14 @@ import logging
 
 from ...config import (
     GROWTH_CALC_DAYS,
+    MIN_STAR,
     STAR_GROWTH_THRESHOLD,
     RECENT_GROWTH_DAYS,
-    BURST_PROBE_ENABLED,
 )
 from ..basic.scoring import step2_rank_and_select
 from ..basic.report import step3_generate_report
 from ...infra.db import get_db_age_days, save_db_desc_only
+from ...infra.snapshots import anchor_for_window, load_snapshot, utc_today
 
 logger = logging.getLogger("hot_projects")
 
@@ -64,8 +65,57 @@ def _emit(progress_cb, percent, label: str) -> None:
         logger.debug("progress_cb 异常已忽略", exc_info=True)
 
 
+def _collect_from_snapshot(db, mode, params) -> list[dict] | None:
+    """候选池 = 今天的每日快照，即「DB 宇宙 × 今日 star」。零请求。
+
+    为什么可以不扫：增长现在一律是「当前 star − 锚点快照 star」，而一个不在 DB/快照里的
+    仓库拿不到锚点，增长必然记未决、被 threshold 阶段剔掉——三阶段扫描能扫出的"新仓库"
+    根本没有出榜资格。而每日任务已经用同一个 MIN_STAR 扫过、并为 DB 里每个仓库采了今天的
+    star，所以周报再扫一遍是几十分钟换零个候选，还白担一次限流风险。
+
+    star 取快照而不是 db["projects"][fn]["star"]：DB 的 star 只在周报 seeding 时才刷新，
+    平时是上周的值；而增长的减数（锚点）是快照，被减数也必须是同一条链上的当天快照，
+    否则窗口两端口径不一致。
+
+    刻意不套用 max_star：它是星段扫描的分段上限（避免浪费 Search 页），对读库毫无意义，
+    照搬会把 2 万星以上的 2109 个仓库整批挡在榜外。
+
+    返回 None 表示这条路不成立，调用方回退到 API 收集：
+      - keyword 模式要按关键词/类别搜，DB 里新仓库连 topics/desc 都没存，只能发请求；
+      - min_star 低于 MIN_STAR 时 DB 压根没收那一档，读库会静默少给候选；
+      - 今天的快照还没落盘（每日任务挂了/还没跑）。
+    """
+    if mode == "keyword" or params["min_star"] < MIN_STAR:
+        return None
+    stars = load_snapshot(utc_today())
+    if not stars:
+        logger.warning("今天的每日快照缺失，候选池回退到三阶段 API 收集（会慢几十分钟）。")
+        return None
+
+    projects = db.get("projects", {})
+    min_star = params["min_star"]
+    repos = [
+        {
+            "full_name": fn,
+            "star": star,
+            "_raw": {"created_at": projects.get(fn, {}).get("created_at", "")},
+        }
+        for fn, star in stars.items()
+        if star >= min_star
+    ]
+    logger.info(
+        "候选池取自今日快照: %d 个仓库（快照共 %d 个，star >= %d），零请求。",
+        len(repos), len(stars), min_star,
+    )
+    return repos
+
+
 def _collect(provider, mode, params, progress_cb=None) -> list[dict]:
-    """收集候选：关键词搜索 +（非 keyword 模式）星段扫描 + Trending 补源。"""
+    """收集候选：关键词搜索 +（非 keyword 模式）星段扫描 + Trending 补源。
+
+    榜单侧已改走 _collect_from_snapshot，这里只剩每日发现任务在用（它是唯一还需要
+    真扫一遍 GitHub 的地方）+ 快照缺失时的兜底。
+    """
     repos: list[dict] = []
     seen: set[str] = set()
 
@@ -102,46 +152,41 @@ def _collect(provider, mode, params, progress_cb=None) -> list[dict]:
     return repos
 
 
-def _calc_recent_growth(provider, candidates: dict, db: dict, recent_days: int) -> dict:
-    """对候选池计算"最近 recent_days 天"增长，供打分做爆发加成。
+def _calc_recent_growth(candidates: dict, recent_days: int) -> tuple[dict, int]:
+    """对候选池计算"最近 recent_days 天"增长 = 当前 star − T−recent_days 快照的 star。
 
-    复用 batch_growth（实时 API，force_refresh=False 不写 DB）：候选 refreshed_at 与
-    recent_days 窗口不匹配 → 逐项回退实时二分，得到的就是最近 recent_days 天增长。
+    以前靠实时二分法逐个仓库发 API（上期花了 3 分钟，且 2026-06 后 stargazers 全部 404，
+    结果必然为空）。接入每日快照后变成一次字典查表：零 API、零耗时，而且是真实测得的
+    短窗口速率，不再是把周均速原样折算过来（那样 acceleration 恒为 1，探针纯空转）。
 
-    Returns: {full_name: recent_growth}，仅含成功解析（>=0）的项目。
+    和主窗口增长用同一种口径（当前 star − 锚点快照 star），所以两者的比值有意义。
+
+    Returns: ({full_name: recent_growth}, 锚点的实际天数)。实际天数必须回传给打分：
+             漏采时锚点会顺延，5 天的增量除以请求的 3 天会让速率虚高 67%，
+             而主窗口那侧是修正过的，两端口径不一致会凭空造出"爆发"。
+             缺快照时返回 ({}, recent_days) —— 探针不加成即可，绝不能让出榜失败。
     """
     if not candidates:
-        return {}
-    cand_repos = [
-        {
-            "full_name": fn,
-            "star": info.get("star", 0),
-            "_raw": {"created_at": info.get("created_at", "")},
-        }
-        for fn, info in candidates.items()
-    ]
-    # 这趟是"最近窗口"副计算：把 hot_projects 的 INFO 噪声（批量增长/[GROWTH] 逐条）压到
-    # WARNING，避免和主 7 天增长的日志混淆；调用方会打印清晰的探针起止行。
-    growth_logger = logging.getLogger("hot_projects")
-    prev_level = growth_logger.level
-    growth_logger.setLevel(logging.WARNING)
-    try:
-        res = provider.batch_growth(
-            cand_repos, db,
-            growth_threshold=0,
-            growth_calc_days=recent_days,
-            window_specified=True,
-            force_refresh=False,
-            candidate_log_threshold=10 ** 9,  # 抑制 [OK] 候选 日志
-        )
-    finally:
-        growth_logger.setLevel(prev_level)
+        return {}, recent_days
+    anchor = anchor_for_window(recent_days)
+    if anchor is None:
+        logger.info("没有 T−%s 天附近的快照，本轮跳过爆发加成。", recent_days)
+        return {}, recent_days
+
     out: dict[str, int] = {}
-    for fn, info in res.get("candidates", {}).items():
-        g = info.get("growth")
-        if isinstance(g, int) and g >= 0:
-            out[fn] = g
-    return out
+    for fn, info in candidates.items():
+        base = anchor.stars.get(fn)
+        star = info.get("star")
+        # 新收进 DB 的仓库在锚点那天还不存在，查不到就跳过（不猜 0，否则增长会等于总 star）
+        if isinstance(base, int) and isinstance(star, int) and star - base >= 0:
+            out[fn] = star - base
+    if anchor.window_days != recent_days:
+        logger.warning(
+            "爆发探针锚点顺延到 %s：实际 %d 天而非请求的 %d 天，本轮按实际天数折算速率。",
+            anchor.day, anchor.window_days, recent_days,
+        )
+    logger.info("爆发探针锚点 %s：%d/%d 个候选可算。", anchor.day, len(out), len(candidates))
+    return out, anchor.window_days
 
 
 def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
@@ -164,7 +209,8 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     }
     repos = cache.get("collect", collect_sig)
     if repos is None:
-        repos = _collect(provider, mode, params, progress_cb=progress_cb)
+        repos = (_collect_from_snapshot(db, mode, params)
+                 or _collect(provider, mode, params, progress_cb=progress_cb))
         cache.set("collect", collect_sig, repos)
     _emit(progress_cb, 30, f"候选收集完成（{len(repos)} 个）")
 
@@ -176,8 +222,8 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         if age and age > 0:
             # 未指定窗口：用 DB 年龄当窗口以复用 DB 差值，封顶在默认窗口 GROWTH_CALC_DAYS。
             # cron 每 7 天跑，DB 年龄基本 ≤7；偶尔 >7 则退回默认 7——此时各项目 refreshed_at
-            # 比窗口旧出超过 5h 容差，逐项匹配会自动失败、回退实时（DB 实质已过期）。
-            # 不再依赖静态 DATA_EXPIRE_DAYS 驱动的 db["valid"]。
+            # 比窗口旧出超过 5h 容差，逐项匹配会自动失败、记未决（没有实时兜底了）。
+            # 有效性是逐项按 refreshed_at 判的，不看任何全局开关。
             growth_calc_days = min(age, GROWTH_CALC_DAYS)
     effective_window = growth_calc_days or GROWTH_CALC_DAYS
     days_since = params.get("days_since_created")
@@ -222,26 +268,31 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
     rank_mode = "hot_new" if mode == "hot_new" else "comprehensive"
 
     # ── 3.5) recent_growth：候选池最近 K 天增长，给打分做"最近爆发"加成（仅综合/关键词榜）──
-    # 按项目缓存在 cache.aux（不随阶段失效）：阈值/top_n 变化时只对新出现的候选发 API。
+    # 按项目缓存在 cache.aux（不随阶段失效）：阈值/top_n 变化时只对新出现的候选查表。
     recent_probe_count = 0
     boost_applied_count = 0
-    if BURST_PROBE_ENABLED and rank_mode == "comprehensive" and candidates:
+    # 探针的实际窗口（锚点顺延时会大于 RECENT_GROWTH_DAYS）。和 recent_growth 一起缓存：
+    # 值和它的口径必须同生同死，否则复用缓存时会拿旧增量配新天数。
+    recent_window = cache.aux.get("recent_growth_window", RECENT_GROWTH_DAYS)
+    if rank_mode == "comprehensive" and candidates:
         recent_by_repo = cache.aux.setdefault("recent_growth", {})
         missing = {fn: info for fn, info in candidates.items() if fn not in recent_by_repo}
         if missing:
             _emit(progress_cb, 70, f"最近 {RECENT_GROWTH_DAYS} 天爆发探针（{len(missing)} 个）")
-            logger.info("最近爆发探针: 对 %s 个达标候选实时计算近 %s 天增长…", len(missing), RECENT_GROWTH_DAYS)
-            recent_by_repo.update(_calc_recent_growth(provider, missing, db, RECENT_GROWTH_DAYS))
+            probed, recent_window = _calc_recent_growth(missing, RECENT_GROWTH_DAYS)
+            recent_by_repo.update(probed)
+            cache.aux["recent_growth_window"] = recent_window
         for fn, info in candidates.items():
             if fn in recent_by_repo:
                 info["recent_growth"] = recent_by_repo[fn]
-        # 爆发加成生效数：近 K 天速率 > 整窗平均速率（acceleration > 1）
+        # 爆发加成生效数：近 K 天速率 > 整窗平均速率（acceleration > 1）。
+        # 两个分母都必须是实际窗口，和 _burst_boost 用的一致，否则统计数和打分对不上。
         recent_probe_count = sum(1 for info in candidates.values() if "recent_growth" in info)
         if effective_window > 0:
             for info in candidates.values():
                 rg = info.get("recent_growth")
                 g = info.get("growth", 0)
-                if rg is not None and g > 0 and (rg / RECENT_GROWTH_DAYS) > (g / effective_window):
+                if rg is not None and g > 0 and (rg / recent_window) > (g / effective_window):
                     boost_applied_count += 1
         logger.info(
             "最近爆发探针完成: %s 个候选，爆发加成生效 %s 个。",
@@ -249,7 +300,8 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         )
 
     # ── 4) rank（廉价）──
-    rank_sig = {**thr_sig, "rank_mode": rank_mode, "top_n": params.get("top_n")}
+    rank_sig = {**thr_sig, "rank_mode": rank_mode, "top_n": params.get("top_n"),
+                "recent_window": recent_window}
     ranked = cache.get("rank", rank_sig)
     if ranked is None:
         ordered = step2_rank_and_select(
@@ -257,6 +309,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
             days_since_created=days_since,
             prefiltered_days_since_created=days_since,  # 隐藏行为#3：预筛窗口透传
             growth_calc_days=effective_window,
+            recent_growth_days=recent_window,
         )
         top_n = params.get("top_n")
         ranked = ordered[:top_n] if top_n else ordered
@@ -279,7 +332,7 @@ def run_ranking(provider, mode, params, db, cache: RankingCache | None = None,
         "funnel": {
             "collected": collected_count,
             "db_diff": growth.get("db_diff_count", 0),
-            "realtime": growth.get("realtime_count", 0),
+            "unresolved": growth.get("unresolved_count", 0),
             "growth_pool": growth_candidates_count,
             "qualified": len(candidates),
             "recent_probe": recent_probe_count,
@@ -359,8 +412,6 @@ def make_ranking_handler(mode: str):
     调用 → 按「首次存下的参数」执行（展示=执行，杜绝二次调用时的参数漂移与重复确认）。
     兼容旧路径：不带 confirm 但以相同签名复调，同样视为确认执行。榜单缓存挂在会话 tool_state。
     """
-    label = _MODE_LABEL.get(mode, mode)
-
     def handler(ctx, args: dict) -> dict:
         params = dict(args)
         confirm = bool(params.pop("confirm", False))

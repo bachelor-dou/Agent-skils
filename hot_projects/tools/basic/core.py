@@ -19,22 +19,25 @@ import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ...config import (
     MIN_STAR,
     MAX_STAR,
     SEARCH_KEYWORDS,
-    SEARCH_REQUEST_INTERVAL,
     STAR_GROWTH_THRESHOLD,
     GROWTH_CALC_DAYS,
     MAX_DYNAMIC_SEARCH_KEYWORDS,
-    PAGE_COMPENSATION_ROUNDS,
-    PAGE_COMPENSATION_MAX_WAIT,
 )
 from ...infra.db import update_db_project, get_db_age_days
+from ...infra.snapshots import (
+    SNAPSHOT_ANCHOR_TOLERANCE_DAYS,
+    anchor_for_window,
+    utc_today,
+)
 from ...datasource.github.token_pool import AsyncTokenPool, GitHubTokenPool
 from ...datasource.github.api import (
+    SEARCH_REQUEST_INTERVAL,
     auto_split_star_range,
     build_github_async_client,
     fetch_repo_info,
@@ -43,13 +46,8 @@ from ...datasource.github.api import (
     fetch_repo_recent_releases,
     search_github_repos,
 )
-from ...datasource.github.growth_estimator import (
-    GROWTH_ESTIMATION_UNRESOLVED,
-    estimate_star_growth_binary,
-)
 from ...infra.llm import batch_condense_descriptions, call_llm_describe
 from ..arg_validator import validate_tool_args
-from .scoring import step2_rank_and_select
 from ...infra.concurrency import (
     AsyncTaskDispatcher,
     KeywordSearchTask,
@@ -57,7 +55,7 @@ from ...infra.concurrency import (
     TrendingPeriodTask,
     _remove_checkpoint,
     _save_checkpoint,
-    _submit_growth_tasks,
+    _resolve_growth,
 )
 
 logger = logging.getLogger("hot_projects")
@@ -103,6 +101,14 @@ def _resolve_dispatcher_token_pool(token_mgr: GitHubTokenPool) -> AsyncTokenPool
     return AsyncTokenPool(list(getattr(token_mgr, "tokens", [])))
 
 
+PAGE_COMPENSATION_ROUNDS = 3          # 失败页最多补偿轮数（1 轮时限流期会残留几十页）
+PAGE_COMPENSATION_MAX_WAIT = 150.0    # 每轮补偿前等 token 冷却的上限（秒）
+
+# 增长"未决"哨兵：缺这个仓库的历史快照，算不出窗口增长。区别于 -1（出错）和 0（真没涨）：
+# 未决的仓库不写 DB、不进候选池，也不当成 0 增长参与排序——否则新接入的仓库会被判死。
+GROWTH_ESTIMATION_UNRESOLVED = -2
+
+
 async def _compensate_failed_pages(
     dispatcher,
     token_pool: AsyncTokenPool,
@@ -111,7 +117,7 @@ async def _compensate_failed_pages(
     format_failure,
     label: str,
 ) -> None:
-    """重跑失败页，每轮开跑前先等 token 脱离限流冷却。
+    """重跑关键词搜索/星段扫描的失败页，每轮开跑前先等 token 脱离限流冷却。
 
     只补偿一轮、且紧接着在冷却期内重跑时，任务一命中限流就把剩余页整批丢回失败集，
     补偿等于白跑（2026-07-22/29 两期各残留 80/74 个失败页，约 1800 个仓库没被收集）。
@@ -172,16 +178,6 @@ def _run_coroutine_sync(coro):
         raise error["value"]
 
     return result.get("value")
-
-
-class _GrowthSubmitCollector:
-    """给 _submit_growth_tasks 用的适配器：先收集任务，再交给异步调度器提交。"""
-
-    def __init__(self) -> None:
-        self.tasks: list = []
-
-    def submit(self, task) -> None:
-        self.tasks.append(task)
 
 
 def trending_repo_to_search_repo(repo: dict) -> dict:
@@ -515,7 +511,8 @@ def check_repo_growth(
     """
     Tool 3: 查询单个仓库近期 star 增长，实时获取项目详情并生成 LLM 描述。
 
-    增长计算始终走实时二分法/采样外推，不走 DB 差值法。
+    star 数实时取，增长靠每日快照减法：当前 star − T−N 那天快照里的 star。
+    快照里没有这个仓库（刚建、或 star 没到每日发现门槛）→ 增长未决，如实报未决。
     DB 仅用于读取已有描述缓存和补充静态元数据。
 
     Args:
@@ -549,25 +546,29 @@ def check_repo_growth(
 
     current_star = repo_item.get("stargazers_count", 0)
 
-    growth = estimate_star_growth_binary(
-        token_mgr,
-        owner,
-        repo_name,
-        current_star,
-        token_idx=0,
-        growth_calc_days=growth_calc_days,
-    )
-    if growth_calc_days != GROWTH_CALC_DAYS:
-        method = f"自定义{growth_calc_days}天窗口，二分法/采样外推"
+    # 增长 = 当前 star − T−N 那天快照里的 star。找不到锚点就如实报未决，
+    # 不再回退任何实时估算：stargazers 列表 2026-06-30 起对他人仓库一律 404。
+    target_day = utc_today() - timedelta(days=growth_calc_days)
+    anchor = anchor_for_window(growth_calc_days)
+    anchor_star = anchor.stars.get(repo) if anchor else None
+
+    if anchor_star is None:
+        growth = GROWTH_ESTIMATION_UNRESOLVED
+        method = "每日快照减法(未决)"
     else:
-        method = "二分法/采样外推"
+        # 锚点可能顺延一两天（漏采），按实际天数报口径，否则速率会被算虚高。
+        growth_calc_days = anchor.window_days
+        growth = current_star - anchor_star
+        method = f"每日快照减法（{anchor.day} → 今天，{growth_calc_days} 天）"
 
     if growth == GROWTH_ESTIMATION_UNRESOLVED:
         growth_value = None
-        growth_status = "sampling_unresolved"
+        growth_status = "snapshot_unresolved"
         meets_threshold = False
-        method = f"{method}(未决)"
-        growth_warning = "采样数据不足，当前未返回可靠增长估值；本轮结果未写入批处理 checkpoint/DB。"
+        growth_warning = (
+            f"缺少 {target_day} 前后 {SNAPSHOT_ANCHOR_TOLERANCE_DAYS} 天内的每日快照，"
+            "或该仓库当时还未进入快照范围（新建 / star 未达每日发现门槛），无法算出窗口增长。"
+        )
     else:
         growth_value = growth
         growth_status = "ok"
@@ -615,14 +616,14 @@ def batch_check_growth(
     """
     Tool 4: 批量计算仓库增长并筛选候选。
 
-    使用 AsyncTaskDispatcher + CalcGrowthTask 并行计算。
+    全程零请求：增长由每日快照减法/DB 差值算出（见 _resolve_growth）。
     当 days_since_created 指定时，先按创建时间筛选新项目，只对新项目计算增长。
 
     增长计算策略：
-    - 综合榜：未指定窗口用DB年龄窗口+DB差值；指定窗口匹配DB用差值；不匹配用实时
-    - 新项目榜：始终实时计算（因为新项目DB无历史数据）
-    - force_refresh=True（仅定时脚本）：刷新DB快照 + 启用 checkpoint；
-      窗口匹配的项目仍走 DB 差值（并非全局强制实时）
+    - 优先每日快照锚点（T−N 那天的 star），全部仓库共用同一锚点
+    - 退而用 DB 差值/窗口内新建/按快照年龄折算
+    - 四条路都不成立 → 记未决，不进候选池（不当成 0 增长）
+    - force_refresh=True（仅定时脚本）：刷新DB快照 + 启用 checkpoint
 
     DB写入权限（can_write_db）：
     - 定时脚本 force_refresh=True → 允许刷新DB快照（seeding）
@@ -657,10 +658,9 @@ def batch_check_growth(
     # force_refresh 不在 schema 中，由定时脚本内部传递，跳过验证
     window_specified = bool(window_specified)
 
-    # 新项目榜始终实时计算；综合榜按「项目级差值判定」逐项决定走差值还是实时，
-    # 不再被 force_refresh 全局强制实时（定时任务也可对匹配项目走差值，详见 _submit_growth_tasks）。
+    # 新项目榜与综合榜走同一套本地定案（详见 _resolve_growth_without_timestamps 的四条路）；
+    # is_hot_new 只影响「未指定窗口时是否自动取 DB 年龄」和 checkpoint 是否启用。
     is_hot_new = days_since_created is not None
-    use_realtime_growth = is_hot_new
 
     # DB写入权限：只有定时刷新模式（force_refresh）才写 DB 快照；Agent/其他通道一律不写。
     can_write_db = force_refresh
@@ -767,7 +767,6 @@ def batch_check_growth(
     candidate_map: dict[str, dict] = {}
     growth_ctx = {
         "checkpoint": None,
-        "pending_created_at": {},
         "db_projects": db.get("projects", {}),
         "candidate_map": candidate_map,
         "growth_threshold": growth_threshold,
@@ -776,52 +775,20 @@ def batch_check_growth(
         "candidate_log_threshold": (
             candidate_log_threshold if candidate_log_threshold is not None else growth_threshold
         ),
-        "use_realtime_growth": use_realtime_growth,
-        "can_write_db": can_write_db,
         "window_specified": window_specified,
         "growth_calc_days": growth_calc_days,
         "is_hot_new": is_hot_new,
         "prev_snapshot": prev_snapshot,
         # checkpoint 仅用于定时长跑（force_refresh）断点续传；Agent 不碰 checkpoint 文件。
         "use_checkpoint": can_write_db and not is_hot_new,
-        "unresolved_count": [0],
         "checkpoint_dirty": [False],
-        "completed_since_save": [0],
     }
 
-    async def _run_growth_tasks() -> None:
-        dispatcher = AsyncTaskDispatcher(
-            token_pool=_resolve_dispatcher_token_pool(token_mgr),
-            worker_count=_resolve_async_worker_count(token_mgr),
-        )
-        await dispatcher.start()
-        try:
-            submit_collector = _GrowthSubmitCollector()
-            checkpoint = _submit_growth_tasks(
-                submit_collector, token_mgr, raw_repos, db, candidate_map, growth_ctx
-            )
-
-            if submit_collector.tasks:
-                async with build_github_async_client(timeout_seconds=60.0) as async_client:
-                    for task in submit_collector.tasks:
-                        if hasattr(task, "_async_http_client"):
-                            task._async_http_client = async_client
-                        await dispatcher.submit(task)
-
-                    await dispatcher.wait_all_done()
-                    await dispatcher.drain_results()
-            else:
-                await dispatcher.wait_all_done()
-                await dispatcher.drain_results()
-
-            if growth_ctx["checkpoint_dirty"][0]:
-                _save_checkpoint(checkpoint)
-
-            _remove_checkpoint()
-        finally:
-            await dispatcher.shutdown()
-
-    _run_coroutine_sync(_run_growth_tasks())
+    # 增长全靠快照/DB 算术定案，没有请求可发——不再起 AsyncTaskDispatcher。
+    checkpoint = _resolve_growth(raw_repos, db, candidate_map, growth_ctx)
+    if growth_ctx["checkpoint_dirty"][0]:
+        _save_checkpoint(checkpoint)
+    _remove_checkpoint()
 
     db_updated = bool(can_write_db)
     effective_time_window = growth_ctx.get("effective_growth_calc_days", growth_calc_days)
@@ -831,14 +798,12 @@ def batch_check_growth(
         "total_checked": len(raw_repos),
         "total_input": len(repos),
         "candidates_count": len(candidate_map),
-        "unresolved_sampling_count": growth_ctx["unresolved_count"][0],
+        "unresolved_count": growth_ctx.get("unresolved_count", 0),
         "skipped_by_creation_time": skipped_count,
         "threshold": growth_threshold,
-        "use_realtime_growth": use_realtime_growth,
         "db_updated": db_updated,
         "seeded_snapshot_count": seeded_count,
         "db_diff_count": growth_ctx.get("db_diff_count", 0),
-        "realtime_count": growth_ctx.get("realtime_count", 0),
         "resumed_count": growth_ctx.get("resumed_count", 0),
         "growth_calc_days": effective_time_window,
         "requested_growth_calc_days": growth_calc_days,
@@ -1076,7 +1041,6 @@ def fetch_trending(
             for r in repos
         ]
         # 用 LLM 批量浓缩描述
-        from ...infra.llm import batch_condense_descriptions
         condensed = batch_condense_descriptions(repos, max_chars=70)
         for i, r in enumerate(display_repos):
             r["description"] = condensed[i]
@@ -1093,7 +1057,6 @@ def fetch_trending(
         repos = fetch_trending(since=trending_range)
 
         # 用 LLM 批量浓缩描述
-        from ...infra.llm import batch_condense_descriptions
         condensed = batch_condense_descriptions(repos, max_chars=70)
 
         growth_field = period_label.get(trending_range, "增长")

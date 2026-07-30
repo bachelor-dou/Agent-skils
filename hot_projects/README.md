@@ -74,15 +74,20 @@ vllm 怎么样                       → 名字不全/拼错会返回相似候�
 
 | 参数 | 默认 | 含义 |
 |------|-----:|------|
-| `MIN_STAR` | 1200 | 最低 star 门槛 |
-| `MAX_STAR` | 45000 | 星段扫描上限 |
-| `STAR_GROWTH_THRESHOLD` | 800 | 增长入选阈值 |
+| `MIN_STAR` | 500 | 最低 star 门槛 = 入库宽度 ** |
+| `MAX_STAR` | 100000 | 星段扫描上限（仅每日发现阶段用）|
+| `STAR_GROWTH_THRESHOLD` | 1000 | 增长入选阈值 = 出榜的唯一闸门 |
 | `GROWTH_CALC_DAYS` | 7 | 增长统计窗口（天）* |
 | `DAYS_SINCE_CREATED` | 45 | 新项目判定窗口（天） |
 | `HOT_PROJECT_COUNT` | 100 | 综合/关键词榜 Top N |
-| `HOT_NEW_PROJECT_COUNT` | 20 | 新项目榜 Top N |
+| `HOT_NEW_PROJECT_COUNT` | 13 | 新项目榜 Top N |
 
 \* 综合榜/关键词榜未指定窗口时：DB 有效则用「DB 距今天数」，否则回退 7 天。
+
+\*\* 一个数三个身份：每日任务收进 DB 的下沿、榜单候选池的下界（候选池就是 DB）、
+Agent 工具 min_star 的默认值。它只决定「哪些仓库被观测」，不决定「哪些仓库出榜」——
+后者由 `STAR_GROWTH_THRESHOLD`（窗口内涨幅）独立控制。两个旋钮互不影响：
+调低入库宽度不会放水榜单，调高增长阈值也不必回头动它。
 
 ## 6. 输出与日志
 
@@ -95,7 +100,7 @@ vllm 怎么样                       → 名字不全/拼错会返回相似候�
 | CLI / Web 日志 | `hot_projects/logs/cli-YYYY-MM-DD.log` / `web.log` |
 
 定时任务主日志默认保留阶段摘要、候选入选、每个项目最终增长结果、报告和 DB 更新统计；
-逐关键词搜索、星段细分、逐仓库 stargazers 查询开始等细节写入同日期 debug 日志。
+逐关键词搜索、星段细分、逐仓库增长定案来源等细节写入同日期 debug 日志。
 
 ## 7. 项目结构
 

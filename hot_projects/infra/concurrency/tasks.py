@@ -1,10 +1,10 @@
 """
 Task 子类定义
 ==============
-定义搜索 / 扫描 / 增长计算相关的 Task 子类。
+定义搜索 / 扫描 / Trending 相关的 Task 子类，即所有需要发 HTTP 请求的并行工作。
 
 Task 子类（继承 task_base.Task）由 tools/basic/core.py 中的能力函数创建并提交到 AsyncTaskDispatcher。
-辅助函数（checkpoint/批量提交等）已拆分到 task_help.py。
+增长计算不在此列：它是纯本地算术（快照减法 / DB 差值），见 task_help._resolve_growth。
 """
 
 import logging
@@ -12,35 +12,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...config import (
-    MIN_STAR,
-    SEARCH_REQUEST_INTERVAL,
-    STAR_GROWTH_THRESHOLD,
-    GROWTH_CALC_DAYS,
-)
-from ..db import (
-    update_db_project,
-)
+from ...config import MIN_STAR
 from ..exceptions import RateLimitError, TokenInvalidError
-from ...datasource.github.api import search_github_repos, async_search_github_repos
+from ...datasource.github.api import (
+    SEARCH_REQUEST_INTERVAL,
+    search_github_repos,
+    async_search_github_repos,
+)
 from ...datasource.github.trending import fetch_trending
-from ...datasource.github.growth_estimator import (
-    GROWTH_ESTIMATION_UNRESOLVED,
-    estimate_star_growth_binary,
-    estimate_star_growth_binary_async,
-)
 from .task_base import Task
-from .task_help import (
-    _upsert_candidate,
-    _load_checkpoint,
-    _save_checkpoint,
-    _remove_checkpoint,
-    _submit_growth_tasks,
-)
 
 logger = logging.getLogger("hot_projects")
-
-CHECKPOINT_BATCH_SIZE = 10  # checkpoint 批量落盘阈值
 
 
 def _remaining_pages_from(pages: list[int], current_page: int) -> list[int]:
@@ -475,133 +457,3 @@ class TrendingPeriodTask(Task):
         return f"TrendingPeriod({self.period})"
 
 
-@dataclass
-class CalcGrowthTask(Task):
-    """
-    增长计算任务：计算单个仓库的窗口期 star 增长。
-
-    _ctx 字典由调用方提供，包含：
-      checkpoint, pending_created_at, db_projects, candidate_map,
-      checkpoint_dirty (list[bool]), completed_since_save (list[int])
-    """
-
-    needs_github_token: bool = True  # A模式: True（任务级持有）; B模式: 改回 False（请求级借还）
-    full_name: str = ""
-    current_star: int = 0
-    repo_item: dict = field(default_factory=dict)
-    _async_http_client: Any = field(default=None, repr=False)
-    _ctx: dict = field(default=None, repr=False)
-
-    def execute(self, token_idx: int | None) -> tuple[str, int, int]:
-        parts = self.full_name.split("/", 1)
-        if len(parts) != 2:
-            return self.full_name, -1, self.current_star
-        owner, repo_name = parts
-        logger.debug(
-            f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
-        )
-        growth_calc_days = GROWTH_CALC_DAYS
-        if self._ctx is not None:
-            growth_calc_days = self._ctx.get("growth_calc_days", GROWTH_CALC_DAYS)
-        growth = estimate_star_growth_binary(
-            self._token_mgr, owner, repo_name, self.current_star,
-            token_idx=token_idx,
-            growth_calc_days=growth_calc_days,
-        )
-        if growth >= 0 and growth > self.current_star:
-            growth = self.current_star
-        return self.full_name, growth, self.current_star
-
-    async def execute_async(self, token_idx: int | None) -> tuple[str, int, int]:
-        parts = self.full_name.split("/", 1)
-        if len(parts) != 2:
-            return self.full_name, -1, self.current_star
-        owner, repo_name = parts
-        logger.debug(
-            f"  [SEARCH] stargazers 查询: {self.full_name} (star={self.current_star})"
-        )
-        growth_calc_days = GROWTH_CALC_DAYS
-        if self._ctx is not None:
-            growth_calc_days = self._ctx.get("growth_calc_days", GROWTH_CALC_DAYS)
-        # ── A模式（当前启用）：任务级 token 持有，token_idx 由 worker 分配，整个任务期间持有同一 token ──
-        growth = await estimate_star_growth_binary_async(
-            self._token_mgr,
-            owner,
-            repo_name,
-            self.current_star,
-            token_idx=token_idx,
-            growth_calc_days=growth_calc_days,
-            client=self._async_http_client,
-        )
-        # ── B模式（已禁用）：请求级借还，token_idx 置为 None，由增长链路内部的异步 helper 自行管理 token ──
-        # growth = await estimate_star_growth_binary_async(
-        #     self._token_mgr,
-        #     owner,
-        #     repo_name,
-        #     self.current_star,
-        #     token_idx=None,
-        #     growth_calc_days=growth_calc_days,
-        #     client=self._async_http_client,
-        # )
-        if growth >= 0 and growth > self.current_star:
-            growth = self.current_star
-        return self.full_name, growth, self.current_star
-
-    def idempotency_key(self) -> str:
-        return f"calc-growth:{self.full_name}"
-
-    def on_result(self, result: tuple[str, int, int]) -> None:
-        if self._ctx is None:
-            return
-        checkpoint = self._ctx["checkpoint"]
-        db_projects = self._ctx["db_projects"]
-        candidate_map = self._ctx["candidate_map"]
-        pending_created_at = self._ctx["pending_created_at"]
-        growth_threshold = self._ctx.get("growth_threshold", STAR_GROWTH_THRESHOLD)
-        log_threshold = self._ctx.get("candidate_log_threshold", growth_threshold)
-        use_checkpoint = self._ctx.get("use_checkpoint", True)
-        can_write_db = self._ctx.get("can_write_db", False)
-
-        _, growth, current_star = result
-        created_at = pending_created_at.get(self.full_name, "")
-
-        if growth == GROWTH_ESTIMATION_UNRESOLVED:
-            logger.warning(
-                f"  增长估算未决: {self.full_name}，"
-                "采样数据不足，标记为 unresolved 写入 checkpoint。"
-            )
-            unresolved_count = self._ctx.get("unresolved_count")
-            if unresolved_count is not None:
-                unresolved_count[0] += 1
-            # 写入 checkpoint 标记 unresolved 状态，下次运行跳过而非重复估算
-            if use_checkpoint:
-                checkpoint[self.full_name] = {"growth": "unresolved", "star": current_star}
-                self._ctx["checkpoint_dirty"][0] = True
-            return
-
-        if use_checkpoint:
-            checkpoint[self.full_name] = {"growth": growth, "star": current_star}
-            self._ctx["checkpoint_dirty"][0] = True
-            self._ctx["completed_since_save"][0] += 1
-
-        if growth >= 0:
-            if can_write_db:
-                update_db_project(db_projects, self.full_name, current_star, self.repo_item)
-            if growth >= growth_threshold:
-                _upsert_candidate(candidate_map, self.full_name, growth, current_star, created_at,
-                                  log_threshold=log_threshold)
-
-        if use_checkpoint and self._ctx["completed_since_save"][0] >= CHECKPOINT_BATCH_SIZE:
-            _save_checkpoint(checkpoint)
-            self._ctx["checkpoint_dirty"][0] = False
-            self._ctx["completed_since_save"][0] = 0
-
-    def on_error(self, error: Exception) -> None:
-        if self._ctx is None:
-            return
-        logger.error(f"  增长计算异常: {self.full_name}, {error}")
-        # 不把失败写入 checkpoint：否则续传会把 growth=-1 当成“已完成”而永久跳过该仓库。
-        # 不记录即让下一轮重新计算（瞬时故障应可重试）；真正“采样数据不足”才用 unresolved 标记。
-
-    def __str__(self) -> str:
-        return f"CalcGrowth({self.full_name})"

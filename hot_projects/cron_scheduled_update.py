@@ -39,7 +39,6 @@ from hot_projects.config import (
     GROWTH_CALC_DAYS,
     MIN_STAR,
     MAX_STAR,
-    BURST_PROBE_ENABLED,
 )
 from hot_projects.infra.db import load_db, save_db
 from hot_projects.datasource.github.token_pool import GitHubTokenPool
@@ -117,7 +116,11 @@ logger = logging.getLogger("scheduled_update")
 
 def _run_comprehensive(token_mgr: GitHubTokenPool, db: dict, top_n: int,
                        growth_calc_days: int, force_refresh: bool) -> dict:
-    """跑综合榜(search+scan+trending→增长→排序→报告),与 Agent 复合工具共用 run_ranking。"""
+    """跑综合榜(今日快照→增长→排序→报告),与 Agent 复合工具共用 run_ranking。
+
+    候选池不再自己扫 GitHub:每日任务已按 MIN_STAR 扫过并采了当天 star,周报直接读那份
+    快照(见 ranking._collect_from_snapshot)。只在今天快照缺失时才回退三阶段扫描。
+    """
     params = {
         "min_star": MIN_STAR,
         "max_star": MAX_STAR,
@@ -128,7 +131,7 @@ def _run_comprehensive(token_mgr: GitHubTokenPool, db: dict, top_n: int,
     }
     logger.info(
         "[Pipeline] 启动: mode=comprehensive, top_n=%s, growth_calc_days=%s, "
-        "growth_threshold=%s, 数据源=search+scan+trending 三源合一",
+        "growth_threshold=%s, 候选池=今日快照（缺失则回退三阶段扫描）",
         top_n, growth_calc_days, STAR_GROWTH_THRESHOLD,
     )
 
@@ -167,15 +170,14 @@ def log_pipeline_funnel(funnel: dict | None) -> None:
     logger.info("【本轮榜单漏斗】")
     logger.info("=" * 70)
     logger.info(f"收集并计算增长: {funnel.get('collected', 0)} 个仓库")
-    logger.info(f"  · DB 差值(秒算): {funnel.get('db_diff', 0)}")
-    logger.info(f"  · 实时 API 计算: {funnel.get('realtime', 0)}")
+    logger.info(f"  · 快照/DB 定案: {funnel.get('db_diff', 0)}")
+    logger.info(f"  · 缺历史快照未决: {funnel.get('unresolved', 0)}")
     logger.info(f"增长候选池(增长≥0): {funnel.get('growth_pool', 0)}")
     logger.info(f"达标(增长≥阈值) → 进入排名: {funnel.get('qualified', 0)}")
-    if BURST_PROBE_ENABLED:
-        logger.info(
-            f"最近爆发探针: {funnel.get('recent_probe', 0)} 个"
-            f"（爆发加成生效 {funnel.get('boost_applied', 0)}）"
-        )
+    logger.info(
+        f"最近爆发探针: {funnel.get('recent_probe', 0)} 个"
+        f"（爆发加成生效 {funnel.get('boost_applied', 0)}）"
+    )
     logger.info(f"榜单输出: Top {funnel.get('ranked', 0)}")
     logger.info("=" * 70)
 

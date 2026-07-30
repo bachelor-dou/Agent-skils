@@ -183,7 +183,9 @@ AGENT_TOOL_SCHEMAS = [
             "generate_report": _generate_report_prop,
         }),
     _fn("repo_growth",
-        "【单仓库增长】查单个仓库近期 star 增长。若精确仓库查不到，会返回相似候选供用户选择。",
+        "【单仓库增长】查单个仓库近期 star 增长（当前 star 减去每日快照里 N 天前的 star）。"
+        "缺该仓库当时的快照时返回 growth_status=snapshot_unresolved，此时 growth 为 null，"
+        "不要当成零增长。若精确仓库查不到，会返回相似候选供用户选择。",
         {
             "repo": {"type": "string", "description": "owner/repo（如 vllm-project/vllm）；也可只给项目名、拼错、或一句描述，会自动检索匹配，有歧义时返回候选。"},
             "growth_calc_days": {"type": "integer", "description": f"增长统计窗口（天），默认{GROWTH_CALC_DAYS}"},

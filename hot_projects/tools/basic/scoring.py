@@ -26,7 +26,6 @@ import math
 from datetime import datetime, timezone
 
 from ...config import (
-    DEFAULT_SCORE_MODE,
     DAYS_SINCE_CREATED,
     GROWTH_CALC_DAYS,
     RECENT_GROWTH_DAYS,
@@ -63,7 +62,7 @@ def _hydrate_candidate_created_at(
 
 def step2_rank_and_select(
     candidate_map: dict[str, dict],
-    mode: str = DEFAULT_SCORE_MODE,
+    mode: str,
     db: dict | None = None,
     days_since_created: int | None = None,
     prefiltered_days_since_created: int | None = None,

@@ -1,0 +1,15 @@
+# 本地全功能依赖（Web/API + Agent CLI + 两个 cron）。
+# CI 只装仓库根的 requirements-ci.txt：两个 cron 的导入树只要 httpx 和 requests，
+# 装得越少跑得越快，test_layering.py 有一条守卫钉住这个前提不被 import 破坏。
+
+requests>=2.28.0
+httpx[socks]>=0.27.0  # [socks] 引入 socksio，支持走 SOCKS 代理（clash 默认 all_proxy=socks5）
+
+# 仅 Web/API 需要
+fastapi>=0.100.0
+pydantic>=2.9.0
+uvicorn[standard]>=0.20.0
+markdown>=3.5.0
+
+# 测试。刻意不装 pytest-asyncio —— tests/conftest.py 里三行钩子就够跑 async 测试。
+pytest>=8.0.0

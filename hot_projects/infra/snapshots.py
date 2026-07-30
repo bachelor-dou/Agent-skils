@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
+from typing import NamedTuple
 
 from ..config import DATA_DIR
 
@@ -26,6 +27,12 @@ logger = logging.getLogger("hot_projects")
 SNAPSHOT_DIR = os.path.join(DATA_DIR, "snapshots")
 _DATE_FMT = "%Y-%m-%d"
 _SUFFIX = ".json.gz"
+
+# 锚点日期与 T−N 的最大允许偏差（天），find_anchor 的默认容差。
+# 每天都跑时恒为 0；漏跑一两天就顺延到邻近快照，且全部仓库共用同一锚点，
+# 窗口长度一致，相对排名不受影响。定在这里而不是 config：它是锚点选取规则的一部分，
+# 由本模块的 find_anchor 定义语义，三个读取侧调用方（排名、探针、单仓库工具）共用。
+SNAPSHOT_ANCHOR_TOLERANCE_DAYS = 2
 
 
 def utc_today() -> date:
@@ -92,6 +99,31 @@ def find_anchor(target: date, tolerance_days: int) -> tuple[date, dict[str, int]
         if stars:
             return day, stars
     return None
+
+
+class Anchor(NamedTuple):
+    """某窗口的锚点：日期、star 表、以及它到今天的**实际**天数。
+
+    window_days 必须和 stars 一起返回、不能让调用方按「自己请求的窗口」去算：
+    漏采时 find_anchor 会顺延一两天，实际窗口就比请求的长。三个读取侧
+    （排名主窗口、爆发探针、单仓库工具）本来各自算这一步，其中爆发探针漏了修正——
+    3 天窗口拿到 5 天的增量却仍除以 3，速率虚高 67%、爆发加成误判。
+    把天数绑在数据上是唯一能让"忘记修正"不再可能的形状。
+    """
+    day: date
+    stars: dict[str, int]
+    window_days: int
+
+
+def anchor_for_window(
+    days: int, tolerance_days: int = SNAPSHOT_ANCHOR_TOLERANCE_DAYS
+) -> Anchor | None:
+    """取 T−days 的锚点快照。没有可用快照返回 None（调用方各自决定怎么退化）。"""
+    found = find_anchor(utc_today() - timedelta(days=days), tolerance_days)
+    if found is None:
+        return None
+    day, stars = found
+    return Anchor(day, stars, (utc_today() - day).days)
 
 
 def prune_snapshots(keep_days: int, today: date | None = None) -> list[date]:

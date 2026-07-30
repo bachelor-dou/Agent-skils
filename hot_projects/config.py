@@ -156,39 +156,53 @@ LLM_MODELS = normalize_models(LLM_MODELS)
 # ──────────────────────────────────────────────────────────────
 # 阈值与数量
 # ──────────────────────────────────────────────────────────────
-STAR_GROWTH_THRESHOLD: int = 1000       # 窗口期 star 增长阈值
-MIN_STAR: int = 1200                   # 项目最低 star 门槛（关键词搜索 + 范围扫描下界）
-MAX_STAR: int = 50000                  # 范围扫描上限
+# 出榜的唯一闸门：窗口期涨够这么多 star 才入选。想收紧/放宽榜单请只动这个数，
+# 它与 MIN_STAR 是两个独立旋钮（后者管收进 DB 的宽度，不管谁能出榜），往上调是安全的：
+# 全部使用处都只是「默认值」或「>= 比较」，没有别处依赖它的具体大小。
+STAR_GROWTH_THRESHOLD: int = 1000
+# 最低 star 门槛 = 「观测宇宙」的宽度，一个数三个身份，因为它们本来就该是同一条线：
+#   1) 每日任务往 DB 里收哪些仓库 —— 宽度的定义处；
+#   2) 周报/榜单的候选池下界 —— 而候选池现在就是 DB，所以必须和 (1) 同值，
+#      否则要么读到 DB 覆盖不到的区间（低于它）、要么白扔已采好的仓库（高于它）；
+#   3) Agent 工具的 min_star 默认值 —— Agent 一般会显式指定，默认值只是兜底。
+# 为什么从 1200 压到 500：仓库得先涨到门槛才会被收进来，收进来那天它没有一个窗口前的快照，
+# 增长只能记「未决」而被剔出排名（上期 1761 个）。压低就是提前几周开始记快照，
+# 等它涨到够格出榜时基线已经存好了——放宽入库宽度只是让"能被观测到"的仓库更多。
+# 谁能出榜由 STAR_GROWTH_THRESHOLD 独立决定，与本值无关：本值只筛当前 star，
+# 出榜筛的是窗口内涨幅。所以调低本值不会放水，调高增长阈值也不需要回头动本值。
+MIN_STAR: int = 500
+# 星段扫描的上限，只在每日发现阶段用到（候选池改读 DB 后，榜单侧不再按 star 上限截断，
+# 否则超大仓库会整批出不了榜，见 test_snapshot_pool_ignores_max_star）。
+# 放到 10 万而不怕慢：分段是按仓库密度拆的（某段命中数超过 Search API 的 1000 上限才二分），
+# 不是按区间宽度拆。而 star 分布极度倾斜——DB 里 500..20000 挤了 5.0 万个（96%），
+# 20000 以上到 10 万只有约 2000 个，多出三五段而已，拆分耗时全在低星段。
+# 关键词搜索仍是 stars:>=MIN_STAR 无上限，10 万以上的仓库（全球约 91 个，且早已全在 DB）
+# 靠它兜底；仓库也不会凭空出现在高星，只会从低处涨上来、在 MIN_STAR 那关就被收进来。
+MAX_STAR: int = 100000
 HOT_PROJECT_COUNT: int = 100           # 综合热门项目默认输出数量（上限，有几个出几个）
 HOT_NEW_PROJECT_COUNT: int = 13        # 新项目榜默认输出数量（未指定 top_n 时使用）
 GROWTH_CALC_DAYS: int = 7              # 增长统计窗口（天）—— 计算 star 增长的时间范围
 DAYS_SINCE_CREATED: int = 45           # 新项目判定窗口（天）—— 创建时间距今 <= 此值视为新项目
 DESC_REFRESH_DAYS: int = 60            # LLM 描述刷新周期（天）—— desc 生成超过此天数则重新生成（默认约 2 个月）
-# DB 差值法：项目 refreshed_at 年龄与计算窗口的最大允许偏差（小时）。
-# 仅当 |项目年龄 − 计算窗口| ≤ 该值时，current_star − DB旧star 才被视为有效的窗口期增长。
-DB_DIFF_TOLERANCE_HOURS: int = 5
-# 快照年龄不等于计算窗口时的折算区间（相对窗口的倍数）。GitHub 2026-06-30 起把 stargazers
-# 列表限权给 admin/collaborator，二分法/采样外推对他人仓库双双失效，窗口不匹配的项目
-# 只能按快照年龄线性折算到窗口，否则整批出不了榜。
-# 下限 0.4：向上放大最多 2.5 倍，再短的快照放大后噪声会盖过信号。
-# 上限 3.0：向下折算不会虚增增长（只会把旧增量摊薄），放宽到 21 天是为了覆盖漏采一两周的项目
-#          （2026-07-29 一期落到实时路径的多为 14 天前的快照，卡在 2.0 会整批漏掉）。
-DB_DIFF_SCALE_MIN_RATIO: float = 0.4
-DB_DIFF_SCALE_MAX_RATIO: float = 3.0
 
 # ──────────────────────────────────────────────────────────────
 # 每日 star 快照（窗口增长的主基线）
 #   star 时间戳被 GitHub 限权后，唯一能还原任意窗口增长的办法是自己每天存一份 star 计数：
 #   增长 = 当前 star − T−N 那天快照里的 star。快照按天存成独立 gz 文件（infra/snapshots.py）。
-#   实测：100 别名/次 = 1 个 GraphQL 点，5.3 万仓库全量 526 点、约 4 分钟。
+#
+#   采集参数（批大小 / 并发 / 覆盖率下限）在 cron_daily_star_snapshot.py 顶部，
+#   锚点容差在 infra/snapshots.py——都是实测定死的实现细节，不该当旋钮调。
 # ──────────────────────────────────────────────────────────────
-SNAPSHOT_BATCH_SIZE: int = 100      # 每次 GraphQL 查询的别名数。实测 200 会 HTTP 200 + 全 null 静默退化，勿上调
-SNAPSHOT_CONCURRENCY: int = 8       # 并发批次数
-SNAPSHOT_KEEP_DAYS: int = 35        # 快照保留天数（按日期截断，够覆盖月度窗口）
-SNAPSHOT_MIN_COVERAGE: float = 0.5  # 采集覆盖率低于此值拒绝落盘（防 API 全面变更时写入垃圾锚点）
-# 锚点日期与 T−N 的最大允许偏差（天）。每天都跑时恒为 0；漏跑一两天就顺延到邻近快照，
-# 且全部仓库共用同一锚点，窗口长度一致，相对排名不受影响。
-SNAPSHOT_ANCHOR_TOLERANCE_DAYS: int = 2
+SNAPSHOT_KEEP_DAYS: int = 35        # 快照保留天数（按日期截断，35 天够覆盖月度窗口）
+
+# ── 淘汰门槛（每日任务把长期掉出 MIN_STAR 的仓库从 DB 移除）──
+# 与发现对称：涨到 MIN_STAR 进来，连续掉到它以下够久就出去。
+# 为什么要"连续"而不是"当天"：500 线附近的仓库会来回抖，只看一天会删了又收，
+# 白耗发现阶段的 Search 配额，还让它的快照历史反复断档。
+# 判定只用已有的每日快照，不额外存状态；快照份数不够 grace 天时整个淘汰不执行
+# （刚接入时只有一两份快照，此时谁都不该删）。
+DB_EVICT_GRACE_DAYS: int = 7
+DB_EVICT_PROTECT_NEW_DAYS: int = 90   # 创建于近 N 天的仓库不淘汰：还没长起来，掐死了就再没机会
 # 关键词榜：LLM 动态补充的搜索关键词数量上限（控制 Search API 配额；预设类别不受此限）
 MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 
@@ -200,38 +214,27 @@ MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 #     boost        = 1 + BURST_ALPHA * min(max(acceleration - 1, 0), BURST_CAP)
 #   acceleration<=1（持平或放缓）→ boost=1，不反向惩罚。
 # ──────────────────────────────────────────────────────────────
-#   GitHub 2026-06-30 起把 stargazers 列表限权给 admin/collaborator 后，短窗口增长已无从实测：
-#   周快照折算到 3 天只是把窗口均速原样搬过来，acceleration 恒为 1，探针必然空转。
-#   故默认关闭，排名完全由窗口总增长决定。若日后接入每日快照，置 True 即可恢复。
-BURST_PROBE_ENABLED: bool = False
+#   探针没有开关：近 3 天增长就是「当前 star − T−3 快照」，零 API、零耗时，
+#   缺 T−3 快照时自行跳过（不加成、不报错），没有需要预先关掉它的场景。
 RECENT_GROWTH_DAYS: int = 3       # "最近几天"窗口（天）：候选池额外计算该窗口增长
 BURST_ALPHA: float = 0.15         # 爆发加成强度（越大，最近爆发对排名影响越大）
 BURST_CAP: float = 2.0            # acceleration-1 的封顶（boost 最高 1 + ALPHA*CAP）
 
-# ──────────────────────────────────────────────────────────────
-# 评分模式
-#   comprehensive — 综合排名（增长量 + 增长率，新项目平滑折扣）
-#   hot_new       — 新项目专榜（仅创建时间 <= DAYS_SINCE_CREATED 天的新项目，按增长量排序）
-# ──────────────────────────────────────────────────────────────
-DEFAULT_SCORE_MODE: str = "comprehensive"
+# 评分模式（comprehensive / hot_new）没有默认值配置：榜单模式由调用方按榜种决定，
+# step2_rank_and_select 每次都显式收到 mode。曾经这里有个 DEFAULT_SCORE_MODE，
+# 但它只是那个函数的参数默认值、生产路径永远走不到——改它不会有任何效果，是个假旋钮。
 
-# ──────────────────────────────────────────────────────────────
-# 请求控制
-# ──────────────────────────────────────────────────────────────
-MAX_BINARY_SEARCH_DEPTH: int = 20      # 二分法查 stargazers 最大深度
-SEARCH_REQUEST_INTERVAL: float = 1.3  # Search API 请求最小间隔（秒）
-MAX_GRAPHQL_SAMPLING_BATCHES: int = 45  # GraphQL 采样外推最多翻页批次数（35×100≈3500 条）
-PAGE_COMPENSATION_ROUNDS: int = 3       # 搜索/扫描失败页最多补偿轮数（1 轮时限流期残留几十页）
-PAGE_COMPENSATION_MAX_WAIT: float = 150.0  # 每轮补偿前等 token 冷却的上限（秒）
+# 请求限速、失败页补偿、DB 差值判定这些收集/计算阶段的内部参数不在本文件：
+# 它们写在各自的使用处（datasource/github/api.py、tools/basic/core.py、
+# infra/concurrency/task_help.py），本文件只留会真去调的策略配置。
 
 # ──────────────────────────────────────────────────────────────
 # 路径配置（均写死在包根目录 hot_projects/ 下，不走环境变量）
 # ──────────────────────────────────────────────────────────────
-_ROOT = str(PACKAGE_DIR)
-REPORT_DIR = os.path.join(_ROOT, "report")
-LOG_DIR = os.path.join(_ROOT, "logs")
+REPORT_DIR = os.path.join(PACKAGE_DIR, "report")
+LOG_DIR = os.path.join(PACKAGE_DIR, "logs")
 # 数据存储目录（Github_DB.json、favorites.json、.pipeline_checkpoint.json 及各自 .lock/.tmp）
-DATA_DIR = os.path.join(_ROOT, "data")
+DATA_DIR = os.path.join(PACKAGE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE_PATH = os.path.join(DATA_DIR, "Github_DB.json")
 FAVORITES_FILE_PATH = os.path.join(DATA_DIR, "favorites.json")

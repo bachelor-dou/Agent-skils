@@ -1,0 +1,91 @@
+name: weekly hot projects report
+
+# 每周榜单：读 DB 和快照 → 排名 → LLM 补描述 → 写报告，提交到 snapshots 分支。
+# 本地不再跑 cron，只需 git pull 看结果。
+#
+# 出榜不再自己搜 GitHub：仓库池由每日快照那个 job 攒在 DB 里，增长由快照相减算出，
+# 所以这里除了 LLM 之外几乎不发外部请求。
+#
+# 触发时间对齐原本的本机 crontab（周三 13:40 北京时间），上期实测耗时 64 分钟。
+# 分钟取 :43 避开 :00/:15/:30 的全平台定时任务高峰，排队更短。
+#
+# 依赖每日快照：增长取「当前 star − T-7 天快照 star」，所以本 job 必须晚于当天的快照 job。
+# 当天首次快照在 00:23 UTC，这里 05:43 UTC 起跑，间隔充足。
+
+on:
+  schedule:
+    - cron: "43 5 * * 3"
+  workflow_dispatch:
+    inputs:
+      top_n:
+        description: "取前 N 个项目（留空用默认 100）"
+        type: string
+        default: ""
+      growth_calc_days:
+        description: "增长计算窗口天数（留空用默认 7）"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+# 不用 pull_request_target 之类会把 secrets 暴露给 fork 的触发方式——
+# 这是公开仓库敢存 PAT 和 LLM key 的前提。
+concurrency:
+  group: weekly-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: github.repository == 'bachelor-dou/Agent-skils'
+    runs-on: ubuntu-latest
+    # 上期 64 分钟；留足余量应对限流退避，但仍远低于 GitHub 的 6 小时上限
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 必须检出 snapshots：每日快照攒在 snapshots 上，而快照是算 7 天增长的唯一基线，
+          # 检出 main 会因为拿不到快照而让增长退化成 DB 折算。
+          # 注意 schedule 触发只认默认分支上的 workflow 文件，所以改这个 yaml 得合进 main 才生效。
+          ref: snapshots
+        # 默认浅克隆：29MB 的 Github_DB.json 只下最新一版，不拉历史
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements-ci.txt
+
+      - name: 出榜
+        env:
+          GITHUB_TOKENS: ${{ secrets.GH_STAR_TOKENS }}
+          # 只给 A 和 C 两个平台。
+          # 内部调用是顺序回退，两个平台=两层韧性；config 里其余平台因为 key 为空，
+          # 会被 llm_client.usable() 自动跳过，不必改 config。
+          LLM_A_KEY: ${{ secrets.LLM_A_KEY }}
+          LLM_C_KEY: ${{ secrets.LLM_C_KEY }}
+          # 没配就是空字符串，代码会跳过推送，不影响出榜
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+        run: |
+          python -m hot_project.cron_weekly_report \
+            ${{ inputs.top_n && format('--top-n {0}', inputs.top_n) || '' }} \
+            ${{ inputs.growth_calc_days && format('--growth-days {0}', inputs.growth_calc_days) || '' }}
+
+      - name: 提交并推送 DB 与报告
+        run: |
+          bash .github/scripts/commit_and_push.sh \
+            "chore: weekly hot projects report $(date -u +%Y-%m-%d)" \
+            hot_project/data/Github_DB.json \
+            hot_project/report
+
+      - name: 上传运行日志
+        # logs/ 不入库，失败时靠这个 artifact 排查（控制台输出只留 90 天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-report-logs
+          path: hot_project/logs/
+          retention-days: 30
+          if-no-files-found: warn

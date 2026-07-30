@@ -80,6 +80,17 @@ def get_favorites(user_id: str) -> list[dict]:
     return items if isinstance(items, list) else []
 
 
+def all_favorited_repos() -> set[str]:
+    """所有用户收藏过的仓库全名，跨用户合并。DB 淘汰用它当保护名单。"""
+    with _lock:
+        users = _read_all().get("users", {})
+    return {
+        item["repo"]
+        for items in users.values() if isinstance(items, list)
+        for item in items if isinstance(item, dict) and item.get("repo")
+    }
+
+
 def _write_all(data: dict) -> None:
     lock_fd = open(FAVORITES_FILE_PATH + ".lock", "w")
     try:

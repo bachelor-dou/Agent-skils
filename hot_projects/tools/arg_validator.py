@@ -6,7 +6,6 @@ Tool 参数校验
 2) 严格模式（validate_tool_args_strict）：检测 LLM 显式传错参数，返回结构化错误
 """
 
-import json
 import logging
 from typing import Any
 

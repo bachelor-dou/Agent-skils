@@ -1,6 +1,7 @@
 name: daily star snapshot
 
-# 每日 star 快照跑在 GitHub 的机器上，本地笔记本只负责周三出榜前拉取。
+# 每日 star 快照跑在 GitHub 的机器上，直接提交到 main，本地 git pull 即可拿到。
+# 快照是 N 天增长的唯一基线（star 时间戳接口 2026-06 起对外关闭），漏一天补不回来。
 #
 # 为什么按小时触发而不是每天一次：
 #   GitHub 的 schedule 是 best-effort，2026 年社区实测漂移可达数小时（actions/runner#4468），
@@ -9,6 +10,9 @@ name: daily star snapshot
 #   一天 24 次机会里任意一次成功就拿到当天快照。漏掉的那天是补不回来的
 #   （今天无从得知昨天的 star 数），容错只能靠多给自己机会。
 #   分钟取 :23 —— :00/:15/:30 是全平台定时任务的高峰批次，冷门分钟排队明显更短。
+#
+# 每天第一次尝试落在北京时间 08:23：快照按 UTC 日命名（与 DB 的 refreshed_at 同基准），
+# 而 UTC 零点就是北京时间 8 点，所以 00:23 UTC 这一轮正是当天窗口的第一次机会。
 
 on:
   schedule:
@@ -34,10 +38,19 @@ jobs:
     # fork 出去的仓库不跑，免得白烧别人配额、也免得往上游推东西
     if: github.repository == 'bachelor-dou/Agent-skils'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 发现三阶段约 25 分钟 + 采集约 10 分钟。
+    # 发现那 25 分钟里九成在等限流：实测搜索撞的是按 IP 共享的**二级限流**，
+    # 与 token 数无关（12 个不同账号的 token 会在同一刻一起 403，各自额度都还没用完），
+    # 所以多放 token 不会缩短它。留足余量应对退避；公开仓库不计费，跑久点不心疼。
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # CI 只在 snapshots 分支上活动，main 由人工 PR 合并把关。
+          # 必须检出 snapshots 而非默认分支：过期快照清理要看到 snapshots 上已有的快照集合。
+          # 注意 schedule 触发只认默认分支上的 workflow 文件，所以改这个 yaml 得合进 main 才生效。
+          ref: snapshots
         # 默认浅克隆：29MB 的 Github_DB.json 只下最新一版，不拉历史
 
       - uses: actions/setup-python@v5
@@ -45,60 +58,31 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: pip install -r requirements-snapshot.txt
+      - run: pip install -r requirements-ci.txt
 
-      - name: 采集当天快照
+      - name: 记一下今天的快照采之前在不在
+        id: before
+        run: |
+          if [ -f "hot_project/data/snapshots/$(date -u +%F).json.gz" ]; then
+            echo "existed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "existed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 发现新仓库 + 采集当天快照
         env:
           # secret 名不能以 GITHUB_ 开头（GitHub 保留前缀），故用 GH_STAR_TOKENS 再映射过来。
-          # 全量只要 526 个 GraphQL 点，单 token 每小时有 5000 点，放 1~2 个就够。
+          # 逗号分隔，放几个都行：并发上限是 min(SNAPSHOT_MAX_CONCURRENCY, token 数)，
+          # 池子在所有 token 间轮转、自动跳过被限流的那个，多余的 token 就是备用配额。
           GITHUB_TOKENS: ${{ secrets.GH_STAR_TOKENS }}
         run: |
-          python hot_projects/cron_daily_star_snapshot.py \
+          python -m hot_project.cron_daily_snapshot \
             ${{ inputs.force && '--force' || '' }}
 
-      - name: 提交并推送到 snapshots 分支
+      # DB 和快照一起提交:发现阶段往 DB 插了新仓库,而当天快照里已经含它们了。
+      # 只提交快照会让下一轮从旧 DB 出发把同一批仓库再发现一遍。
+      - name: 提交并推送快照与 DB
         run: |
-          set -euo pipefail
-          # 快照只进专用 snapshots 分支，main 永远不收快照提交（保持主分支历史干净、
-          # 也不和本地工作区的同名文件撞车）。用独立 worktree 操作该分支，主 checkout 不受影响。
-          shopt -s nullglob
-          files=(hot_projects/data/snapshots/*.json.gz)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "没有快照文件（当天已有，脚本已幂等跳过），不产生提交。"
-            exit 0
-          fi
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin snapshots || true
-          if git ls-remote --exit-code --heads origin snapshots >/dev/null 2>&1; then
-            git worktree add snap_wt origin/snapshots
-            git -C snap_wt checkout -B snapshots
-          else
-            # 首次运行：从当前 main 拉出 snapshots 分支（与 main 共享历史，之后各自演进）
-            git worktree add -b snapshots snap_wt
-          fi
-
-          mkdir -p snap_wt/hot_projects/data/snapshots
-          cp "${files[@]}" snap_wt/hot_projects/data/snapshots/
-          # -f 强制：该路径在 .gitignore 里被忽略，force-add 后在 snapshots 分支上即为已跟踪
-          git -C snap_wt add -f hot_projects/data/snapshots
-          if git -C snap_wt diff --cached --quiet; then
-            echo "snapshots 分支上该快照已存在，无变化。"
-            exit 0
-          fi
-          git -C snap_wt commit -m "chore: star snapshot $(date -u +%Y-%m-%d)"
-
-          # 每小时可能有多次触发赶在一起，推送前 rebase 一次再重试几轮
-          for attempt in 1 2 3; do
-            if git -C snap_wt push origin snapshots; then
-              echo "推送成功（第 $attempt 轮）。"
-              exit 0
-            fi
-            echo "第 $attempt 轮推送失败，rebase 后重试。"
-            git -C snap_wt pull --rebase origin snapshots || true
-            sleep 5
-          done
-          echo "::error::连续 3 轮推送失败，本次快照未入库。"
-          exit 1
+          bash .github/scripts/commit_and_push.sh \
+            "chore: star snapshot $(date -u +%Y-%m-%d)" \
+            hot_project/data

@@ -11,12 +11,13 @@ logs/
 
 # Data
 *.lock
-# hot_projects 运行时产物（数据/报告/断点，不入库）
+# graphify 的产物：几百个 AST 缓存文件，代码一改就重算，入库只会污染 diff
+graphify-out/
 hot_projects/graphify-out/
-# 每日 star 快照只存在于专用 snapshots 分支，不进 main：
-# 在 main 上忽略它，避免本地 git add . 误把快照提交到主分支。
-# 出榜前用 sync_snapshots.sh 从 snapshots 分支把文件取到工作区（取完会 unstage，保持不可见）。
-hot_projects/data/snapshots/
+# hot_project/data/snapshots/ 刻意不入 main：一天约 700KB，一年就是 250MB 永久留在
+# main 的历史里。它只跟踪在 snapshots 分支上（CI 每天往那儿提交），本地切过去拉一下即可，
+# 所以在 main 上它会一直显示为未跟踪 —— 这是有意的，不要 git add，也不要在本地自行采集
+# （会和 CI 的同名文件撞车）。DB、收藏和 report/ 则两边都跟踪。
 # Environment
 .env
 .venv/

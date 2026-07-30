@@ -6,7 +6,7 @@ search_by_keywords / scan_star_range / repo_growth / batch_growth / fetch_trendi
 """
 
 from ..base import Provider, Repo
-from .api import search_github_repos, fetch_repo_info
+from .api import search_github_repos, fetch_repo_info, _with_token_rotation
 from ...tools.basic import (
     search_by_keywords as _search_by_keywords,
     scan_star_range as _scan_star_range,
@@ -20,18 +20,30 @@ class GitHubProvider(Provider):
     def __init__(self, token_mgr):
         self.token_mgr = token_mgr
 
+    # 下面三个是 Agent 交互式调用，没有 worker 替它们挑 token，所以自己走轮换：
+    # 搜索接口只有 30 次/分钟（比 REST 的 5000/小时紧得多），连问几次就可能撞上。
+    # 轮换只能加在这一层——search_github_repos 本身还被异步 worker 复用，
+    # 那条链路的 token 由调度器分配，函数内部私自换 token 会与调度器争用同一批 token。
     def search_similar(self, name: str, limit: int = 5) -> list[Repo]:
-        items = search_github_repos(
-            self.token_mgr, name, token_idx=0, page=1, per_page=limit, min_star=0
-        ) or []
-        return [Repo.from_github(it) for it in items[:limit]]
+        items, _ = _with_token_rotation(
+            self.token_mgr,
+            lambda idx: search_github_repos(
+                self.token_mgr, name, token_idx=idx, page=1, per_page=limit, min_star=0
+            ),
+            what=f"相似仓库搜索 '{name}'",
+        )
+        return [Repo.from_github(it) for it in (items or [])[:limit]]
 
     def search_top_repos(self, query: str, top_n: int = 5, min_star: int = 0) -> list[Repo]:
-        items = search_github_repos(
-            self.token_mgr, query, token_idx=0, page=1,
-            per_page=min(max(top_n, 1), 50), sort="stars", order="desc", min_star=min_star,
-        ) or []
-        return [Repo.from_github(it) for it in items[:top_n]]
+        items, _ = _with_token_rotation(
+            self.token_mgr,
+            lambda idx: search_github_repos(
+                self.token_mgr, query, token_idx=idx, page=1,
+                per_page=min(max(top_n, 1), 50), sort="stars", order="desc", min_star=min_star,
+            ),
+            what=f"仓库搜索 '{query}'",
+        )
+        return [Repo.from_github(it) for it in (items or [])[:top_n]]
 
     def repo_info(self, repo: str) -> Repo | None:
         parts = repo.split("/", 1)

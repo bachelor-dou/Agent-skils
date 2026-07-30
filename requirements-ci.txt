@@ -1,0 +1,5 @@
+# GitHub Actions 两个任务（每日 star 快照 / 每周榜单）在 CI 里需要的最小依赖。
+# 实测这两条命令的导入树只用到 httpx（GraphQL/REST 异步调用）和 requests（LLM 调用）。
+# 刻意不含 fastapi/uvicorn 等只有本地 web/Agent 才用到的包，CI 装得越少跑得越快。
+httpx>=0.27.0
+requests>=2.31.0

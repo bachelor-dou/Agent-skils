@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 
 from hot_projects.infra.db import is_project_window_match
-from hot_projects.infra.concurrency.task_help import _submit_growth_tasks
+from hot_projects.infra.concurrency.task_help import _resolve_growth
 
 
 def _ts(days_ago, hours=0):
@@ -28,31 +28,19 @@ def test_window_match_invalid_input():
     assert is_project_window_match("not-a-date", 7, 5) is False
 
 
-# ── _submit_growth_tasks 的差值/实时分流 ──
-
-class _Pool:
-    def __init__(self):
-        self.submitted = []
-
-    def submit(self, task):
-        self.submitted.append(task)
-
+# ── _resolve_growth 的定案/未决分流 ──
 
 def _ctx(prev_snapshot, *, can_write_db=False, use_checkpoint=False, window=7):
     return {
-        "pending_created_at": {},
         "candidate_map": {},
         "growth_threshold": 200,
-        "use_realtime_growth": False,
         "can_write_db": can_write_db,
         "window_specified": True,
         "growth_calc_days": window,
         "is_hot_new": False,
         "prev_snapshot": prev_snapshot,
         "use_checkpoint": use_checkpoint,
-        "unresolved_count": [0],
         "checkpoint_dirty": [False],
-        "completed_since_save": [0],
     }
 
 
@@ -64,12 +52,11 @@ def test_diff_used_for_matching_project():
     candidate_map = {}
     ctx = _ctx({fn: {"star": 1000, "refreshed_at": refreshed}})
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert fn in candidate_map and candidate_map[fn]["growth"] == 300  # 1300-1000
-    assert pool.submitted == []  # 没有提交实时任务
+    assert ctx["unresolved_count"] == 0
 
 
 def test_scaled_diff_when_snapshot_age_within_band():
@@ -82,12 +69,11 @@ def test_scaled_diff_when_snapshot_age_within_band():
     candidate_map = {}
     ctx = _ctx({fn: {"star": 1000, "refreshed_at": refreshed}})
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert candidate_map[fn]["growth"] == 700  # 300 × 7/3
-    assert pool.submitted == []
+    assert ctx["unresolved_count"] == 0
 
 
 def test_scaled_diff_for_stale_snapshot():
@@ -99,15 +85,14 @@ def test_scaled_diff_for_stale_snapshot():
     candidate_map = {}
     ctx = _ctx({fn: {"star": 1000, "refreshed_at": refreshed}})
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert candidate_map[fn]["growth"] == 400  # 800 × 7/14
-    assert pool.submitted == []
+    assert ctx["unresolved_count"] == 0
 
 
-def test_realtime_when_snapshot_too_fresh_to_scale():
+def test_unresolved_when_snapshot_too_fresh_to_scale():
     fn = "a/b"
     refreshed = _ts(0, hours=12)  # 半天快照 / 窗口 7 天 → 折算要放大 14 倍，拒绝
     db = {"valid": True, "date": _ts(7)[:10], "projects": {fn: {"star": 1000, "refreshed_at": refreshed}}}
@@ -115,12 +100,11 @@ def test_realtime_when_snapshot_too_fresh_to_scale():
     candidate_map = {}
     ctx = _ctx({fn: {"star": 1000, "refreshed_at": refreshed}})
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert fn not in candidate_map
-    assert len(pool.submitted) == 1  # 回退实时任务
+    assert ctx["unresolved_count"] == 1  # 无实时兜底，记未决
 
 
 def test_fresh_repo_growth_equals_all_stars():
@@ -131,12 +115,11 @@ def test_fresh_repo_growth_equals_all_stars():
     candidate_map = {}
     ctx = _ctx({})  # 冷启动，无快照
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert candidate_map[fn]["growth"] == 1300
-    assert pool.submitted == []
+    assert ctx["unresolved_count"] == 0
 
 
 def test_diff_used_when_db_invalid_but_window_matches():
@@ -149,25 +132,23 @@ def test_diff_used_when_db_invalid_but_window_matches():
     candidate_map = {}
     ctx = _ctx({fn: {"star": 1000, "refreshed_at": refreshed}})
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert fn in candidate_map and candidate_map[fn]["growth"] == 300  # 1300-1000，逐项窗口匹配
-    assert pool.submitted == []  # 不再因 db.valid=False 退回实时
+    assert ctx["unresolved_count"] == 0  # 不再因 db.valid=False 退回实时
 
 
-def test_realtime_when_not_in_prev_snapshot():
+def test_unresolved_when_not_in_prev_snapshot():
     fn = "a/b"
     db = {"valid": True, "date": _ts(7)[:10], "projects": {}}
-    # 无快照且非窗口内新建（创建于 400 天前）→ 本地确实算不出，只能走实时。
+    # 无快照且非窗口内新建（创建于 400 天前）→ 本地算不出，且没有实时兜底，只能记未决。
     raw_repos = {fn: {"star": 1300, "repo_item": {}, "created_at": _ts(400)}}
     candidate_map = {}
     ctx = _ctx({})  # 冷启动：项目不在快照
     ctx["candidate_map"] = candidate_map
-    pool = _Pool()
 
-    _submit_growth_tasks(pool, None, raw_repos, db, candidate_map, ctx)
+    _resolve_growth(raw_repos, db, candidate_map, ctx)
 
     assert fn not in candidate_map
-    assert len(pool.submitted) == 1
+    assert ctx["unresolved_count"] == 1

@@ -175,6 +175,154 @@ def save_db(db: dict) -> None:
         logger.error(f"DB 保存失败: {e}")
 
 
+def insert_new_projects(records: dict[str, dict]) -> int:
+    """把还不在 DB 里的仓库插进 DB，已有条目一律不碰。
+
+    每日发现任务专用。和 save_db 的两处关键区别，都是为了不破坏每周报告的判定依据：
+      1. 只插入新键，绝不合并已有条目——报告用项目级 refreshed_at 判断 DB 差值是否
+         匹配本次窗口，每日任务若顺手刷新了已有仓库的 star/refreshed_at，
+         这条兜底路径就被污染成「看起来很新、实际没重新测过」；
+      2. 不动顶层 db["date"]——get_db_age_days 靠它推断窗口，每天改一次会让它恒为 0。
+
+    Args:
+        records: {full_name: {字段}}，只需 star 和 created_at；
+                 gh_desc/topics/readme_url 等展示字段等它上榜时由报告流程补。
+
+    Returns:
+        实际插入的条数（已存在的不计）。
+    """
+    if not records:
+        return 0
+    inserted = 0
+    try:
+        with _db_lock:
+            lock_fd = open(_lock_file_path(), "w")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+                disk_db: dict = {}
+                if os.path.exists(DB_FILE_PATH):
+                    try:
+                        with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
+                            disk_db = json.load(f)
+                    except (json.JSONDecodeError, IOError):
+                        logger.error("DB 读取失败，放弃本次插入（不覆盖磁盘上的现有数据）。")
+                        return 0
+
+                projects = disk_db.setdefault("projects", {})
+                for name, info in records.items():
+                    if name in projects or not isinstance(info, dict):
+                        continue
+                    projects[name] = dict(info)
+                    inserted += 1
+
+                if inserted:
+                    temp_path = DB_FILE_PATH + ".tmp"
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        json.dump(disk_db, f, ensure_ascii=False, indent=2)
+                    os.replace(temp_path, DB_FILE_PATH)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+    except IOError as e:
+        logger.error(f"DB 插入失败: {e}")
+        return 0
+    return inserted
+
+
+def _stale_project_names(
+    projects: dict[str, dict],
+    recent_snapshots: list[dict[str, int]],
+    star_floor: int,
+    protect_new_days: int,
+    keep: set[str] | frozenset[str],
+) -> list[str]:
+    """挑出该淘汰的仓库：给定的每份快照里 star 都低于 star_floor，且不在任何保护名单里。
+
+    保护三类，都是「删了就再也回不来」的：
+      · keep      — 调用方给的收藏名单；
+      · 有 desc    — 历史上真上过榜、有人工/LLM 产出的描述，删掉等于丢内容；
+      · 新仓库     — 创建于 protect_new_days 天内，还没长起来，掐死了就没机会了。
+
+    任一天读数缺失就整个不判：快照覆盖率约 99.8%，偶有漏批，
+    把「没测到」当成「掉下去了」会误删活跃仓库。
+    """
+    stale: list[str] = []
+    for name, info in projects.items():
+        if name in keep or info.get("desc"):
+            continue
+        age = timestamp_age_days(info.get("created_at", ""))
+        if age is not None and age < protect_new_days:
+            continue
+        stars = [snap.get(name) for snap in recent_snapshots]
+        if any(s is None for s in stars):
+            continue
+        if all(s < star_floor for s in stars):
+            stale.append(name)
+    return stale
+
+
+def evict_stale_projects(
+    recent_snapshots: list[dict[str, int]],
+    star_floor: int,
+    grace_days: int,
+    protect_new_days: int,
+    keep: set[str] | None = None,
+) -> list[str]:
+    """把长期掉出发现门槛的仓库从 DB 移除，返回被移除的名字（已排序）。
+
+    每日任务专用，跟 insert_new_projects 一样只动 projects、不碰顶层 db["date"]
+    ——那个字段是报告推断窗口的依据，每天改一次会让 get_db_age_days 恒为 0。
+
+    recent_snapshots 传最近 grace_days 份快照（由调用方按 available_dates() 取）。
+    不要求日历连续：漏采一天就按实际份数算，否则漏一天淘汰就永久停摆。
+    份数不够 grace_days 时直接不删——刚接入只有一两份快照，此时无从判断「长期」。
+    """
+    if len(recent_snapshots) < grace_days:
+        logger.info(
+            "现存快照仅 %d 份（< %d 天），本次跳过淘汰：份数不够无从判断「长期低于门槛」。",
+            len(recent_snapshots), grace_days,
+        )
+        return []
+
+    removed: list[str] = []
+    try:
+        with _db_lock:
+            lock_fd = open(_lock_file_path(), "w")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+                if not os.path.exists(DB_FILE_PATH):
+                    return []
+                try:
+                    with open(DB_FILE_PATH, "r", encoding="utf-8") as f:
+                        disk_db = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    logger.error("DB 读取失败，放弃本次淘汰（不覆盖磁盘上的现有数据）。")
+                    return []
+
+                projects = disk_db.get("projects", {})
+                removed = sorted(_stale_project_names(
+                    projects, recent_snapshots, star_floor,
+                    protect_new_days, keep or frozenset(),
+                ))
+                for name in removed:
+                    del projects[name]
+
+                if removed:
+                    temp_path = DB_FILE_PATH + ".tmp"
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        json.dump(disk_db, f, ensure_ascii=False, indent=2)
+                    os.replace(temp_path, DB_FILE_PATH)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+    except IOError as e:
+        logger.error(f"DB 淘汰失败: {e}")
+        return []
+    return removed
+
+
 def save_db_desc_only(db: dict) -> int:
     """仅持久化 desc 字段，避免刷新快照基线字段。
 
@@ -271,12 +419,16 @@ def update_db_project(
     description = repo_item.get("description") or ""
     language = repo_item.get("language") or ""
     topics = repo_item.get("topics") or []
-    forks = repo_item.get("forks_count", 0)
+    # 缺 forks_count 时不能当成 0：调用方的 repo_item 不一定来自 Search API 全量返回
+    # （周报候选池取自每日快照，只带 star + created_at），照写 0 会把已有的 forks 抹掉。
+    # 其余展示字段本来就是"仅补空"，唯独 forks 是无条件覆写，所以只有它需要这层区分。
+    forks = repo_item.get("forks_count")
     created_at = repo_item.get("created_at") or ""
 
     if full_name in db_projects:
         db_projects[full_name]["star"] = current_star
-        db_projects[full_name]["forks"] = forks
+        if forks is not None:
+            db_projects[full_name]["forks"] = forks
         db_projects[full_name]["refreshed_at"] = _format_utc_timestamp()
         if created_at and not db_projects[full_name].get("created_at"):
             db_projects[full_name]["created_at"] = created_at
@@ -291,7 +443,7 @@ def update_db_project(
     else:
         db_projects[full_name] = {
             "star": current_star,
-            "forks": forks,
+            "forks": forks or 0,
             "created_at": created_at,
             "refreshed_at": _format_utc_timestamp(),
             "desc": "",

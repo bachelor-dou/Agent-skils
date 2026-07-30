@@ -1,0 +1,126 @@
+"""用户收藏 —— 按 user_id 存清单。
+
+    data/favorites.json
+    {"users": {"<user_id>": [{"repo": "owner/name",
+                              "favorited_at": "YYYY-MM-DDTHH:MM:SSZ",
+                              "source_report": "2026-07-01.md",
+                              "short_desc": "一句话概要",
+                              "category": "效率"}]}}
+
+收藏是**全局**的:某项目一旦被收藏,在任何包含它的报告里都显示为已收藏。
+
+和旧实现的区别只有一处,但是个真 bug:旧 `set_favorite` 是「`_read_all()` 拿共享锁、
+读完放锁 → 改 → `_write_all()` 再拿排他锁」。两个并发的收藏请求会各读到同一份旧数据,
+后写的把前一个的收藏抹掉。现在整个读-改-写在同一把排他锁里(`transaction`)。
+
+注意收藏**不再是淘汰的保护名单** —— 淘汰只看两条(GitHub 查不到、star 低于门槛)。
+被淘汰的仓库若重新涨回门槛会被重新收录,而收藏记录本身从不因淘汰而删除,
+所以用户的收藏不会丢。
+"""
+
+from __future__ import annotations
+
+import re
+
+from ... import config
+from ...common.timeutil import stamp
+from .atomic import read_json, transaction
+
+USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+MAX_PER_USER = 500
+MAX_CATEGORY_LEN = 20
+
+
+def valid_user_id(user_id: str) -> bool:
+    return bool(user_id and USER_ID_RE.match(user_id))
+
+
+def valid_repo(repo: str) -> bool:
+    return bool(repo and REPO_RE.match(repo))
+
+
+def clean_category(category: str) -> str:
+    """规整分类标签:剔除控制字符、折叠空白、截断长度;空则返回 ''(未分类)。
+
+    先把控制字符换成空格再 `split()` 折叠,而不是直接删 —— 直接删会把
+    "a\\x00b" 变成 "ab",两个词粘成一个。
+    """
+    if not category:
+        return ""
+    return " ".join(_CTRL_RE.sub(" ", str(category)).split())[:MAX_CATEGORY_LEN]
+
+
+def _empty() -> dict:
+    return {"users": {}}
+
+
+def _users_of(data: dict) -> dict:
+    users = data.get("users")
+    return users if isinstance(users, dict) else {}
+
+
+def get(user_id: str) -> list[dict]:
+    """该用户的收藏清单(新收藏在前)。非法 user_id 返回空表。"""
+    if not valid_user_id(user_id):
+        return []
+    data = read_json(config.FAVORITES_PATH, default=_empty())
+    items = _users_of(data).get(user_id, [])
+    return items if isinstance(items, list) else []
+
+
+def all_repos() -> set[str]:
+    """所有用户收藏过的仓库全名,跨用户合并。"""
+    data = read_json(config.FAVORITES_PATH, default=_empty())
+    return {
+        item["repo"]
+        for items in _users_of(data).values() if isinstance(items, list)
+        for item in items if isinstance(item, dict) and item.get("repo")
+    }
+
+
+def set_favorite(user_id: str, repo: str, action: str, *,
+                 source_report: str = "", short_desc: str | None = None,
+                 category: str | None = None) -> list[dict]:
+    """add / remove 单个收藏,返回更新后的清单。非法输入抛 `ValueError`。
+
+    `short_desc` 与 `category` 同语义:`None` = 不改动(新增时存空串),
+    字符串(含 `""`)= 覆盖,其中 `""` 表示清空 / 归到未分类。
+    """
+    if not valid_user_id(user_id):
+        raise ValueError("invalid user_id")
+    if not valid_repo(repo):
+        raise ValueError("invalid repo")
+    if action not in ("add", "remove"):
+        raise ValueError("invalid action")
+
+    with transaction(config.FAVORITES_PATH, default=_empty()) as tx:
+        if not isinstance(tx.data, dict):
+            tx.data = _empty()
+        users = tx.data.setdefault("users", {})
+        items = [x for x in users.get(user_id, []) if isinstance(x, dict)]
+
+        if action == "remove":
+            items = [x for x in items if x.get("repo") != repo]
+        else:
+            existing = next((x for x in items if x.get("repo") == repo), None)
+            if existing is not None:          # 幂等:重复 add 只补概要/分类
+                if short_desc is not None:
+                    existing["short_desc"] = short_desc
+                if category is not None:
+                    existing["category"] = clean_category(category)
+            else:
+                if len(items) >= MAX_PER_USER:
+                    raise ValueError("favorites limit reached")
+                items.insert(0, {
+                    "repo": repo,
+                    "favorited_at": stamp(),
+                    "source_report": source_report or "",
+                    "short_desc": short_desc or "",
+                    "category": clean_category(category or ""),
+                })
+
+        users[user_id] = items
+        return items

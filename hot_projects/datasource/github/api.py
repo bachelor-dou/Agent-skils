@@ -4,11 +4,14 @@ GitHub API 封装
 封装 GitHub REST / GraphQL API 的底层调用，包括：
   - 仓库搜索（Search API）
   - Star 范围自动分段
-  - Stargazers 分页查询（REST，返回 starred_at）
-  - Stargazers 批量查询（GraphQL，游标翻页）
+  - 单仓库信息 / README / 提交 / release
 
 所有函数接收 token_idx 参数（由 Worker 绑定），不再内部 acquire/release。
 限流（403/429）和 Token 失效（401）通过抛异常交由 Worker 处理。
+
+例外是没有 Worker 调度的同步单仓库请求（仓库信息 / README / 提交 / release / tree）
+和 total_count 查询：它们的 token_idx 只是首选，撞限流会自己顺延到其他 token，
+只有全部 token 都不可用时才抛出异常。见 _with_token_rotation。
 """
 
 import base64
@@ -16,8 +19,8 @@ import binascii
 import asyncio
 import logging
 import time
-from datetime import datetime
 from email.utils import parsedate_to_datetime
+from typing import Any, Callable
 
 import requests
 
@@ -26,20 +29,15 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime when async path is used
     httpx = None
 
-from ...config import (
-    MIN_STAR,
-    SEARCH_REQUEST_INTERVAL,
-)
+from ...config import MIN_STAR
 from .token_pool import GitHubTokenPool
-from ...infra.exceptions import RateLimitError, RetryableError, TokenInvalidError
+from ...infra.exceptions import RateLimitError, TokenInvalidError
 
 logger = logging.getLogger("hot_projects")
 
-# stargazers 瞬时故障（网络异常 / 5xx）处理：先原地快速重试，仍失败则抛 RetryableError
-# 交由调度器释放 token 并重排队，避免把瞬时故障误当“大仓库”降级到昂贵的 GraphQL 采样，
-# 也避免在原地退避 sleep 期间长期占用 token。422（REST 分页上限=超大仓库）仍走采样。
-STARGAZER_TRANSIENT_FAST_RETRIES = 2
-STARGAZER_REQUEUE_BACKOFF_SECONDS = 2.0
+# Search API 相邻请求的最小间隔（秒）。搜索/扫描/详情补全三条链路共用，
+# 都在本模块这一层发请求，所以定义在这里而不是 config——它是限速实现细节，不是可调策略。
+SEARCH_REQUEST_INTERVAL = 1.3
 
 # ──────────────────────────────────────────────────────────────
 # Star 范围自动分段 — 常量
@@ -140,6 +138,69 @@ def _format_request_error(err: Exception) -> str:
             parts.append(f"cause={cause_text}")
 
     return ", ".join(parts)
+
+
+def _with_token_rotation(
+    token_mgr: GitHubTokenPool,
+    attempt: Callable[[int], Any],
+    *,
+    what: str,
+    preferred_token_idx: int = 0,
+) -> tuple[Any, int]:
+    """依次换 token 执行 attempt(token_idx)，限流/失效就顺延到下一个。
+
+    同步 REST 链路没有 AsyncTokenPool.acquire 那样的调度器帮它挑 token——调用方全都写死
+    token_idx=0，于是所有单仓库请求（报告抓 README/提交、Agent 各单仓库工具）都挤在
+    第一个 token 上，另外十几个闲着。额度耗尽后 report.py 只是 except+warning，
+    仓库静默失去素材、LLM 只能靠元数据编描述：不崩，但整篇报告的质量一起悄悄塌。
+
+    attempt 必须自己完成一次完整请求（含网络抖动重试），并按老约定抛
+    RateLimitError / TokenInvalidError；其它返回值（含 404 的 None）都算成功，不触发换 token。
+
+    Returns:
+        (attempt 的返回值, 实际用成的 token 序号)
+
+    Raises:
+        RateLimitError:    全部 token 都限流时抛 reset 最早的那个，让调用方知道最短等多久。
+        TokenInvalidError: 没有任何 token 限流、但有 token 失效时抛最后一个。
+    """
+    token_count = len(getattr(token_mgr, "tokens", []))
+    if token_count <= 1:
+        # 单 token（含测试里的桩）没有可换的，直接透传，异常语义与从前完全一致。
+        return attempt(preferred_token_idx), preferred_token_idx
+
+    if hasattr(token_mgr, "rest_token_order"):
+        order = token_mgr.rest_token_order(preferred_token_idx)
+    else:  # 测试桩只提供 tokens/get_rest_headers
+        order = [preferred_token_idx] + [i for i in range(token_count) if i != preferred_token_idx]
+    earliest_rate_limit: tuple[int, float] | None = None
+    last_invalid: TokenInvalidError | None = None
+
+    for token_idx in order:
+        try:
+            return attempt(token_idx), token_idx
+        except RateLimitError as exc:
+            if hasattr(token_mgr, "record_rate_limited"):
+                token_mgr.record_rate_limited(token_idx, exc.reset_time, str(exc))
+            logger.warning(
+                "%s 命中限流: token=%s, reset=%s，顺延到下一个 token。",
+                what, token_idx, int(exc.reset_time),
+            )
+            if earliest_rate_limit is None or exc.reset_time < earliest_rate_limit[1]:
+                earliest_rate_limit = (token_idx, exc.reset_time)
+        except TokenInvalidError as exc:
+            # 401 走 strikes/冷却而非永久失效，避免瞬时 401 把有效 token 踢光（与异步一致）。
+            if hasattr(token_mgr, "record_auth_failed"):
+                token_mgr.record_auth_failed(token_idx, str(exc))
+            elif hasattr(token_mgr, "record_invalid"):
+                token_mgr.record_invalid(token_idx, str(exc))
+            logger.warning("%s token 失效: token=%s，顺延到下一个 token。", what, token_idx)
+            last_invalid = exc
+
+    if earliest_rate_limit is not None:
+        token_idx, reset_time = earliest_rate_limit
+        raise RateLimitError(token_idx=token_idx, reset_time=reset_time)
+    raise last_invalid  # 循环必然以两类异常之一收尾，否则上面已 return
 
 
 # ══════════════════════════════════════════════════════════════
@@ -362,139 +423,6 @@ async def async_search_github_repos(
             await async_client.aclose()
 
 
-async def async_get_stargazers_page(
-    token_mgr: GitHubTokenPool,
-    owner: str,
-    repo: str,
-    page: int,
-    token_idx: int | None,
-    per_page: int = 100,
-    client=None,
-) -> list[dict] | None:
-    """异步获取指定仓库 stargazers 的第 page 页（3 次重试）。
-
-    B模式：请求级 token 借还。
-    与异步 Search helper 一致，当 token_idx 为 None 时，每次 stargazers
-    请求前临时 acquire，请求结束后立即 release。
-    """
-    url = f"https://api.github.com/repos/{owner}/{repo}/stargazers"
-    params = {"per_page": per_page, "page": page}
-
-    owns_client = client is None
-    async_client = client or _build_async_client(timeout_seconds=60.0)
-
-    last_status: int | None = None  # 诊断用：耗尽重试返回 None 时区分 422(真上限) vs 403/其它
-    try:
-        for attempt in range(3):
-            attempt_token_idx = token_idx
-            borrowed_token = False
-            try:
-                # B模式入口：每次 stargazers 请求前临时借 token。
-                if attempt_token_idx is None:
-                    attempt_token_idx = await token_mgr.acquire()
-                    borrowed_token = True
-
-                headers = token_mgr.get_star_headers(attempt_token_idx)
-                _diag_req_t0 = time.time()  # [DIAG-P0] 仅诊断
-                resp = await async_client.get(url, headers=headers, params=params)
-                logger.debug(
-                    "[DIAG-REQ] stargazers %s/%s page=%s token=%s attempt=%s elapsed=%.2fs status=%s",
-                    owner, repo, page, attempt_token_idx, attempt + 1,
-                    time.time() - _diag_req_t0, resp.status_code,
-                )
-                _check_response_async(resp, attempt_token_idx)
-                if resp.status_code == 200:
-                    try:
-                        # B模式成功路径：页请求完成后立即归还 token。
-                        if borrowed_token:
-                            await token_mgr.release(attempt_token_idx)
-                        return resp.json()
-                    except ValueError:
-                        logger.error("异步 stargazers 响应 JSON 解析失败: %s/%s page=%s", owner, repo, page)
-                        if borrowed_token:
-                            await token_mgr.release(attempt_token_idx)
-                        return None
-                if resp.status_code == 422:
-                    # 422 = REST stargazers 翻页超过上限（约 4 万 star 的超大仓库），
-                    # 这是真正需要 GraphQL 采样的信号，返回 None 让上层降级采样。
-                    if borrowed_token:
-                        await token_mgr.release(attempt_token_idx)
-                    return None
-                if resp.status_code >= 500:
-                    # 5xx 视为瞬时服务端故障：快速重试，耗尽后重排队（不原地占 token 退避）。
-                    if borrowed_token:
-                        await token_mgr.release(attempt_token_idx)
-                    if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                        await asyncio.sleep(2 * 2 ** attempt)
-                        continue
-                    raise RetryableError(
-                        time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                        f"stargazers {owner}/{repo} page={page} server {resp.status_code}",
-                    )
-                last_status = resp.status_code
-                logger.debug(
-                    "异步 stargazers 请求失败: %s/%s page=%s, status=%s",
-                    owner,
-                    repo,
-                    page,
-                    resp.status_code,
-                )
-                if borrowed_token:
-                    await token_mgr.release(attempt_token_idx)
-                await asyncio.sleep(2 * 2 ** attempt)
-            except RateLimitError as e:
-                if borrowed_token:
-                    # B模式限流路径：helper 内写回 cooldown，任务层无需关心 token 状态。
-                    await token_mgr.mark_rate_limited(attempt_token_idx, e.reset_time, str(e))
-                    continue
-                raise
-            except TokenInvalidError as e:
-                if borrowed_token:
-                    await token_mgr.mark_invalid(attempt_token_idx, str(e))
-                    continue
-                raise
-            except Exception as e:
-                if httpx is not None and isinstance(e, httpx.RequestError):
-                    if borrowed_token:
-                        await token_mgr.release(attempt_token_idx)
-                    logger.debug(
-                        "异步 stargazers 请求异常: %s/%s page=%s, %s",
-                        owner,
-                        repo,
-                        page,
-                        _format_request_error(e),
-                    )
-                    logger.debug(
-                        "[DIAG-REQ] stargazers %s/%s page=%s token=%s attempt=%s elapsed=%.2fs status=EXC:%s",
-                        owner, repo, page, attempt_token_idx, attempt + 1,
-                        time.time() - _diag_req_t0, type(e).__name__,
-                    )
-                    # 网络异常：快速重试，耗尽后重排队，而非原地长时间退避占着 token。
-                    if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                        await asyncio.sleep(2 * 2 ** attempt)
-                        continue
-                    raise RetryableError(
-                        time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                        f"stargazers {owner}/{repo} page={page} network {type(e).__name__}",
-                    )
-                if borrowed_token:
-                    await token_mgr.release(attempt_token_idx)
-                raise
-
-        # 耗尽 3 次重试仍失败。这里的 None 不是 422（422 已在上面直接 return），
-        # 大概率是 403 二级限流/滥用检测或 4xx——上层会把它当"超大仓库"降级采样，
-        # 但其实本可精确。打一条 WARNING 暴露真实状态，便于区分"真上限"和"被误降级"。
-        logger.warning(
-            "[STARGAZERS] %s/%s page=%s 3 次重试仍失败，last_status=%s（非422，疑似二级限流/网络，"
-            "上层将误降级为采样外推）。",
-            owner, repo, page, last_status,
-        )
-        return None
-    finally:
-        if owns_client and hasattr(async_client, "aclose"):
-            await async_client.aclose()
-
-
 # ══════════════════════════════════════════════════════════════
 # 单仓库信息获取（REST /repos API）
 # ══════════════════════════════════════════════════════════════
@@ -509,31 +437,40 @@ def fetch_repo_info(
     """
     通过 /repos/{owner}/{repo} 直接获取仓库信息（无 Search API 限制）。
 
+    token_idx 只是首选：限流/失效会自动顺延到其他 token（见 _with_token_rotation）。
+
     Returns:
-        仓库信息字典（与 Search API items 结构兼容），失败返回 None。
+        仓库信息字典（与 Search API items 结构兼容），失败或 404 返回 None。
 
     Raises:
-        TokenInvalidError, RateLimitError
+        TokenInvalidError, RateLimitError：全部 token 都不可用时才抛。
     """
     url = f"https://api.github.com/repos/{owner}/{repo_name}"
-    headers = token_mgr.get_rest_headers(token_idx)
 
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=headers, timeout=60)
-            _check_response(resp, token_idx)
-            if resp.status_code == 200:
-                return resp.json()
-            if resp.status_code == 404:
-                return None
-            time.sleep(3 * 2 ** attempt)
-        except (TokenInvalidError, RateLimitError):
-            raise
-        except requests.RequestException as e:
-            logger.error("获取仓库信息失败: %s/%s, attempt=%d, error=%s", owner, repo_name, attempt + 1, e)
-            time.sleep(3 * 2 ** attempt)
+    def _attempt(idx: int) -> dict | None:
+        headers = token_mgr.get_rest_headers(idx)
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=headers, timeout=60)
+                _check_response(resp, idx)
+                if resp.status_code == 200:
+                    return resp.json()
+                if resp.status_code == 404:
+                    return None
+                time.sleep(3 * 2 ** attempt)
+            except (TokenInvalidError, RateLimitError):
+                raise
+            except requests.RequestException as e:
+                logger.error("获取仓库信息失败: %s/%s, attempt=%d, error=%s",
+                             owner, repo_name, attempt + 1, e)
+                time.sleep(3 * 2 ** attempt)
+        return None
 
-    return None
+    result, _ = _with_token_rotation(
+        token_mgr, _attempt,
+        what=f"仓库信息 {owner}/{repo_name}", preferred_token_idx=token_idx,
+    )
+    return result
 
 
 def _fetch_repo_endpoint_json(
@@ -543,37 +480,40 @@ def _fetch_repo_endpoint_json(
     params: dict | None = None,
     accept: str | None = None,
 ) -> dict | list | None:
-    """请求单个仓库相关 REST 接口，返回 JSON（404/422 视为无数据）。"""
-    headers = token_mgr.get_rest_headers(token_idx)
-    if accept:
-        headers = dict(headers)
-        headers["Accept"] = accept
+    """请求单个仓库相关 REST 接口，返回 JSON（404/422 视为无数据）。
 
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=headers, params=params, timeout=60)
-            _check_response(resp, token_idx)
-            if resp.status_code == 200:
-                try:
-                    return resp.json()
-                except ValueError:
-                    logger.warning("仓库接口 JSON 解析失败: %s", url)
+    readme / releases / commits / tree 四个抓取函数都走这里，所以 token 轮换只需接在这一处。
+    token_idx 是首选，限流/失效自动顺延（见 _with_token_rotation）。
+    """
+    def _attempt(idx: int) -> dict | list | None:
+        headers = token_mgr.get_rest_headers(idx)
+        if accept:
+            headers = dict(headers)
+            headers["Accept"] = accept
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=headers, params=params, timeout=60)
+                _check_response(resp, idx)
+                if resp.status_code == 200:
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        logger.warning("仓库接口 JSON 解析失败: %s", url)
+                        return None
+                if resp.status_code in (404, 422):
                     return None
-            if resp.status_code in (404, 422):
-                return None
-            time.sleep(2 * 2 ** attempt)
-        except (TokenInvalidError, RateLimitError):
-            raise
-        except requests.RequestException as e:
-            logger.warning(
-                "仓库接口请求异常: %s, attempt=%d, error=%s",
-                url,
-                attempt + 1,
-                e,
-            )
-            time.sleep(2 * 2 ** attempt)
+                time.sleep(2 * 2 ** attempt)
+            except (TokenInvalidError, RateLimitError):
+                raise
+            except requests.RequestException as e:
+                logger.warning("仓库接口请求异常: %s, attempt=%d, error=%s", url, attempt + 1, e)
+                time.sleep(2 * 2 ** attempt)
+        return None
 
-    return None
+    result, _ = _with_token_rotation(
+        token_mgr, _attempt, what=f"仓库接口 {url}", preferred_token_idx=token_idx,
+    )
+    return result
 
 
 def fetch_repo_readme_excerpt(
@@ -797,50 +737,12 @@ def _get_search_total_count_with_fallback(
     preferred_token_idx: int,
 ) -> tuple[int, int]:
     """优先使用指定 token 获取 total_count，限流或失效时自动尝试其他 token。"""
-    token_count = len(getattr(token_mgr, "tokens", []))
-    if token_count <= 1:
-        return get_search_total_count(token_mgr, query, preferred_token_idx), preferred_token_idx
-
-    token_order = [preferred_token_idx] + [
-        idx for idx in range(token_count) if idx != preferred_token_idx
-    ]
-    earliest_rate_limit: tuple[int, float] | None = None
-    last_token_invalid: TokenInvalidError | None = None
-
-    for token_idx in token_order:
-        try:
-            total = get_search_total_count(token_mgr, query, token_idx)
-            return total, token_idx
-        except RateLimitError as exc:
-            if hasattr(token_mgr, "record_rate_limited"):
-                token_mgr.record_rate_limited(token_idx, exc.reset_time, str(exc))
-            logger.warning(
-                "total_count 查询命中限流: query='%s', token=%s, reset=%s，尝试其他 token。",
-                query,
-                token_idx,
-                int(exc.reset_time),
-            )
-            if earliest_rate_limit is None or exc.reset_time < earliest_rate_limit[1]:
-                earliest_rate_limit = (token_idx, exc.reset_time)
-        except TokenInvalidError as exc:
-            # 401 走 strikes/冷却而非永久失效，避免瞬时 401 把有效 token 踢光（与异步一致）。
-            if hasattr(token_mgr, "record_auth_failed"):
-                token_mgr.record_auth_failed(token_idx, str(exc))
-            elif hasattr(token_mgr, "record_invalid"):
-                token_mgr.record_invalid(token_idx, str(exc))
-            logger.warning(
-                "total_count 查询 token 失效: query='%s', token=%s，尝试其他 token。",
-                query,
-                token_idx,
-            )
-            last_token_invalid = exc
-
-    if earliest_rate_limit is not None:
-        token_idx, reset_time = earliest_rate_limit
-        raise RateLimitError(token_idx=token_idx, reset_time=reset_time)
-    if last_token_invalid is not None:
-        raise last_token_invalid
-    return get_search_total_count(token_mgr, query, preferred_token_idx), preferred_token_idx
+    return _with_token_rotation(
+        token_mgr,
+        lambda idx: get_search_total_count(token_mgr, query, idx),
+        what=f"total_count 查询 query='{query}'",
+        preferred_token_idx=preferred_token_idx,
+    )
 
 
 def auto_split_star_range(
@@ -886,330 +788,3 @@ def auto_split_star_range(
     left = auto_split_star_range(token_mgr, low, mid, active_token_idx, max_results, min_span, extra_query)
     right = auto_split_star_range(token_mgr, mid + 1, high, active_token_idx, max_results, min_span, extra_query)
     return left + right
-
-
-# ══════════════════════════════════════════════════════════════
-# REST Stargazers 分页查询
-# ══════════════════════════════════════════════════════════════
-
-
-def get_stargazers_page(
-    token_mgr: GitHubTokenPool,
-    owner: str,
-    repo: str,
-    page: int,
-    token_idx: int,
-    per_page: int = 100,
-) -> list[dict] | None:
-    """
-    获取指定仓库 stargazers 的第 page 页（3 次重试）。
-
-    Returns:
-        [{"starred_at": ..., "user": {...}}, ...] 或 None（失败/不可访问）
-
-    Raises:
-        TokenInvalidError, RateLimitError
-    """
-    url = f"https://api.github.com/repos/{owner}/{repo}/stargazers"
-    params = {"per_page": per_page, "page": page}
-    headers = token_mgr.get_star_headers(token_idx)
-
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=headers, params=params, timeout=60)
-            _check_response(resp, token_idx)
-            if resp.status_code == 200:
-                try:
-                    return resp.json()
-                except ValueError:
-                    logger.error(f"stargazers 响应 JSON 解析失败: {owner}/{repo} page={page}")
-                    return None
-            if resp.status_code == 422:
-                # 422 = 超大仓库 REST 分页上限，返回 None 让上层降级 GraphQL 采样。
-                return None
-            if resp.status_code >= 500:
-                # 5xx 瞬时服务端故障：快速重试后抛 RetryableError，不再返回 None
-                # 被误当作“大仓库”降级采样（与异步路径对齐）。
-                if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                    time.sleep(2 * 2 ** attempt)
-                    continue
-                raise RetryableError(
-                    time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                    f"stargazers {owner}/{repo} page={page} server {resp.status_code}",
-                )
-            logger.debug(
-                f"stargazers 请求失败: {owner}/{repo} page={page}, "
-                f"status={resp.status_code}"
-            )
-            time.sleep(2 * 2 ** attempt)
-        except (TokenInvalidError, RateLimitError):
-            raise
-        except requests.RequestException as e:
-            logger.debug(f"stargazers 请求异常: {owner}/{repo} page={page}, {e}")
-            # 网络异常：快速重试后抛 RetryableError（同步链由上层转 unresolved），不误降级采样。
-            if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                time.sleep(2 * 2 ** attempt)
-                continue
-            raise RetryableError(
-                time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                f"stargazers {owner}/{repo} page={page} network {type(e).__name__}",
-            )
-
-    return None
-
-
-# ══════════════════════════════════════════════════════════════
-# GraphQL Stargazers 批量查询
-# ══════════════════════════════════════════════════════════════
-
-
-def graphql_stargazers_batch(
-    token_mgr: GitHubTokenPool,
-    owner: str,
-    repo: str,
-    token_idx: int,
-    last: int = 100,
-    before: str | None = None,
-) -> tuple[list[datetime], str | None]:
-    """
-    单次 GraphQL 请求获取一批 stargazers（从最新往前翻页）。
-
-    Raises:
-        TokenInvalidError, RateLimitError
-    """
-    query_str = """
-    query($owner: String!, $name: String!, $last: Int!, $before: String) {
-      repository(owner: $owner, name: $name) {
-        stargazers(last: $last, orderBy: {field: STARRED_AT, direction: ASC}, before: $before) {
-          edges {
-            starredAt
-            cursor
-          }
-        }
-      }
-    }
-    """
-    variables: dict = {"owner": owner, "name": repo, "last": last}
-    if before:
-        variables["before"] = before
-
-    headers = token_mgr.get_graphql_headers(token_idx)
-
-    for attempt in range(3):
-        try:
-            resp = requests.post(
-                "https://api.github.com/graphql",
-                headers=headers,
-                json={"query": query_str, "variables": variables},
-                timeout=60,
-            )
-            _check_response(resp, token_idx)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except ValueError:
-                    logger.error(f"GraphQL 响应 JSON 解析失败: {owner}/{repo}")
-                    return [], None
-
-                if "errors" in data:
-                    logger.warning(f"GraphQL 返回错误: {owner}/{repo}, {data['errors']}")
-                    return [], None
-
-                repo_data = data.get("data", {}).get("repository")
-                if not repo_data:
-                    return [], None
-
-                edges = repo_data.get("stargazers", {}).get("edges", [])
-                timestamps: list[datetime] = []
-                first_cursor: str | None = None
-
-                for e in edges:
-                    t = _parse_starred_at(e.get("starredAt", ""))
-                    if t:
-                        timestamps.append(t)
-                    if first_cursor is None:
-                        first_cursor = e.get("cursor")
-
-                return timestamps, first_cursor
-            else:
-                # 非 200（多为 5xx）瞬时故障：快速重试后抛 RetryableError，避免采样
-                # 中途失败时用残缺样本外推出错误增长值。
-                if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                    time.sleep(3 * 2 ** attempt)
-                    continue
-                raise RetryableError(
-                    time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                    f"graphql {owner}/{repo} server {resp.status_code}",
-                )
-        except (TokenInvalidError, RateLimitError):
-            raise
-        except requests.RequestException as e:
-            if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                time.sleep(3 * 2 ** attempt)
-                continue
-            raise RetryableError(
-                time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                f"graphql {owner}/{repo} network {type(e).__name__}",
-            )
-
-    return [], None
-
-
-async def async_graphql_stargazers_batch(
-    token_mgr: GitHubTokenPool,
-    owner: str,
-    repo: str,
-    token_idx: int | None,
-    last: int = 100,
-    before: str | None = None,
-    client=None,
-) -> tuple[list[datetime], str | None]:
-    """异步获取一批 GraphQL stargazers 数据。"""
-    query_str = """
-    query($owner: String!, $name: String!, $last: Int!, $before: String) {
-      repository(owner: $owner, name: $name) {
-        stargazers(last: $last, orderBy: {field: STARRED_AT, direction: ASC}, before: $before) {
-          edges {
-            starredAt
-            cursor
-          }
-        }
-      }
-    }
-    """
-    variables: dict = {"owner": owner, "name": repo, "last": last}
-    if before:
-        variables["before"] = before
-
-    owns_client = client is None
-    async_client = client or _build_async_client(timeout_seconds=60.0)
-
-    try:
-        for attempt in range(3):
-            attempt_token_idx = token_idx
-            borrowed_token = False
-            try:
-                if attempt_token_idx is None:
-                    attempt_token_idx = await token_mgr.acquire()
-                    borrowed_token = True
-
-                headers = token_mgr.get_graphql_headers(attempt_token_idx)
-                _diag_req_t0 = time.time()  # [DIAG-P0] 仅诊断
-                resp = await async_client.post(
-                    "https://api.github.com/graphql",
-                    headers=headers,
-                    json={"query": query_str, "variables": variables},
-                )
-                logger.debug(
-                    "[DIAG-REQ] graphql %s/%s token=%s attempt=%s elapsed=%.2fs status=%s",
-                    owner, repo, attempt_token_idx, attempt + 1,
-                    time.time() - _diag_req_t0, resp.status_code,
-                )
-                _check_response_async(resp, attempt_token_idx)
-                if resp.status_code == 200:
-                    try:
-                        data = resp.json()
-                    except ValueError:
-                        logger.error("异步 GraphQL 响应 JSON 解析失败: %s/%s", owner, repo)
-                        if borrowed_token:
-                            await token_mgr.release(attempt_token_idx)
-                        return [], None
-
-                    if "errors" in data:
-                        logger.warning("异步 GraphQL 返回错误: %s/%s, %s", owner, repo, data["errors"])
-                        if borrowed_token:
-                            await token_mgr.release(attempt_token_idx)
-                        return [], None
-
-                    repo_data = data.get("data", {}).get("repository")
-                    if not repo_data:
-                        if borrowed_token:
-                            await token_mgr.release(attempt_token_idx)
-                        return [], None
-
-                    edges = repo_data.get("stargazers", {}).get("edges", [])
-                    timestamps: list[datetime] = []
-                    first_cursor: str | None = None
-
-                    for entry in edges:
-                        ts = _parse_starred_at(entry.get("starredAt", ""))
-                        if ts:
-                            timestamps.append(ts)
-                        if first_cursor is None:
-                            first_cursor = entry.get("cursor")
-
-                    if borrowed_token:
-                        await token_mgr.release(attempt_token_idx)
-                    return timestamps, first_cursor
-
-                if borrowed_token:
-                    await token_mgr.release(attempt_token_idx)
-                # 非 200 瞬时故障：快速重试后抛 RetryableError 交调度器重排，
-                # 不把采样中途失败当“无数据”而用残缺样本外推。
-                if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                    await asyncio.sleep(3 * 2 ** attempt)
-                    continue
-                raise RetryableError(
-                    time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                    f"graphql {owner}/{repo} server {resp.status_code}",
-                )
-            except RateLimitError as e:
-                if borrowed_token:
-                    await token_mgr.mark_rate_limited(attempt_token_idx, e.reset_time, str(e))
-                    continue
-                raise
-            except TokenInvalidError as e:
-                if borrowed_token:
-                    await token_mgr.mark_invalid(attempt_token_idx, str(e))
-                    continue
-                raise
-            except Exception as e:
-                if httpx is not None and isinstance(e, httpx.RequestError):
-                    if borrowed_token:
-                        await token_mgr.release(attempt_token_idx)
-                    logger.debug(
-                        "异步 GraphQL 请求异常: %s/%s, %s",
-                        owner,
-                        repo,
-                        _format_request_error(e),
-                    )
-                    logger.debug(
-                        "[DIAG-REQ] graphql %s/%s token=%s attempt=%s elapsed=%.2fs status=EXC:%s",
-                        owner, repo, attempt_token_idx, attempt + 1,
-                        time.time() - _diag_req_t0, type(e).__name__,
-                    )
-                    if attempt < STARGAZER_TRANSIENT_FAST_RETRIES:
-                        await asyncio.sleep(3 * 2 ** attempt)
-                        continue
-                    raise RetryableError(
-                        time.time() + STARGAZER_REQUEUE_BACKOFF_SECONDS,
-                        f"graphql {owner}/{repo} network {type(e).__name__}",
-                    )
-                if borrowed_token:
-                    await token_mgr.release(attempt_token_idx)
-                raise
-
-        return [], None
-    finally:
-        if owns_client and hasattr(async_client, "aclose"):
-            await async_client.aclose()
-
-
-# ──────────────────────────────────────────────────────────────
-# 工具函数
-# ──────────────────────────────────────────────────────────────
-
-
-def _parse_starred_at(ts: str) -> datetime | None:
-    """解析 starred_at 时间戳字符串为 UTC datetime。"""
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-
-
-def parse_starred_at_from_entry(entry: dict) -> datetime | None:
-    """解析 REST stargazer 条目中的 starred_at 时间戳。"""
-    return _parse_starred_at(entry.get("starred_at", ""))

@@ -340,6 +340,19 @@ class AsyncTokenPool:
         waits = [s.available_at - now for s in self._states if not s.invalid]
         return max(0.0, max(waits, default=0.0))
 
+    def rest_token_order(self, preferred_token_idx: int = 0) -> list[int]:
+        """同步 REST 链路的 token 尝试顺序（首选优先，冷却中的靠后，失效的排除）。
+
+        异步链路有 acquire() 替它挑 token，同步单仓库请求没有调度器，只能自己排队。
+        按 available_at 排序而非固定 [首选, 0, 1, 2...]：否则首选一限流，后面每次调用
+        都要先白撞一个 403 才轮到别人。都没限流时 available_at 全是 0，
+        并列由首选胜出，顺序与从前一致。
+        """
+        order = [idx for idx, s in enumerate(self._states) if not s.invalid]
+        order.sort(key=lambda idx: (self._states[idx].available_at, idx != preferred_token_idx))
+        # 全部失效时退回首选：让调用方照旧撞出 TokenInvalidError，而不是拿到空列表。
+        return order or [preferred_token_idx]
+
     def _has_non_invalid_tokens(self) -> bool:
         return any(not s.invalid for s in self._states)
 
@@ -394,13 +407,6 @@ class GitHubTokenPool(AsyncTokenPool):
         return {
             "Authorization": f"token {self.get_token(token_idx)}",
             "Accept": "application/vnd.github.v3+json",
-        }
-
-    def get_star_headers(self, token_idx: int) -> dict[str, str]:
-        """REST stargazers 请求头（返回 starred_at 时间戳）。"""
-        return {
-            "Authorization": f"token {self.get_token(token_idx)}",
-            "Accept": "application/vnd.github.v3.star+json",
         }
 
     def get_graphql_headers(self, token_idx: int) -> dict[str, str]:
