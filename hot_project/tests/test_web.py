@@ -5,6 +5,7 @@
 """
 
 import time
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,6 +69,15 @@ def test_reports_are_listed_newest_first(client, report_dir):
     names = [r["name"] for r in client.get("/api/reports").json()["reports"]]
     assert names[0] == "2026-07-29.md" or names[0] == "2026-07-30.md"
     assert len(names) == 2
+
+
+def test_the_listed_time_is_a_string_the_browser_parses_correctly(client, report_dir):
+    """前端 `new Date(v)` 把裸数字当**毫秒**,给 st_mtime(秒)不会报错,只会把
+    2026 年静悄悄显示成 1970-01-21 —— 页面照样打开,没人会去点开看那行小字。
+    """
+    item = client.get("/api/reports").json()["reports"][0]
+    assert isinstance(item["modified_at"], str)
+    assert item["modified_at"].startswith(str(date.today().year))
 
 
 def test_a_report_renders_to_html(client, report_dir):

@@ -32,3 +32,4 @@ venv/
 *.swo
 .cursor/
 
+.ocr/

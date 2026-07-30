@@ -29,6 +29,7 @@ import queue
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -200,11 +201,13 @@ async def report_list():
     directory = reports.directory()
     out = []
     for item in reports.listing():
-        path = directory / item.name
-        stat = path.stat()
+        stat = (directory / item.name).stat()
         out.append({"name": item.name, "title": item.title,
                     "day": str(item.day) if item.day else "",
-                    "size": stat.st_size, "modified_at": stat.st_mtime})
+                    "size": stat.st_size,
+                    # 必须是 ISO 字符串:前端 `new Date(v)` 把裸数字当**毫秒**,
+                    # 给 st_mtime(秒)会把 2026 年显示成 1970-01-21。
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat()})
     return {"reports": out}
 
 
