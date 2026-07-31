@@ -1,8 +1,6 @@
 """报告 Markdown → 结构化数据。纯解析,不碰文件系统。
 
-四个调用方共用:Web 渲染、`analyze_report` 工具、`star_trend` 工具、周报的两期对比。
-旧包里后两个各自抄了一份「从元数据里找增长字段」和「在报告里找某个仓库」,
-抄的两份还不完全一样 —— 那正是这个模块存在的理由。
+四个调用方共用:Web 渲染、`analyze_report`、`star_trend`、周报的两期对比。
 
 解析的是 `report.py` 自己写出来的格式,两边必须同时改。守卫在 `test_report.py`:
 生成一份再解析回来,字段对不上就红。
@@ -20,7 +18,7 @@ _META = re.compile(r"-\s*(?P<label>[^:：]+)[:：]\s*(?P<value>.+)")
 _LINK = re.compile(r"链接[:：]\s*(?P<url>.+)")
 _DIGITS = re.compile(r"[^\d-]")
 
-# 这两个字段齐了才算「结构化榜单」。少了就是别的 md(说明、随手记),不该被当报告解析。
+# 这两个字段齐了才算「结构化榜单」,少了就是别的 md,不该被当报告解析。
 _REQUIRED_META = ("创建时间", "总 Star")
 
 
@@ -38,10 +36,7 @@ class Report(NamedTuple):
     entries: list[Entry]
 
     def find(self, repo: str) -> Entry | None:
-        """在报告里找一个仓库:先精确匹配,再子串匹配。
-
-        子串兜底是有意的:用户说「找 langchain」时不该要求他打全 `langchain-ai/langchain`。
-        """
+        """在报告里找一个仓库:先精确匹配,再子串兜底(说「找 langchain」不必打全名)。"""
         target = (repo or "").strip().lower()
         if not target:
             return None
@@ -52,8 +47,8 @@ class Report(NamedTuple):
 def growth_of(metadata: dict[str, str]) -> str:
     """取增长字段的值。
 
-    字段名带着窗口天数(「近7天增长」「近10天增长」),所以只能按「含『增长』」找,
-    不能写死键名 —— 写死的那版在窗口一改就静默返回空。
+    字段名带着窗口天数(「近7天增长」),所以只能按「含『增长』」找 —— 写死键名会在
+    窗口一改时静默返回空。
     """
     label = next((k for k in metadata if "增长" in k), "")
     return metadata.get(label, "") if label else ""

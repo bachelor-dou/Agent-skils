@@ -1,18 +1,11 @@
 """三张榜的 Agent 工具:综合、新项目、关键词。
 
-## 确认守卫
+出榜要先实时取全库当前 star、再为 Top N 逐个调模型写介绍,一次几分钟,所以首次调用只回显
+参数、等用户回「开始」。回显和执行必须是同一份参数:参数存进会话,`confirm=true` 复调时用
+存下的那份 —— 模型复述参数时会漂移(少个 `min_star`、把 top_n 从 20 写成 10),而用户确认
+的是屏幕上那份。
 
-出榜要为 Top N 逐个调模型写介绍,一次几分钟。所以第一次调用不执行,只把**实际会生效的
-参数**原样回显、等用户回一句「开始」。
-
-回显和执行必须是同一份参数,所以首次确认时把参数存进会话,`confirm=true` 复调时用存下的
-那份、而不是模型第二次传来的 —— 模型复述参数时会漂移(少个 `min_star`、把 top_n 从 20
-写成 10),而用户以为自己确认的是屏幕上那份。
-
-## 关键词榜为什么还要发请求
-
-另外两张榜的候选池就是今天的快照。关键词榜不行:「哪些仓库和向量数据库有关」这件事
-快照里没有,只能真去搜一遍。搜到之后走的还是同一条增长/打分/出报告的路。
+关键词榜多一步搜索:「哪些仓库和向量数据库有关」快照和 DB 里都没有,只能真去搜一遍。
 """
 
 from __future__ import annotations
@@ -21,7 +14,6 @@ import json
 import logging
 
 from .. import config
-from ..common.timeutil import age_days
 from . import ranking
 from .spec import Param, Tool
 
@@ -61,26 +53,27 @@ def confirmation(mode: str, params: dict) -> str:
 
 
 def _keyword_pool(ctx, params: dict) -> dict[str, dict] | None:
-    """关键词榜的候选池:搜一遍,再和今天的快照对齐。
+    """关键词榜的候选名单:搜一遍,只留名字和创建时间。
 
-    star 取快照而不是搜索结果里的:增长的减数是快照,被减数必须来自同一条链。
-    搜到但不在快照里的仓库(刚建的、star 没到门槛)拿不到锚点,本来也算不出增长。
+    不带 star —— 那是 `ranking.run` 现取的活儿,搜索结果里那个值到出榜时已经旧了。
+    `created_at` 优先用搜索结果的,DB 里那份兜底(Trending 来的条目没有它)。
     """
     words = params.get("keywords") or []
     if not words:
-        return None
+        # 不能返回 None —— 那在 `_run` 里的含义是「没有候选池」,`ranking.run` 会去排全库:
+        # 用户要关键词榜,拿到一份综合榜,几分钟模型调用全花在不相关的项目上,还不报错。
+        logger.warning("关键词榜收到空的 keywords,候选池按空处理(不退化成全库排名)。")
+        return {}
     found = ctx.gh.keyword_sweep(words, params["min_star"])
     if not found:
         return {}
-    today = ranking.snapshots.load_stars(ranking.utc_today()) or {}
     saved = ranking.universe.load()
     pool = {
-        name: {"star": star, "created_at": (item.get("created_at")
-                                            or saved.get(name, {}).get("created_at", ""))}
+        name: {"created_at": (item.get("created_at")
+                              or saved.get(name, {}).get("created_at", ""))}
         for name, item in found.items()
-        if (star := today.get(name)) is not None and star >= params["min_star"]
     }
-    logger.info("关键词候选池:搜到 %d 个,快照里有 %d 个。", len(found), len(pool))
+    logger.info("关键词候选名单:搜到 %d 个。", len(pool))
     return pool
 
 
@@ -115,15 +108,17 @@ def make(mode: str):
 
         pending = ctx.state.pending_confirmation_signature if ctx.state else None
         stored = (ctx.state.tool_state.get("pending_ranking") or {}) if ctx.state else {}
-        # 「同签名复调」也算确认:有些模型不会带 confirm,而是把参数原样再发一遍
-        if not (pending and (confirm or pending == signature)):
+        # 确认必须认「是哪张榜」:只看 pending 非空的话,回显关键词榜、再拿 confirm=true
+        # 调综合榜就能直接执行,走的还是模型这次传的参数。
+        # 同签名复调也算确认 —— 有些模型不带 confirm,而是把参数原样再发一遍。
+        if not (pending and stored.get("mode") == mode and (confirm or pending == signature)):
             if ctx.state is not None:
                 ctx.state.pending_confirmation_signature = signature
                 ctx.state.tool_state["pending_ranking"] = {"mode": mode, "params": params}
             return {"needs_confirmation": True, "mode": mode, "params": params,
                     "message": confirmation(mode, params)}
 
-        if stored.get("mode") == mode and "params" in stored:
+        if "params" in stored:              # mode 已在上面比过
             params = stored["params"]       # 用回显过的那份,见模块头部
         if ctx.state is not None:
             ctx.state.pending_confirmation_signature = None
@@ -160,7 +155,7 @@ _COMMON = (
 TOOLS = (
     Tool("comprehensive_ranking",
          "【综合热榜·昂贵】按窗口内 star 增长对全库排名,输出综合 Top N。"
-         "候选池是每日快照(全库),不再现扫 GitHub,所以慢的只有写介绍那一步。"
+         "会实时取全库当前 star(几分钟),再和快照基线相减算增长。"
          "执行前请先回显参数并等用户确认『开始』。默认不产报告文件,只把榜单返回给你。",
          make("comprehensive"),
          (*_COMMON, _threshold(config.STAR_GROWTH_THRESHOLD),

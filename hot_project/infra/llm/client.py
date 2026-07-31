@@ -1,14 +1,9 @@
 """多平台客户端:决定这次调用按什么顺序试哪些平台。
 
-两种模式,区别只在**失败之后**:
+两种模式的区别只在**失败之后**:内部调用(没指定 model_id)按目录顺序顺延下一家,韧性优先;
+网页硬切换(指定了 model_id)失败就返回 None —— 用户明确选了 A,悄悄给 B 的答案是另一回事。
 
-    内部调用(没指定 model_id)   按目录顺序逐个试,某个平台挂了顺延下一个。
-                                周报、描述生成这些没人盯着,韧性优先。
-    网页硬切换(指定了 model_id) 只用选中的那个,失败就返回 None。
-                                用户明确选了 A,悄悄回退到 B 给出的答案是另一回事。
-
-`lite` 是「用便宜的子模型」。子模型池跨平台共享:选中的主模型是 azure,lite 却可以借
-硅基流动的 Qwen —— 因为主模型选择和「便宜活儿用谁干」本来就是两件事。
+`lite` 是「用便宜的子模型」,子模型池跨平台共享:主模型是 azure,lite 也可以借别家的。
 """
 
 from __future__ import annotations
@@ -39,10 +34,9 @@ class LLMClient:
         return (sel, name) if sel and name in sel.lite_models else None
 
     def _lite_order(self, preferred: Scheme | None) -> list[tuple[Scheme, str]]:
-        """lite「自动」的候选顺序。
+        """lite「自动」的候选顺序:先主模型所在平台的子模型,再按目录顺序借别家的。
 
-        先用主模型所在平台的子模型,再按目录顺序借别家的。只用真配了子模型的平台
-        (各取首个);全都没配子模型时才退回主模型 —— 那样虽然贵,但至少调得通。
+        全都没配子模型时退回主模型 —— 贵,但至少调得通。
         """
         usable = self.usable()
         ordered = ([preferred] + [s for s in usable if s.id != preferred.id]
@@ -91,9 +85,8 @@ class LLMClient:
         if not order:
             return None
 
-        # 「已经外发过就不能重来」这条不只管平台内的重试,也管换平台:p1 吐了半句才断线,
-        # 回退到 p2 会让用户看到「半句 + 另一个完整答案」—— 和重复重试是同一种坏。
-        # wire 那层只看得见自己这一次请求,看不见前一个平台外发过什么,所以得在这里记。
+        # 「外发过就不能重来」不只管平台内重试,也管换平台:p1 吐了半句才断线,回退到 p2
+        # 会让用户看到「半句 + 另一个完整答案」。wire 只看得见自己这一次请求,所以记在这里。
         emitted = False
         if on_delta is not None:
             inner = on_delta
@@ -121,10 +114,8 @@ class LLMClient:
     def text(self, prompt: str, **kwargs) -> str:
         """单轮问答,只要正文。失败或空回复返回空串。
 
-        绝大多数内部调用(描述生成、批量浓缩)都是这个形状:一段提示词进,一段文字出。
-        旧代码里每个调用点都自己写一遍 `[{"role": "user", ...}]` 加一个
-        `(data.get("choices") or [{}])[0].get("message", {}).get("content")` 的取值链,
-        取值链写错一处就是静默返回空描述。
+        内部调用(描述生成、批量浓缩)都是这个形状,取值链只在这里写一次 —— 抄错一处
+        就是静默返回空描述。
         """
         data = self.chat([{"role": "user", "content": prompt}], **kwargs)
         if not data:

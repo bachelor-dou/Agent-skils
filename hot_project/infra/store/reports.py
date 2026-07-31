@@ -4,12 +4,8 @@
     data/report/2026-07-30_NEW.md      新项目榜
     data/report/2026-07-30_KEY_向量库.md  关键词榜
 
-**文件名不是随手起的,它是唯一的元数据载体。** 日期从文件名解析(`star_trend` 靠它拼时间
-序列),模式后缀让同一天的三张榜互不覆盖,关键词榜还要带方向名 —— 否则同日两个方向的
-榜单会互相盖掉,而且盖掉之后没有任何痕迹。
-
-旧包里「列出报告」写了两遍(`analyze_report.list_reports` 和 `api_server` 里一段
-inline 的 glob),两份对标题的提取方式还不一样。这里只有一份。
+**文件名是唯一的元数据载体。** 日期从文件名解析(`star_trend` 靠它拼时间序列);模式后缀
+和关键词榜的方向名让同一天的多张榜互不覆盖 —— 盖掉之后没有任何痕迹。
 """
 
 from __future__ import annotations
@@ -23,6 +19,7 @@ from typing import NamedTuple
 from ... import config
 from ...common.timeutil import parse_day
 from ...core import report_parse
+from . import atomic
 
 logger = logging.getLogger("hot_project")
 
@@ -51,12 +48,7 @@ def safe_slug(text: str, limit: int = 6) -> str:
 
 def day_of(filename: str) -> date | None:
     m = _DATE.search(filename)
-    if not m:
-        return None
-    try:
-        return parse_day(m.group(1))
-    except ValueError:
-        return None
+    return parse_day(m.group(1)) if m else None
 
 
 def _title_of(path: Path) -> str:
@@ -76,14 +68,22 @@ def listing() -> list[Listed]:
     folder = directory()
     if not folder.is_dir():
         return []
-    paths = sorted(folder.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # glob 和 stat 之间有个窗口:文件正好在这中间被删掉,裸 `p.stat()` 就抛
+    # FileNotFoundError 让整个列表接口 500。取不到时间的排最后。
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return -1.0
+
+    paths = sorted(folder.glob("*.md"), key=mtime, reverse=True)
     return [Listed(p.name, _title_of(p), day_of(p.name)) for p in paths]
 
 
 def resolve_name(raw: str, available: list[Listed] | None = None) -> str | None:
     """用户输入 → 具体文件名。支持「最新」、省略 `.md`。找不到返回 None。
 
-    先挡路径穿越:名字来自 Agent 的工具参数,而工具参数来自模型,模型的输入来自用户。
+    先挡路径穿越:名字经模型的工具参数传进来,最终来自用户输入。
     """
     name = (raw or "").strip()
     if not name or "/" in name or "\\" in name or ".." in name:
@@ -117,8 +117,8 @@ def load(name: str) -> report_parse.Report | None:
 def load_all() -> list[tuple[Listed, report_parse.Report]]:
     """全部能解析的报告,按日期升序。`star_trend` 用它拼时间序列。
 
-    同一天有多份(综合 / 新项目 / 关键词)时只留第一份 —— 时间序列一天只能有一个点,
-    混进来会让同一周出现两个互相矛盾的 star 值。
+    同一天有多份时只留第一份 —— 时间序列一天只能有一个点,混进来会让同一周出现两个
+    互相矛盾的 star 值。
     """
     out: list[tuple[Listed, report_parse.Report]] = []
     seen: set[date] = set()
@@ -134,11 +134,9 @@ def load_all() -> list[tuple[Listed, report_parse.Report]]:
 def appearance_counts() -> tuple[dict[str, int], int]:
     """每个项目上过多少期**定时周报**,以及周报总期数。
 
-    只数没有后缀的 `{日期}.md` —— 那是 cron 每周产出的标准综合榜。带后缀的
-    (`_NEW` 新项目榜、`_KEY` 关键词榜、`_10d` 自定义窗口)都是有人临时跑出来的,
-    计进去会让「上榜 3/5 期」这种展示随临时查询虚高,而分母还不跟着涨。
-
-    分子分母走同一次遍历,保证口径一致:都只认解析成功的那些期。
+    只数没有后缀的 `{日期}.md`,那是 cron 每周产出的标准综合榜:带后缀的都是有人临时跑
+    出来的,计进去会让「上榜 3/5 期」随临时查询虚高,而分母不跟着涨。
+    分子分母走同一次遍历,保证口径一致。
     """
     counts: dict[str, int] = {}
     total = 0
@@ -168,7 +166,11 @@ def save(name: str, text: str) -> Path | None:
     """写一份报告。失败返回 None 而不是抛 —— 上游跑了两小时,不该被最后一步的磁盘错误吞掉。"""
     path = config.ensure_dir(directory()) / name
     try:
-        path.write_text(text, encoding="utf-8")
+        # 裸 write_text 不是原子的:写到一半被 kill(CI 超时、容器被回收)会留下一份截断的
+        # 报告,而 report_parse 对截断内容照样返回对象、不返回 None —— 于是下一份周报会拿
+        # 这半截当"上一期"算差异,页面上看不出任何异常。走 write_whole 就只有"旧的"或
+        # "完整的新的"两种状态。
+        atomic.write_whole(path, lambda tmp: tmp.write_text(text, encoding="utf-8"))
     except OSError as e:
         logger.error("报告写入失败:%s(%s)", path, e)
         return None

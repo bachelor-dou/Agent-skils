@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -42,6 +43,21 @@ def test_below_the_floor_means_evict():
     assert "a/live" not in plan.all
 
 
+def test_phase_yield_counts_each_phase_and_overlaps():
+    """一个新仓库被关键词和星段同时搜到,两个阶段都要算上它(不瓜分),
+    所以三阶段相加会大于去重后的新增总数;只有 fresh 里的才计数。"""
+    sources = {
+        "kw:agent": {"a/x", "a/shared"},
+        "kw:llm": {"a/shared"},          # 跨关键词重叠,阶段内只算一次
+        "segment": {"a/shared", "a/seg"},
+        "trending": {"a/trend", "a/old"},
+    }
+    fresh = {"a/x", "a/shared", "a/seg", "a/trend"}   # a/old 是老仓库,不算
+    kw, seg, trend = cron.phase_yield(sources, fresh)
+    assert (kw, seg, trend) == (2, 2, 1)             # 关键词:x+shared;星段:shared+seg;trending:trend
+    assert kw + seg + trend > len(fresh)             # a/shared 被重复计入,相加大于去重总数
+
+
 def test_exactly_at_the_floor_stays():
     """门槛是「涨过它就收进来」,所以等于门槛的必须留 —— 否则会和发现阶段打架:
     今天淘汰、明天发现又收回来,天天反复。"""
@@ -57,6 +73,42 @@ def test_a_whole_batch_failing_evicts_nobody():
     """
     plan = cron.decide(TRACKED, {}, set(), star_floor=500)
     assert plan.all == [], "没问到 ≠ 不存在"
+
+
+def test_an_implausible_number_of_missing_repos_aborts_the_eviction(monkeypatch, caplog):
+    """「确认查不到」本身也可能是错的,所以还要一道量级闸门。
+
+    `decide` 只保证不把"没问到"当成"没了";它保证不了传进来的 confirmed_missing 是对的。
+    GitHub 一次「200 + data 全 null」的事故会被 StarBatch 拆到单名批,每个都记成确认
+    查不到 —— 于是整个库被判死刑,而这一步是不可逆的(记录里的 LLM desc 一起没)。
+    """
+    tracked = {f"a/r{i}" for i in range(1000)}
+    harvest = gh_tasks.Harvest()
+    harvest.missing.update(tracked)                 # 全库"查不到"
+    harvest.stars.update({"a/r0": 499})             # 这个是真·掉到门槛下
+
+    monkeypatch.setattr(cron.universe, "evict", lambda names: evicted.update(names))
+    evicted: set[str] = set()
+
+    removed = cron.retire(tracked, harvest, star_floor=500)
+
+    assert "a/r0" in evicted, "star 掉到门槛下那部分来自成功测到的值,不该被连累"
+    assert len(evicted) == 1, f"闸门没拦住,删了 {len(evicted)} 个"
+    assert removed == ["a/r0"]
+    assert any("系统性问题" in r.message for r in caplog.records)
+
+
+def test_a_normal_day_of_metabolism_still_gets_evicted(monkeypatch):
+    """闸门不能把正常代谢也拦掉 —— 每天几十个是常态,拦了库就只增不减。"""
+    tracked = {f"a/r{i}" for i in range(1000)}
+    harvest = gh_tasks.Harvest()
+    harvest.missing.update({f"a/r{i}" for i in range(5)})
+
+    evicted: set[str] = set()
+    monkeypatch.setattr(cron.universe, "evict", lambda names: evicted.update(names))
+
+    cron.retire(tracked, harvest, star_floor=500)
+    assert len(evicted) == 5
 
 
 def test_unasked_repos_are_left_alone():
@@ -100,11 +152,16 @@ async def _drain(transport: httpx.MockTransport, *tasks_of) -> None:
 
 
 def _graphql(stars_by_name: dict[str, int]):
-    """假 GraphQL:名字在表里就给 star,不在就给 null(= GitHub 说查不到)。"""
+    """假 GraphQL:名字在表里就给 star,不在就给 null + 一条 NOT_FOUND。
+
+    那条 `errors` 不是装饰:真实 GitHub 对查不到的仓库一定会带 `type: "NOT_FOUND"`,
+    而「有没有 NOT_FOUND」正是「真删了」和「服务出故障」的唯一区别。早先这个假响应
+    只给 null 不给 errors,于是"故障"和"删除"在测试里长得一模一样。
+    """
     def handler(request: httpx.Request) -> httpx.Response:
         import json as _json
         query = _json.loads(request.content)["query"]
-        data = {}
+        data, errors = {}, []
         for line in query.splitlines():
             if ": repository(" not in line:
                 continue
@@ -113,7 +170,14 @@ def _graphql(stars_by_name: dict[str, int]):
             name = line.split('name:"', 1)[1].split('"', 1)[0]
             star = stars_by_name.get(f"{owner}/{name}")
             data[alias] = {"stargazerCount": star} if star is not None else None
-        return httpx.Response(200, json={"data": data})
+            if star is None:
+                errors.append({"type": "NOT_FOUND", "path": [alias],
+                               "message": f"Could not resolve to a Repository "
+                                          f"with the name '{owner}/{name}'."})
+        body = {"data": data}
+        if errors:
+            body["errors"] = errors
+        return httpx.Response(200, json=body)
     return httpx.MockTransport(handler)
 
 
@@ -184,14 +248,56 @@ async def test_a_degenerate_all_null_batch_splits_instead_of_evicting():
 
 
 async def test_a_single_repo_that_stays_null_is_really_gone():
-    """拆到只剩一个还是 null,那它就是真的没了 —— 拆分不能变成无限递归。"""
+    """拆到只剩一个、且 GitHub 明说 NOT_FOUND —— 那它就是真的没了。"""
     sink = gh_tasks.Harvest()
-    transport = _graphql({})
     await asyncio.wait_for(
-        _drain(transport, lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
+        _drain(_graphql({}), lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
         timeout=10,
     )
     assert sink.missing == {"a/ghost"}
+
+
+async def test_a_lone_null_without_not_found_counts_as_unanswered_not_as_deleted():
+    """单名批的 null 不带 NOT_FOUND 时,必须记成「没问到」而不是「没了」。
+
+    这是清库那条路的入口:`StarBatch` 会把整批 null 一路对半拆到单名为止,所以 GitHub
+    一次「200 + data 全 null」的事故最终**全部**以单名批落地。早先单名批一律记 missing,
+    于是几万个活仓库变成"确认查不到",下一步淘汰就把库删空 —— 而记录里连 LLM 写过的
+    desc 一起没。
+
+    也顺便钉住不能无限拆:单名批返回 None 会让 `1 // 2 == 0` 拆出空批加原样批。
+    """
+    sink = gh_tasks.Harvest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 光秃秃的 null:没有 errors,也就没有 NOT_FOUND
+        return httpx.Response(200, json={"data": {"r0": None}})
+
+    await asyncio.wait_for(
+        _drain(httpx.MockTransport(handler),
+               lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
+        timeout=10,
+    )
+    assert sink.missing == set(), "没问到被当成了没了 —— 这条路通向清库"
+    assert sink.failed == {"a/ghost"}
+
+
+async def test_an_incident_shaped_error_also_counts_as_unanswered():
+    """RATE_LIMITED / INTERNAL 之类的 errors 同样不足以断定仓库没了。"""
+    sink = gh_tasks.Harvest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "data": {"r0": None},
+            "errors": [{"type": "INTERNAL", "message": "something went wrong"}]})
+
+    await asyncio.wait_for(
+        _drain(httpx.MockTransport(handler),
+               lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
+        timeout=10,
+    )
+    assert sink.missing == set()
+    assert sink.failed == {"a/ghost"}
 
 
 # ──────────────────────────────────────────────────────────
@@ -331,6 +437,41 @@ def test_http_status_maps_to_the_right_exception(status, expected):
     resp = httpx.Response(status, text="x", request=httpx.Request("GET", "https://x"))
     with pytest.raises(expected):
         gh._classify(resp)
+
+
+@pytest.mark.parametrize("headers, body, expected", [
+    ({"x-ratelimit-remaining": "0"}, "{}", "主限额耗尽"),
+    ({"retry-after": "60"}, '{"message": "You have exceeded a secondary rate limit"}',
+     "二级限流"),
+    # 二级限流也可能带 remaining=0,此时正文说了算 —— 反过来判会把它错当成单 token 的事,
+    # 于是只冷却那一张、继续用其余 11 张往同一堵墙上撞。
+    ({"x-ratelimit-remaining": "0"},
+     '{"message": "You have exceeded a secondary rate limit"}', "二级限流"),
+    ({}, "{}", "未分类"),
+])
+def test_the_two_kinds_of_rate_limit_are_told_apart(headers, body, expected):
+    """两者处置不同:主限额只是这个 token 这一分钟用完了,二级限流按认证身份计、要整体降速。
+
+    分不清就只能一律冷却单个 token,而这正是「12 张 token 每 65 秒集体撞一次墙」时
+    看不出病因的原因。
+    """
+    resp = httpx.Response(403, headers=headers, text=body,
+                          request=httpx.Request("GET", "https://x"))
+    assert expected in gh._limit_reason(resp)
+
+
+def test_retry_after_wins_over_the_ratelimit_reset_header():
+    """二级限流会同时带两个头,且说的不是一回事。
+
+    X-RateLimit-Reset 是**主**限额那一分钟的窗口(与这次被拒无关),实测比 Retry-After 早
+    22 秒。先读它就会提前重试、撞进没结束的罚时 —— 正是「每 65 秒全体撞一次墙」的成因。
+    """
+    now = time.time()
+    resp = httpx.Response(403, headers={
+        "retry-after": "60",
+        "x-ratelimit-reset": str(int(now + 38)),
+    }, text="{}", request=httpx.Request("GET", "https://x"))
+    assert gh._reset_at(resp.headers) - now > 50
 
 
 async def test_a_422_page_means_no_more_results_not_an_error():

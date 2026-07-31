@@ -4,12 +4,12 @@
 #   2. 推送被拒（目标分支期间有别人的提交）时重放能成功，且不吞掉别人的改动；
 #   3. 目录参数里的「删除」（快照过期清理）能真正进 git——重置会把旧文件带回来，
 #      靠脚本里的 rm -rf 才能保住删除。去掉那行本用例即失败。
-# 不设 TARGET_BRANCH，走默认的 snapshots，顺带验证默认分支名没写错。
+# 不设 TARGET_BRANCH，走默认的 main，顺带验证默认分支名没写错。
 # 用法: bash .github/scripts/test_commit_and_push.sh
 set -euo pipefail
 
 script=$(cd "$(dirname "$0")" && pwd)/commit_and_push.sh
-branch=snapshots
+branch=main
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
 

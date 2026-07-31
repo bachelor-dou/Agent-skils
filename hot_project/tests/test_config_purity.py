@@ -29,7 +29,7 @@ print("clean")
 def test_import_creates_no_directories():
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE],
-        cwd=config.REPO_ROOT, capture_output=True, text=True,
+        cwd=config.PACKAGE_DIR.parent, capture_output=True, text=True,
     )
     assert proc.returncode == 0, f"import 期有磁盘副作用:\n{proc.stderr}"
     assert "clean" in proc.stdout

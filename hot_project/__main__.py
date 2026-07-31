@@ -1,7 +1,6 @@
 """包入口:python -m hot_project → 启动 Web/API 服务。
 
-fastapi 单独兜一句话:CI 只装 requirements-ci.txt(两个 cron 用不到 web 那套),
-所以「缺 fastapi」是常态而不是环境坏了,直接把装法说清楚比抛回溯有用。
+CI 只装 requirements-ci.txt,所以「缺 fastapi」是常态而不是环境坏了,直接说装法。
 """
 
 try:

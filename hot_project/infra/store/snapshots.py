@@ -4,27 +4,10 @@
     {"meta": {"coverage": 0.998, "not_found": ["owner/gone", ...]},
      "stars": {"owner/repo": 12345, ...}}
 
-## 为什么增长只能靠它
-
-GitHub 2026-06-30 起把 stargazers **列表**限权给仓库的 admin/collaborator,star 时间戳
-(REST /stargazers、GraphQL stargazers.edges)对他人仓库全部失效,二分法和采样外推同时报废。
-star **计数**(stargazerCount)不受影响,所以窗口增长改由「每天存一份计数」还原:
-
-    增长 = 今天的 star − T−N 那天快照里的 star
-
-## 为什么不并进 Github_DB.json
-
-排名要的是「某一天 × 全部仓库」,正好是按天一个文件的形状 —— 读一个 0.8MB 的 gz 就够。
-把 `{日期: star}` 挂到每个项目下是转置布局,为取 T−7 那一天得加载解析 35 天全量。
-实测代价:主库 30MB→83MB、每次保存序列化 0.8s→2.7s(全程持排他锁),
-而且 api_server 为读单个项目的 gh_desc 也要吞下整库。
-
-## meta 是新加的
-
-旧格式是扁平的 `{"owner/repo": star}`,读到的时候无法区分「这个仓库那天没测到」和
-「那天它真的不在宇宙里」。`not_found` 记下 GitHub 明确查不到的名字(改名/删库/转私有),
-淘汰判定直接用它;`coverage` 记下实际测到的比例,低于下限就拒绝落盘。
-读取侧兼容旧扁平格式(见 `load_stars`),所以历史快照照样能当锚点。
+GitHub 已把 star 时间戳限权给仓库 admin,二分法和采样外推都报废,窗口增长只能靠
+「实时 star − 窗口内最早那份快照里的 star」。快照只出**基线**这一件事,当前值一律实时取
+(见 `tools/ranking.py`)。`not_found` 是 GitHub 明确查不到的名字
+(改名/删库/转私有),淘汰判定直接用它;读取侧兼容没有 meta 的旧扁平格式(见 `load_stars`)。
 """
 
 from __future__ import annotations
@@ -32,6 +15,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import zlib
 from datetime import date
 from pathlib import Path
 from typing import NamedTuple
@@ -44,15 +28,9 @@ logger = logging.getLogger("hot_project")
 
 _SUFFIX = ".json.gz"
 
-# 锚点日期与 T−N 的最大允许偏差(天)。每天都跑时恒为 0;漏跑一两天就顺延到邻近快照。
-# 顺延不会歪曲排名:锚点一轮只挑一次、**全部仓库共用**,窗口长度一致,相对次序不受影响。
-# 定在这里而不是 config:它是锚点选取规则的一部分,由本模块定义语义。
-ANCHOR_TOLERANCE_DAYS = 2
-
-# 覆盖率下限:实际测到的仓库数 ÷ 应测数。低于它拒绝落盘。
-# 实测正常批次覆盖率 99.8%,掉到一半以下只可能是限流打崩了或 token 集体失效 ——
-# 这种半份快照一旦落盘,会被后续几天当成锚点读走,把「没测到」算成「掉到 0」,
-# 于是整批仓库出现巨额虚假负增长。宁可当天没有快照(锚点自动顺延一天)也不要错的。
+# 覆盖率下限:实际测到的仓库数 ÷ 应测数,低于它拒绝落盘。半份快照一旦落盘会被后续几天
+# 当成锚点读走,把「没测到」算成「掉到 0」,整批仓库出现巨额虚假负增长 —— 宁可当天没有
+# 快照(锚点自动顺延一天)也不要错的。
 MIN_COVERAGE = 0.5
 
 
@@ -72,9 +50,8 @@ def save(day: date, stars: dict[str, int], *, not_found: list[str],
         stars:    实际测到的 {full_name: star}
         not_found: GitHub 明确查不到的名字(改名/删库/转私有),供淘汰判定用
         expected: 本次应测的仓库总数,用来算覆盖率
-        throttle: 这一轮撞了多少次限流、等了多久。存进去是因为几个月后看到一份
-                  覆盖率偏低的快照时,「那天限流很重」和「代码有 bug」得能分开;
-                  并跑期还要靠它认出「限流较重的那一天」。
+        throttle: 这一轮撞了多少次限流、等了多久。用来事后把「那天限流很重」和
+                  「代码有 bug」分开
     """
     if not stars:
         logger.error("拒绝写入空快照:它会被当成「全仓库掉到 0」,污染整个窗口的增长。")
@@ -88,6 +65,15 @@ def save(day: date, stars: dict[str, int], *, not_found: list[str],
             day, coverage * 100, len(stars), expected, MIN_COVERAGE * 100,
         )
         return None
+
+    # 下限只挡"绝对太少",挡不住"比盘上那份少"。两个 run 撞上同一天时,覆盖率低的那份能
+    # 通过下限检查却把高的那份盖掉,那天的基线从此永久缺一批仓库,之后几天全都读它当锚点。
+    if (existing := _coverage_of(day)) is not None and existing > coverage:
+        logger.warning(
+            "放弃写入快照 %s:盘上那份覆盖率 %.1f%% 比这次的 %.1f%% 更高,保留原文件。",
+            day, existing * 100, coverage * 100,
+        )
+        return path_of(day)
 
     meta: dict = {"coverage": round(coverage, 5), "not_found": sorted(not_found)}
     if throttle:
@@ -112,12 +98,23 @@ def _load_raw(day: date) -> dict | None:
     try:
         with gzip.open(path, "rt", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError, EOFError) as e:
-        # 快照损坏按缺失处理(而不是抛):锚点是可替代的,顺延到邻近那天即可,
-        # 不该让一个坏文件把整轮排名打断。DB 损坏则相反 —— 它无可替代,必须抛。
+    # zlib.error 和 UnicodeDecodeError 都不在 OSError 之下:gzip 只有"文件头不对"算
+    # OSError,压缩体被改坏抛 zlib.error,解出来不是 UTF-8 抛 UnicodeDecodeError。
+    # 漏掉任何一个,本该被容忍的一个坏文件就会掀翻整轮排名。
+    except (OSError, zlib.error, json.JSONDecodeError, EOFError, UnicodeDecodeError) as e:
+        # 快照损坏按缺失处理(而不是抛):锚点可替代,顺延到邻近那天即可。
+        # DB 损坏则相反 —— 它无可替代,必须抛。
         logger.warning("快照 %s 读取失败,按缺失处理: %s", path, e)
         return None
     return data if isinstance(data, dict) and data else None
+
+
+def _coverage_of(day: date) -> float | None:
+    """盘上那份快照的覆盖率。文件不存在、读不出、或是没有 meta 的旧扁平格式都返回 None。"""
+    data = _load_raw(day)
+    meta = data.get("meta") if isinstance(data, dict) else None
+    value = meta.get("coverage") if isinstance(meta, dict) else None
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def load_stars(day: date) -> dict[str, int] | None:
@@ -130,10 +127,8 @@ def load_stars(day: date) -> dict[str, int] | None:
 
 
 def already_written(day: date) -> bool:
-    """今天这份快照写过没有?每日脚本靠它做幂等。
-
-    幂等是那个脚本敢每小时触发一次的全部依据(GitHub 的 schedule 会漂、会静默跳过,
-    所以一天给自己 24 次机会),当天已有快照就秒退、一个请求都不发。
+    """今天这份快照写过没有?每日脚本靠它做幂等 —— GitHub 的 schedule 会漂、会静默跳过,
+    所以那个脚本每小时触发一次,当天已有快照就秒退、一个请求都不发。
     """
     return path_of(day).exists()
 
@@ -149,12 +144,7 @@ def load_not_found(day: date) -> list[str]:
 
 
 def available_dates() -> list[date]:
-    """已落盘的快照日期,升序。
-
-    只扫**读目录**:锚点全都是历史数据,而历史数据的权威副本在读目录。
-    过渡期写目录(影子)里只有今天那一份,不参与锚点选取 —— 每日脚本算增长用的是
-    手上刚拿到的 star,不需要把自己刚写的文件再读回来。
-    """
+    """已落盘的快照日期,升序。"""
     days: list[date] = []
     directory = config.SNAPSHOT_DIR
     if not directory.is_dir():
@@ -166,66 +156,63 @@ def available_dates() -> list[date]:
     return sorted(days)
 
 
-class Anchor(NamedTuple):
-    """某窗口的锚点:日期、star 表、以及它到今天的**实际**天数。
+class Baseline(NamedTuple):
+    """窗口内每个仓库**最早**被测到的 star,以及那天到今天的实际天数。
 
-    `window_days` 必须和 `stars` 一起返回,不能让调用方拿「自己请求的窗口」去算:
-    漏采时锚点会顺延一两天,实际窗口就比请求的长。旧包三个读取侧各自算这一步,
-    其中爆发探针漏了修正 —— 3 天窗口拿到 5 天的增量却仍除以 3,速率虚高 67%、
-    爆发加成误判。把天数绑在数据上是唯一能让「忘记修正」不再可能的形状。
+    `days` 必须逐仓给而不是给一个全局值:一个仓库可能窗口第一天就在库里(7 天),另一个
+    三天前才被发现(3 天)。拿同一个天数去除,后者的日均速率会虚高一倍多。
+    `span` 是最早那份快照的跨度,用作全轮的名义窗口(报告标题、判「窗口内新建」)。
     """
-    day: date
+
     stars: dict[str, int]
-    window_days: int
+    days: dict[str, int]
+    oldest: date | None
+    span: int
 
 
-def _anchor_at(day: date) -> Anchor | None:
-    stars = load_stars(day)
-    return None if stars is None else Anchor(day, stars, days_between(utc_today(), day))
+def earliest_in_window(days: int, today: date | None = None) -> Baseline:
+    """一趟扫出窗口内每个仓库最早被测到的 star。
 
+    取「最早的一份」而不是「正好 T−N 那天」:三天前才进库的仓库在 T−7 的快照里没有,但
+    T−3 的有,按它算出来的是**实测下界**,比整个丢掉强。这同时顶掉了旧的锚点顺延 ——
+    漏采几天时最早那份自然往后挪,`span` 如实说明实际跨度。
 
-def anchor_for_window(days: int, tolerance: int = ANCHOR_TOLERANCE_DAYS) -> Anchor | None:
-    """取 T−days 的锚点:离目标日最近、且偏差不超过 tolerance 的那份快照。
-
-    并列时取较早那天,保证结果与文件枚举顺序无关。找不到返回 None ——
-    要不要退到更短的窗口由调用方决定(见 `oldest_anchor`),这里不替它做主。
+    今天那份不作基线:拿它当基线窗口是 0 天,增长恒为 0。
     """
-    target = shift_days(utc_today(), -days)
-    for day in sorted(
-        (d for d in available_dates() if abs((d - target).days) <= tolerance),
-        key=lambda d: (abs((d - target).days), d),
-    ):
-        anchor = _anchor_at(day)
-        if anchor is not None:
-            return anchor
-    return None
+    now = today or utc_today()
+    floor = shift_days(now, -days)
+    stars: dict[str, int] = {}
+    spans: dict[str, int] = {}
+    oldest: date | None = None
 
-
-def oldest_anchor(max_days: int) -> Anchor | None:
-    """退化用:取现存最早、但不早于 max_days 天前的那份快照。
-
-    用在快照还没攒够的时候 —— 请求 7 天窗口而手上只有 3 天,与其算不出增长(整批记未决、
-    榜单一个候选都没有),不如按真实的 3 天窗口给出增长,`window_days` 会如实说明是 3 天。
-    上限 max_days 是为了不让它一路退到 35 天前去。
-    """
-    floor = shift_days(utc_today(), -max_days)
-    for day in available_dates():          # 升序,第一个合格的就是最早的
-        if day < floor:
+    for day in available_dates():           # 升序,所以先落进表里的就是最早的那次
+        span = days_between(now, day)
+        if span < 1 or day < floor:
             continue
-        anchor = _anchor_at(day)
-        if anchor is not None and anchor.window_days > 0:
-            return anchor
-    return None
+        snapshot = load_stars(day)
+        if snapshot is None:
+            continue
+        if oldest is None:
+            oldest = day
+        for name, star in snapshot.items():
+            if name not in stars:
+                stars[name] = star
+                spans[name] = span
+
+    return Baseline(stars, spans, oldest,
+                    days_between(now, oldest) if oldest is not None else days)
 
 
 def prune(keep_days: int, today: date | None = None) -> list[date]:
     """删掉早于 today − keep_days 的快照,返回被删日期。
 
-    按日期截断而非「保留最近 N 份」:漏跑几天时「最近 N 份」会一路留到 N+ 天前,
-    按日期截断始终是真正的 keep_days 天视野。
-
+    按日期截断而非「保留最近 N 份」:漏跑几天时「最近 N 份」会一路留到 N+ 天前。
     只认 `*.json.gz` 且日期能解析的文件 —— 同目录下的锁文件、半成品不该被顺手带走。
+    `keep_days < 1` 直接拒绝:0 会把**包括今天在内**的全部快照一次删光,而快照重算不回来
+    (star 时间戳已被 GitHub 限权)。
     """
+    if keep_days < 1:
+        raise ValueError(f"keep_days 至少为 1,收到 {keep_days} —— 这会删光全部快照")
     directory = config.SNAPSHOT_DIR
     if not directory.is_dir():
         return []

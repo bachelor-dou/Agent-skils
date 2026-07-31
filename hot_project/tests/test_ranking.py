@@ -1,8 +1,6 @@
 """打分公式与榜单流水线。
 
-流水线整条不发请求,所以这里连 mock 网络都不需要 —— 只把「今天的快照」和「DB」
-换成内存里的字典。这正是把候选池从三阶段扫描改成读快照买到的东西:
-上一版要测一轮排名得先有 12 个 token。
+流水线现在会实时取 star,所以这里要假一个 GitHub 门面出来;快照仍然只出基线,换成内存字典。
 """
 
 from datetime import timedelta
@@ -13,6 +11,7 @@ from hot_project import config
 from hot_project.common.timeutil import utc_today
 from hot_project.core import scoring
 from hot_project.infra.store import snapshots
+from hot_project.provider.github import tasks as gh_tasks
 from hot_project.tools import ranking
 
 W = scoring.Weights(window_days=7, recent_days=3, alpha=0.5, cap=2.0)
@@ -33,15 +32,15 @@ def test_a_small_project_growing_fast_can_beat_a_giant_growing_slowly():
     assert nimble > giant
 
 
-def test_an_absurd_growth_rate_gets_discounted():
-    """100 星涨到 300 的「三倍」和 10000 星涨 2 万不是一回事。"""
-    plain = {"growth": 400, "star": 800}          # 率 0.5,正好在拐点上,不打折
-    absurd = {"growth": 1200, "star": 800}        # 率 1.5,打满 15%
+def test_an_absurd_growth_rate_buys_much_less_than_it_looks():
+    """100 星涨到 300 的「三倍」和 10000 星涨 2 万不是一回事,两处 log 负责压平。"""
+    plain = {"growth": 400, "star": 800}          # 率 0.5
+    absurd = {"growth": 1200, "star": 800}        # 率 1.5
     ratio = (scoring.score(absurd, scoring.COMPREHENSIVE, W)
              / scoring.score(plain, scoring.COMPREHENSIVE, W))
-    # 涨三倍的量只换来 1.21 倍的分。这个数要卡死:松成「小于 1.6」的话,
-    # 折扣整个删掉(比值 1.43)也照样通过。
-    assert ratio == pytest.approx(1.43 * 0.85, rel=0.02)
+    # 涨三倍的量只换来 1.30 倍的分。这个数要卡死:它同时锁住两项系数的配比
+    # (热度 : 增长率 ≈ 6.5:3.5),松成「小于 2」的话把 1200 调到 3600 也照样通过。
+    assert ratio == pytest.approx(1.30, rel=0.02)
 
 
 def test_hot_new_ranks_purely_by_growth():
@@ -73,10 +72,20 @@ def test_no_probe_data_means_no_boost_not_a_penalty():
     assert scoring.burst_boost(700, None, W) == 1.0
 
 
-def test_the_boost_uses_the_real_anchor_span_on_both_sides():
-    """主窗口修正了、探针没修正的话,5 天的增量除以请求的 3 天,凭空造出一场爆发。"""
+def test_the_boost_uses_the_real_span_on_both_sides():
+    """主窗口修正了、探针没修正的话,5 天的增量除以名义的 3 天,凭空造出一场爆发。"""
     honest = scoring.burst_boost(700, 500, W._replace(recent_days=5))
     inflated = scoring.burst_boost(700, 500, W._replace(recent_days=3))
+    assert inflated > honest
+
+
+def test_each_repo_uses_its_own_baseline_span_not_the_global_one():
+    """晚进库的仓库基线只有 3 天。拿全局 7 天当分母,它的整窗均速被低估一半多,
+    加速比虚高,凭空多拿一档加成 —— 逐仓天数就是为了堵这个。"""
+    item = {"growth": 700, "star": 9000, "recent_growth": 600,
+            "window_days": 3, "recent_days": 3}
+    honest = scoring.score(item, scoring.COMPREHENSIVE, W)
+    inflated = scoring.score({**item, "window_days": 7}, scoring.COMPREHENSIVE, W)
     assert inflated > honest
 
 
@@ -87,24 +96,33 @@ def test_ranking_writes_the_score_back_for_the_logs():
 
 # ── 流水线 ────────────────────────────────────────────────────────
 
+class _GH:
+    """假门面:只回答「这批仓库此刻多少星」。"""
+
+    def __init__(self, live: dict[str, int], usable: bool = True) -> None:
+        self.live, self.usable = live, usable
+        self.asked: list[str] = []
+
+    def stars(self, names):
+        self.asked = list(names)
+        return gh_tasks.Harvest(stars={n: s for n, s in self.live.items() if n in set(names)})
+
+
+def _baseline(stars, span, spans=None):
+    """构造一份「窗口内最早」的基线。`spans` 只在要逐仓不同天数时给。"""
+    return snapshots.Baseline(stars, spans or {n: span for n in stars},
+                              utc_today() - timedelta(days=span), span)
+
+
 @pytest.fixture
 def world(monkeypatch):
-    """把「今天的快照」「锚点」「DB」换成内存字典。"""
-    state = {"today": {}, "anchors": {}, "db": {}}
+    """把「窗口内最早的快照」和「DB」换成内存里的东西。"""
+    state: dict = {"baselines": {}, "db": {}}
 
-    def load_stars(day):
-        return state["today"] if day == utc_today() else {}
+    def earliest_in_window(days, today=None):
+        return state["baselines"].get(days) or snapshots.Baseline({}, {}, None, days)
 
-    def anchor_for_window(days):
-        entry = state["anchors"].get(days)
-        if entry is None:
-            return None
-        stars, actual = entry
-        return snapshots.Anchor(day=utc_today() - timedelta(days=actual),
-                                stars=stars, window_days=actual)
-
-    monkeypatch.setattr(snapshots, "load_stars", load_stars)
-    monkeypatch.setattr(snapshots, "anchor_for_window", anchor_for_window)
+    monkeypatch.setattr(snapshots, "earliest_in_window", earliest_in_window)
     monkeypatch.setattr(ranking.universe, "load", lambda: state["db"])
     return state
 
@@ -113,83 +131,131 @@ def _created(days_ago: int) -> str:
     return (utc_today() - timedelta(days=days_ago)).isoformat()
 
 
-def test_the_candidate_pool_is_todays_snapshot_filtered_by_star(world):
-    world["today"] = {"a/big": 5000, "b/small": 100}
-    pool = ranking.candidates(min_star=500)
-    assert set(pool) == {"a/big"}
+def test_the_current_star_is_asked_for_live_never_read_from_a_snapshot(world):
+    """被减数必须是此刻的真值。读当天快照的话,采集到出榜之间涨的 star 全部消失,
+    而且当天采集没跑成就出不了榜 —— 两个定时任务被焊死在一起。"""
+    world["db"] = {"a/x": {"created_at": _created(500)}}
+    world["baselines"][7] = _baseline({"a/x": 1000}, 7)
+    gh = _GH({"a/x": 3000})
+
+    out = ranking.run(min_star=500, growth_threshold=1000, growth_days=7,
+                      do_report=False, gh=gh)
+    assert gh.asked == ["a/x"]
+    assert out["ranked"][0][1]["growth"] == 2000        # 3000(实时) − 1000(基线)
 
 
-def test_no_snapshot_today_means_no_ranking_rather_than_a_wrong_one(world):
-    assert ranking.candidates(min_star=500) == {}
+def test_no_github_token_means_no_ranking_rather_than_a_wrong_one(world):
+    world["db"] = {"a/x": {"created_at": _created(500)}}
+    world["baselines"][7] = _baseline({"a/x": 1000}, 7)
+    out = ranking.run(min_star=500, growth_threshold=1000, growth_days=7,
+                      do_report=False, gh=_GH({"a/x": 3000}, usable=False))
+    assert out["ranked"] == []
 
 
-def test_a_repo_with_no_anchor_and_no_creation_date_drops_out_of_the_pool(world):
-    """未决不是零增长:记 0 它会以「一点没涨」的身份进排名,永远出不了榜,
-    而真实原因(缺基线)没人看得见。"""
-    world["today"] = {"a/known": 1000, "b/mystery": 9000}
-    world["anchors"][7] = ({"a/known": 400}, 7)
-    decided, window, _ = ranking.growths(
-        {"a/known": {"star": 1000, "created_at": _created(900)},
-         "b/mystery": {"star": 9000, "created_at": ""}}, 7)
-    assert set(decided) == {"a/known"}
-    assert decided["a/known"]["growth"] == 600
-    assert window == 7
+def test_no_baseline_snapshot_at_all_means_no_ranking(world):
+    world["db"] = {"a/x": {"created_at": _created(500)}}
+    out = ranking.run(min_star=500, growth_threshold=1000, growth_days=7,
+                      do_report=False, gh=_GH({"a/x": 3000}))
+    assert out["ranked"] == []
 
 
-def test_a_deferred_anchor_widens_the_window_everywhere(world):
-    """请求 7 天但只有 T−9 的快照:窗口就是 9 天,一个 8 天大的新仓库该被算出来。"""
-    world["anchors"][7] = ({}, 9)
-    decided, window, _ = ranking.growths(
-        {"a/new": {"star": 600, "created_at": _created(8)}}, 7)
-    assert window == 9
-    assert decided["a/new"]["growth"] == 600
+def test_below_threshold_candidates_never_enter_the_pool(world):
+    """低于阈值的当场丢。留下来只会在之后每一步被重新遍历一遍,7.8 万条几十 MB。"""
+    base = _baseline({"a/hot": 1000, "b/flat": 1000}, 7)
+    pool, unresolved = ranking.qualify(
+        {"a/hot": 3000, "b/flat": 1010},
+        {"a/hot": {"created_at": _created(500)}, "b/flat": {"created_at": _created(500)}},
+        base, min_star=500, threshold=1000)
+    assert set(pool) == {"a/hot"}
+    assert unresolved == 0
 
 
-def test_without_an_anchor_nothing_is_decided(world):
-    decided, _, basis = ranking.growths({"a/x": {"star": 1, "created_at": ""}}, 7)
-    assert decided == {} and basis == "无锚点"
+def test_a_repo_below_min_star_is_filtered_on_the_live_value(world):
+    base = _baseline({"a/x": 10}, 7)
+    pool, _ = ranking.qualify({"a/x": 400}, {"a/x": {"created_at": _created(500)}},
+                              base, min_star=500, threshold=100)
+    assert pool == {}
 
 
-def test_the_burst_probe_reports_the_real_span(world):
-    world["anchors"][config.RECENT_GROWTH_DAYS] = ({"a/x": 100}, 5)
-    probed, days = ranking.recent({"a/x": {"star": 400}}, config.RECENT_GROWTH_DAYS)
-    assert probed == {"a/x": 300} and days == 5
+def test_a_repo_with_no_baseline_and_no_creation_date_is_counted_but_dropped(world):
+    """算不出增长 ≠ 涨了 0:它不进池,但要有个数报出来,否则「榜怎么空了」无从查起。"""
+    base = _baseline({"a/known": 400}, 7)
+    pool, unresolved = ranking.qualify(
+        {"a/known": 1500, "b/mystery": 9000},
+        {"a/known": {"created_at": _created(900)}, "b/mystery": {"created_at": ""}},
+        base, min_star=500, threshold=1000)
+    assert set(pool) == {"a/known"} and unresolved == 1
 
 
-def test_a_missing_probe_anchor_never_fails_the_ranking(world):
-    probed, days = ranking.recent({"a/x": {"star": 400}}, 3)
-    assert probed == {} and days == 3
+def test_a_repo_missing_from_the_oldest_snapshot_still_ranks_off_a_later_one(world):
+    """晚进库的仓库在窗口第一天的快照里没有,但三天前那份有。按 3 天的实测增长排名,
+    比整个丢掉强 —— 旧实现在这里把它记成未决,一个刚爆火的项目就此永远上不了榜。"""
+    base = _baseline({"a/old": 1000, "b/late": 2000}, 7,
+                     spans={"a/old": 7, "b/late": 3})
+    pool, unresolved = ranking.qualify(
+        {"a/old": 1500, "b/late": 5000},
+        {n: {"created_at": _created(500)} for n in ("a/old", "b/late")},
+        base, min_star=500, threshold=1000)
+    assert unresolved == 0
+    assert pool["b/late"]["growth"] == 3000
+    assert pool["b/late"]["window_days"] == 3       # 逐仓天数,不是全局的 7
+
+
+def test_the_probe_writes_back_each_repos_own_span(world):
+    world["baselines"][config.RECENT_GROWTH_DAYS] = _baseline({"a/x": 100}, 5)
+    pool = {"a/x": {"star": 400, "growth": 300, "window_days": 7}}
+    span = ranking.recent(pool, config.RECENT_GROWTH_DAYS)
+    assert span == 5
+    assert pool["a/x"]["recent_growth"] == 300 and pool["a/x"]["recent_days"] == 5
+
+
+def test_a_missing_probe_baseline_never_fails_the_ranking(world):
+    pool = {"a/x": {"star": 400, "growth": 300, "window_days": 7}}
+    assert ranking.recent(pool, 3) == 3
+    assert "recent_growth" not in pool["a/x"]
 
 
 def test_a_repo_that_lost_stars_is_skipped_by_the_probe(world):
     """探针只做加成。负的最近增长喂进加速比是没有意义的输入。"""
-    world["anchors"][3] = ({"a/x": 500}, 3)
-    probed, _ = ranking.recent({"a/x": {"star": 400}}, 3)
-    assert probed == {}
+    world["baselines"][3] = _baseline({"a/x": 500}, 3)
+    pool = {"a/x": {"star": 400, "growth": 300, "window_days": 7}}
+    ranking.recent(pool, 3)
+    assert "recent_growth" not in pool["a/x"]
+
+
+def test_the_window_follows_the_oldest_snapshot_not_the_request(world):
+    """请求 7 天但最早只有 T−5 的快照:全程按 5 天算,报告标题也写 5 天。
+    两套值并存过一次,后果是新仓库被误判出局。"""
+    world["db"] = {"a/new": {"created_at": _created(6)}}
+    world["baselines"][7] = _baseline({}, 5)
+    out = ranking.run(min_star=500, growth_threshold=500, growth_days=7,
+                      do_report=False, gh=_GH({"a/new": 600}))
+    assert out["growth_days"] == 5
+    assert out["ranked"] == []          # 6 天大 > 5 天窗口,且没基线 → 算不出来
 
 
 def test_a_full_run_ranks_and_reports_the_funnel(world):
-    world["today"] = {"a/hot": 5000, "b/flat": 3000, "c/tiny": 100, "d/mystery": 8000}
-    world["anchors"][7] = ({"a/hot": 3000, "b/flat": 2990, "c/tiny": 50}, 7)
-    world["anchors"][config.RECENT_GROWTH_DAYS] = ({"a/hot": 3500}, 3)
-    world["db"] = {n: {"created_at": _created(500)} for n in world["today"]}
+    world["db"] = {n: {"created_at": _created(500)}
+                   for n in ("a/hot", "b/flat", "c/tiny", "d/mystery")}
+    world["baselines"][7] = _baseline({"a/hot": 3000, "b/flat": 2990, "c/tiny": 50}, 7)
+    world["baselines"][config.RECENT_GROWTH_DAYS] = _baseline({"a/hot": 3500}, 3)
+    gh = _GH({"a/hot": 5000, "b/flat": 3000, "c/tiny": 100, "d/mystery": 8000})
 
     out = ranking.run(min_star=500, growth_threshold=1000, growth_days=7,
-                      do_report=False)
+                      do_report=False, gh=gh)
 
     assert [n for n, _ in out["ranked"]] == ["a/hot"]       # b 只涨 10,c 星太低
-    assert out["funnel"] == {"收集": 3, "增长可算": 2, "达标": 1,
+    assert out["funnel"] == {"名单": 4, "取到star": 4, "达标": 1,
                              "爆发加成": 1, "出榜": 1}
     assert out["growth_days"] == 7
 
 
 def test_hot_new_keeps_only_recently_created_repos(world):
-    world["today"] = {"a/old": 5000, "b/fresh": 4000}
-    world["anchors"][7] = ({}, 7)       # 都不在锚点里 → 只能靠创建时间判定
     world["db"] = {"a/old": {"created_at": _created(900)},
                    "b/fresh": {"created_at": _created(3)}}
-
+    world["baselines"][7] = _baseline({}, 7)        # 都没基线 → 只能靠创建时间判定
     out = ranking.run(mode="hot_new", min_star=500, growth_threshold=1000,
-                      growth_days=7, created_days=30, do_report=False)
+                      growth_days=7, created_days=30, do_report=False,
+                      gh=_GH({"a/old": 5000, "b/fresh": 4000}))
     assert [n for n, _ in out["ranked"]] == ["b/fresh"]
     assert out["ranked"][0][1]["growth"] == 4000        # 有尾无头:全部 star 都是增长

@@ -200,6 +200,24 @@ def test_a_crashing_tool_does_not_take_down_the_conversation():
     assert "炸了" in llm.calls[1][-1]["content"]
 
 
+def test_even_a_crash_in_the_validator_still_leaves_a_reply_for_every_call():
+    """每条 tool_calls 必须配一条 tool 回复,少一条这个会话就永久 400 到 TTL 过期。
+
+    所以校验阶段崩了也得配对 —— 这里直接让校验本身抛,模拟"兜底漏了一处"的情形。
+    """
+    class Exploding(Param):
+        def coerce(self, value):
+            raise OverflowError("cannot convert float infinity to integer")
+
+    tool = Tool("ping", "测试用的工具" * 6, lambda ctx, a: {},
+                (Exploding("n", "int", "", default=1),))
+    llm = _LLM(_call("ping", '{"n": 1}'), {"content": "好"})
+    assert _agent(llm, tool).chat("问") == "好"
+    replies = [m for m in llm.calls[1] if m.get("role") == "tool"]
+    assert len(replies) == 1
+    assert "异常" in replies[0]["content"]
+
+
 def test_a_tool_asking_for_confirmation_short_circuits_the_turn():
     """确认文案必须原样回给用户,不经模型转述 —— 转述会漏参数、会改数字。"""
     tool = Tool("rank", "昂贵的榜单工具" * 6,

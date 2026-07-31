@@ -1,15 +1,10 @@
 """ReAct 循环:问模型 → 它要调工具就调、把结果喂回去 → 它不调工具了就收工。
 
-没有路由模型、没有工具白名单、没有前置条件校验、没有确认状态机 —— 那些都由别处承担:
-选工具靠模型自己(工具说明写得够清楚),确认靠榜单工具内部的守卫,参数合法性靠
-`Tool.validate`。这里只管把循环转起来,以及三件模型做不好的事:
+选工具、确认、参数校验都在别处;这里只管三件事:
 
-    步数护栏      模型偶尔会在两个工具之间来回打转。到上限就撤掉工具,逼它用手上的
-                  观察收口 —— 比返回一句「我没法完成」有用。
-    确认短路      昂贵工具要确认时,由服务端把参数原样回显,不经模型转述。
-                  模型复述参数会漏、会改,而用户以为自己确认的是屏幕上那份。
-    流式的分轮    每轮给一个独立的增量回调,本轮第一片带 reset。有些模型在决定调工具
-                  那一轮会先吐几句过渡话,不清掉的话它会和最终回答粘在一起。
+    步数护栏      到上限就撤掉工具,逼模型用手上的观察收口
+    确认短路      昂贵工具的参数由服务端原样回显,不经模型转述 —— 用户确认的是屏幕上那份
+    流式的分轮    每轮一个独立的增量回调,本轮第一片带 reset,免得过渡话粘上最终回答
 """
 
 from __future__ import annotations
@@ -25,8 +20,7 @@ from .prompts import SUMMARIZE_PROMPT
 
 logger = logging.getLogger("hot_project")
 
-# 一轮对话里最多问模型几次(每次可以含多个工具调用)。正常退出是模型不再要工具;
-# 这个数只是护栏。Web 侧另有全局工具锁和 WS 超时,所以用有限步数而不是 while True。
+# 一轮对话里最多问模型几次(每次可含多个工具调用);正常退出是模型不再要工具,这只是护栏。
 MAX_STEPS = 15
 
 MESSAGE_MAX_CHARS = 2000
@@ -90,7 +84,13 @@ class Agent:
         confirm: str | None = None
         for call in calls:
             fn = call.get("function") or {}
-            result = self.run_tool(fn.get("name", ""), fn.get("arguments", "{}"))
+            try:
+                result = self.run_tool(fn.get("name", ""), fn.get("arguments", "{}"))
+            except Exception as e:      # noqa: BLE001 —— 兜底,理由见下
+                # 每条 tool_calls 必须无条件配一条 tool 回复:漏一条,该会话之后每次请求
+                # 都被接口 400,只能等 TTL 过期。
+                logger.exception("[Agent] 工具 %s 异常逃出 run_tool", fn.get("name", ""))
+                result = {"error": f"工具调用异常:{e}", "retryable": True}
             self.session.tool_result(call.get("id", ""), result)
             if confirm is None and result.get("needs_confirmation"):
                 confirm = result.get("message") or "请确认参数后回复『开始』。"
@@ -139,7 +139,7 @@ class Agent:
                 "抱歉,LLM 调用失败(所有已配置模型都不可用),请稍后重试。")
 
     def _round_delta(self):
-        """每轮一个新的增量回调,本轮第一片带 reset。见模块头部第三条。"""
+        """每轮一个新的增量回调,本轮第一片带 reset。"""
         outer = self._on_delta
         if not outer:
             return None

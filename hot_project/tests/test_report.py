@@ -8,6 +8,7 @@
 import pytest
 
 from hot_project import config
+from hot_project import cron_weekly_report as weekly
 from hot_project.core import report_parse
 from hot_project.infra.store import reports
 from hot_project.tools import report
@@ -210,3 +211,40 @@ def test_saving_then_loading_gives_the_report_back(report_dir):
     assert path is not None
     loaded = reports.load("2026-07-30.md")
     assert loaded is not None and len(loaded.entries) == 2
+
+
+# ── 上一期配对 ─────────────────────────────────────────────────────
+
+def test_the_previous_issue_is_picked_by_date_not_by_file_mtime(report_dir):
+    """CI 每次全新 checkout,所有报告的 mtime 几乎相同、先后随机。
+
+    按 `listing()` 的顺序取第一条就等于随机挑一期当"上一期",推送里的
+    「上新 N · 移出 M」会全错,而收到推送的人没法看出来。这里把 mtime 反着设 ——
+    让最该被选中的那期看起来"最旧" —— 按 mtime 挑就必然选错。
+    """
+    import os
+    for name in ("2026-06-01.md", "2026-07-01.md", "2026-07-20.md", "2026-07-27.md"):
+        _write(report_dir, name)
+    # 日期越近,mtime 越早
+    for offset, name in enumerate(("2026-07-27.md", "2026-07-20.md",
+                                   "2026-07-01.md", "2026-06-01.md")):
+        stamp = 1_000_000 + offset * 1000
+        os.utime(report_dir / name, (stamp, stamp))
+
+    found = weekly.previous_report("2026-07-30.md")
+    assert found is not None
+    assert found[0] == "2026-07-27.md"
+
+
+def test_the_previous_issue_must_be_the_same_kind_of_ranking(report_dir):
+    """综合榜要和综合榜比。拿 _NEW 那份当上期,「上新/移出」全是噪音。"""
+    _write(report_dir, "2026-07-20.md")
+    _write(report_dir, "2026-07-27_NEW.md")
+
+    assert weekly.previous_report("2026-07-30.md")[0] == "2026-07-20.md"
+    assert weekly.previous_report("2026-07-30_NEW.md")[0] == "2026-07-27_NEW.md"
+
+
+def test_the_first_issue_ever_has_no_previous(report_dir):
+    _write(report_dir, "2026-07-30.md")
+    assert weekly.previous_report("2026-07-30.md") is None

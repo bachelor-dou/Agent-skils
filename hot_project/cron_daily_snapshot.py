@@ -1,35 +1,12 @@
 #!/usr/bin/env python
 """每日任务:发现新仓库 → 给 DB 里每个仓库记一份当天 star → 清理旧快照 → 淘汰。
 
-GitHub 2026-06-30 起把 stargazers 列表限权给 admin/collaborator,star 时间戳对他人仓库
-全部失效,二分法和采样外推同时报废。唯一还能还原任意窗口增长的办法是**自己每天记一份计数**:
+star 时间戳已被 GitHub 限权,增长只能靠「今天的 star − T−N 那天快照里的 star」,所以这个
+脚本漏一天是补不回来的。它因此被设计成幂等:当天已有快照就直接退出,可以每小时触发一次。
 
-    增长 = 今天的 star − T−N 那天快照里的 star
-
-整件事的本质是把「实时拉时间戳」换成「快照存量」。所以这个脚本漏一天是补不回来的 ——
-今天无从得知昨天的 star 数。它因此被设计成幂等:当天已有快照就一个请求都不发直接退出,
-于是可以每小时触发一次,机器在一天里任意一小时活着就够了,而不必恰好在某一分钟活着。
-
-## 七步,其中三道屏障
-
-    1. 幂等检查
-    2. 发现:三阶段收集 star ≥ MIN_STAR 的仓库并入库   ← 屏障:新仓库须先入库
-    3. 读 DB 全量仓库名
-    4. 采集:GraphQL 批量取 star                        ← 屏障:全部完成才能算覆盖率
-    5. 覆盖率闸门
-    6. 写快照 + 清理过期                                ← 屏障:淘汰要读含今天在内的快照
-    7. 淘汰
-
-屏障之所以是屏障:第 2 步漏一个新仓库,它今天就没有基线,以后任何窗口都算不出它的增长;
-第 4 步没跑完就算覆盖率,得出的数字必然偏低,会误触第 5 步的闸门。
-
-## 每步的失败策略不同,必须各自声明
-
-    发现失败      记一笔继续跑。DB 是单调累积的,今天漏的明天补 —— 但快照补不回来,
-                  所以绝不能让发现的失败把采集也拖下水。
-    采集部分失败  照常落盘,只要覆盖率够。缺席的仓库不进淘汰判定。
-    覆盖率不足    中止,**不落盘**。宁可缺一天锚点(可顺延到邻近快照),也不写一份
-                  可能有系统性错误的基线 —— 错的基线会让整个窗口的增长全错,且事后发现不了。
+失败策略各不相同:发现失败记一笔继续跑(DB 明天能补,快照不能,绝不能拖累采集);采集
+部分失败照常落盘,缺席的仓库不进淘汰判定;覆盖率不足则中止**不落盘** —— 宁可缺一天锚点
+(可顺延到邻近快照),也不写一份可能有系统性错误、事后发现不了的基线。
 
 用法:
     .venv/bin/python -m hot_project.cron_daily_snapshot [--limit N] [--force]
@@ -58,28 +35,20 @@ logger = logging.getLogger("hot_project")
 
 # ── 采集参数:实测定死的,不是可调旋钮,所以不进 config ──
 #
-# GraphQL 并发压到 4 的原因不是配额(全量 780 点是 12 token 每小时 6 万点的零头),
-# 而是 GitHub 的二级限流 —— 它按请求速率 + IP 计,与 token 数无关,而 Actions 是共享 IP。
-# 实测(2026-07-29):并发 3 顺畅无限流;并发 8 时整批 token 被限、反复等 60s 重置。
-# 多放 token 不会更快,只会加剧请求爆发。
-GRAPHQL_WORKERS = 4
-# Search 侧的 worker 数按 token 数走:每个 token 有独立的 30 次/分钟额度,配速由 token 池管。
+# GraphQL 并发在 `gh_tasks.GRAPHQL_WORKERS`(榜单实时取 star 走同一条道,只能有一处)。
+# Search 侧按 token 数走:每个 token 有独立的 30 次/分钟额度,配速由 token 池管。
 SEARCH_WORKERS_CAP = 12
 # Trending 只有三个周期,再多 worker 也没任务可领。
 FREE_WORKERS = 3
 
 
 def _make_pool(tokens: gh_tokens.TokenPool, search_workers: int) -> TaskPool:
-    """把 token 池接到任务池上。
-
-    任务只说自己要哪种 token(字符串),不认识 token 池;这里是唯一知道
-    「search 那种要按 2.1 秒配速」的地方。
-    """
+    """把 token 池接到任务池上 —— 任务只说自己要哪种 token,不认识 token 池,配速在这里定。"""
     paces = {gh_tasks.SEARCH_TOKEN: gh_tokens.SEARCH, gh_tasks.CORE_TOKEN: gh_tokens.CORE}
     return TaskPool(
         lanes={
             gh_tasks.SEARCH_LANE: search_workers,
-            gh_tasks.GRAPHQL_LANE: GRAPHQL_WORKERS,
+            gh_tasks.GRAPHQL_LANE: gh_tasks.GRAPHQL_WORKERS,
             gh_tasks.FREE_LANE: FREE_WORKERS,
         },
         leaser=lambda kind: tokens.lease(paces[kind]),
@@ -92,11 +61,7 @@ def _make_pool(tokens: gh_tokens.TokenPool, search_workers: int) -> TaskPool:
 async def discover(
     tokens: gh_tokens.TokenPool, client, min_star: int, max_star: int
 ) -> gh_tasks.Discovered:
-    """三阶段收集,一次性全提交。
-
-    关键词、星段、Trending 之间没有先后关系,分开跑只是让 token 轮流闲着。一起提交后
-    Trending(不吃 token)和搜索天然重叠,星段探测按层展开,整段的墙钟时间由最慢的一路决定。
-    """
+    """三阶段收集,一次性全提交 —— 关键词、星段、Trending 无先后关系,分开跑只让 token 闲着。"""
     sink = gh_tasks.Discovered()
     words = [w for group in config.SEARCH_KEYWORDS.values() for w in group]
 
@@ -116,14 +81,9 @@ async def discover(
 
 
 def register(found: dict[str, dict], min_star: int) -> list[str]:
-    """把新仓库写进 DB。
+    """把新仓库写进 DB。只留 star 和 created_at,展示字段等真上榜了再取。
 
-    只留 star 和 created_at:展示字段(描述/话题/README 链接)占旧 DB 体积的 74%,
-    而一个仓库要等涨过上榜门槛、真进了报告才用得上它们。观测层不为此付存储。
-
-    created_at 是判定「新项目」的依据(创建时间落在窗口内 = 它的 star 全是本窗口涨的),
-    Trending 抓来的条目没有这个字段,拿不到就留空 —— 留空按老项目算,只认窗口内的差值,
-    是偏保守的那一侧。
+    created_at 是判定「新项目」的依据;Trending 条目没有它,留空按老项目算,偏保守的那一侧。
     """
     records = {}
     for name, item in found.items():
@@ -137,24 +97,44 @@ def register(found: dict[str, dict], min_star: int) -> list[str]:
 TOP_SOURCES_LOGGED = 15
 
 
-def log_yield(found: gh_tasks.Discovered, fresh: set[str]) -> None:
-    """每个发现来源各带来了多少个新仓库。只写日志,不影响流程。
+def phase_yield(sources: dict[str, set[str]], fresh: set[str]) -> tuple[int, int, int]:
+    """三个发现阶段(关键词 / 星段 / Trending)各命中多少个新仓库。
 
-    这份账是用来回答「333 个关键词里哪些在白跑」的:一个关键词连续多天 0 新增,
-    说明它搜到的东西星段扫描早就覆盖了,砍掉能省下十几分钟和几十次限流。
-    判据要跨多天看 —— 单天 0 新增很正常(那天恰好没有新项目撞上这个词)。
+    一个仓库可被多个阶段同时搜到,计数会重叠、相加可大于去重总数 —— 这里要的是「每个阶段
+    单独能捞到多少新货」,不是把新增瓜分到某一个阶段,所以不去重。
+    """
+    def hit(match) -> int:
+        seen: set[str] = set()
+        for src, names in sources.items():
+            if match(src):
+                seen |= names
+        return len(seen & fresh)
+
+    return (
+        hit(lambda s: s.startswith(gh_tasks.KEYWORD_SOURCE)),
+        hit(lambda s: s == gh_tasks.SEGMENT_SOURCE),
+        hit(lambda s: s == gh_tasks.TRENDING_SOURCE),
+    )
+
+
+def log_yield(found: gh_tasks.Discovered, fresh: set[str]) -> None:
+    """三个阶段各给 DB 带来多少新仓库,再点名产出最高的来源。只写日志,不影响流程。
+
+    用来找白跑的关键词:判据要跨多天看,单天 0 新增很正常。
     """
     scored = sorted(((len(names & fresh), src) for src, names in found.sources.items()),
                     reverse=True)
     if not scored:
         return
     words = [(n, s) for n, s in scored if s.startswith(gh_tasks.KEYWORD_SOURCE)]
-    barren = [s.removeprefix(gh_tasks.KEYWORD_SOURCE) for n, s in words if n == 0]
+    barren = sum(1 for n, _ in words if n == 0)
 
+    kw, seg, trend = phase_yield(found.sources, fresh)
+    logger.info("三阶段新增(命中新仓库数,可重叠):关键词 %d,星段 %d,Trending %d;去重后共 %d。",
+                kw, seg, trend, len(fresh))
     logger.info("发现来源产出(新入库数),前 %d:%s", TOP_SOURCES_LOGGED,
                 ", ".join(f"{s}={n}" for n, s in scored[:TOP_SOURCES_LOGGED]))
-    logger.info("关键词 %d 个,其中今天 0 新增的 %d 个:%s",
-                len(words), len(barren), " ".join(sorted(barren)) or "无")
+    logger.info("关键词 %d 个,其中今天 0 新增 %d 个。", len(words), barren)
 
 
 # ──────────────────────────────────────────────────────────
@@ -166,7 +146,8 @@ async def collect(
     """给每个仓库取一次当天的 star。"""
     sink = gh_tasks.Harvest()
     groups = gh_tasks.batches(names)
-    logger.info("待采集 %d 个仓库,分 %d 批,并发 %d。", len(names), len(groups), GRAPHQL_WORKERS)
+    logger.info("待采集 %d 个仓库,分 %d 批,并发 %d。",
+                len(names), len(groups), gh_tasks.GRAPHQL_WORKERS)
 
     started = time.time()
     async with _make_pool(tokens, 1) as pool:
@@ -184,20 +165,14 @@ async def collect(
 # ──────────────────────────────────────────────────────────
 # 第 7 步 淘汰
 #
-# DB 不能只增:掉到几十星的废弃仓库会一直占着每天的采集量(采集次数和仓库数成正比)和
-# git 历史。
+# DB 不能只增:废弃仓库会一直占着每天的采集量和 git 历史。
 #
-# 只有两条规则:GitHub 确认查不到(改名/删库/转私有,都无可挽回 —— 转私有即便仓库还活着,
-# 我们也再取不到任何信息),或者 star 掉到门槛以下。没有宽限期、没有对收藏/已上榜/新建
-# 仓库的保护,因为**淘汰是可逆的**:观测门槛已经压到 500 星,一个仓库要是改名后又涨回门槛
-# 之上,下一次发现阶段会把它重新收进来。为不可逆的操作设保护是对的,为可逆的操作设保护
-# 只是把简单的事弄复杂。
+# 只有两条规则:GitHub 确认查不到(改名/删库/转私有),或者 star 掉到门槛以下。没有宽限期、
+# 没有对收藏/已上榜仓库的保护,因为**淘汰是可逆的** —— 再涨回门槛之上,下一次发现阶段会
+# 把它重新收进来。
 # ──────────────────────────────────────────────────────────
 class Eviction(NamedTuple):
-    """该删哪些,以及为什么删 —— 分开列出是为了日志能一眼看出这轮是正常代谢还是出事了。
-
-    某天 `missing` 突然从几十涨到几万,那不是仓库集体消失,是采集出了系统性问题。
-    """
+    """该删哪些,以及为什么删 —— 分开列出,日志才能看出这轮是正常代谢还是采集出了事。"""
 
     missing: list[str]      # GitHub 确认查不到
     too_small: list[str]    # star 掉到门槛以下
@@ -219,15 +194,9 @@ def decide(
 ) -> Eviction:
     """算出这一轮该淘汰谁。纯函数,不碰盘。
 
-    唯一必须小心的地方是「GitHub 确认查不到」和「我们这次没问到」的区别 ——
-    它们在快照里长得一模一样(都是缺这个键),后果却差着一个数量级:
-
-        确认查不到    采集成功返回了,只是这个键不在结果里   →  它真的没了
-        没问到        整批限流/超时失败,压根没拿到回答       →  它可能好端端的
-
-    把后者当成前者,一次限流高峰就能删掉成千上万个活仓库。所以本函数**不接受**「快照里
-    没有就是没了」这种推断,调用方必须显式传入 `confirmed_missing`,那份名单只能来自
-    成功的响应。既不在 `stars` 也不在 `confirmed_missing` 的,一律不动。
+    「GitHub 确认查不到」和「我们这次没问到」在快照里长得一样,把后者当前者,一次限流高峰
+    就能删掉成千上万个活仓库 —— 所以 `confirmed_missing` 必须由调用方从成功的响应里显式
+    传入,既不在 `stars` 也不在它里面的一律不动。
     """
     return Eviction(
         missing=sorted(confirmed_missing & tracked),
@@ -238,8 +207,30 @@ def decide(
     )
 
 
+# 一轮最多允许因「查不到」删掉多少:占库的这个比例,或这个绝对条数,取大的那个。
+#
+# `decide` 保证不了**确认查不到本身是错的**:GitHub 一次「200 + data 全 null」的事故会被
+# `StarBatch` 拆成几万个「确认查不到」。正常代谢每天几十个,闸门在正常日子里不会响;宁可
+# 多留一天垃圾,也不要在一次事故里把库删空(连 LLM 写过的 desc 一起没了)。
+MAX_MISSING_RATIO = 0.01
+MAX_MISSING_FLOOR = 200
+
+
 def retire(tracked: set[str], harvest: gh_tasks.Harvest, star_floor: int) -> list[str]:
     plan = decide(tracked, harvest.stars, harvest.missing, star_floor=star_floor)
+
+    ceiling = max(MAX_MISSING_FLOOR, int(len(tracked) * MAX_MISSING_RATIO))
+    if len(plan.missing) > ceiling:
+        logger.error(
+            "放弃本轮「查不到」淘汰:%d 个超过上限 %d(库里共 %d 个)。"
+            "这个量级不是仓库集体消失,是采集出了系统性问题 —— 先查采集,库保持原样。",
+            len(plan.missing), ceiling, len(tracked),
+        )
+        # star 掉到门槛以下那部分照常执行:它来自**成功测到**的 star 值,不受影响。
+        # 不用 `_replace`:本类重写了 `__len__`,而 `_replace` 会拿 `len()` 自检字段个数,
+        # 于是必然 TypeError。
+        plan = Eviction(missing=[], too_small=plan.too_small)
+
     if not plan:
         logger.info("淘汰检查完成:没有仓库需要移除。")
         return []
@@ -301,8 +292,7 @@ async def run(args: argparse.Namespace) -> int:
         return 0
 
     # ── 5-6. 覆盖率闸门 + 写快照 ─────────────────────────
-    # 闸门在 store 里(`snapshots.save` 覆盖率不足就不产生文件)。这里不再判一次:
-    # 两处阈值早晚会分叉,而写快照的那一侧才是知道「什么样的快照能落盘」的地方。
+    # 闸门在 `snapshots.save` 里(覆盖率不足就不产生文件)。这里不再判一次,免得两处阈值分叉。
     if snapshots.save(
         today, harvest.stars, not_found=sorted(harvest.missing), expected=len(names),
         throttle={"hits": tokens.stats["rate_limited"],
@@ -311,7 +301,9 @@ async def run(args: argparse.Namespace) -> int:
         logger.error("本次未落盘,明天重试(锚点可顺延到邻近快照)。")
         return 1
 
-    dropped = snapshots.prune(args.keep_days)
+    # 传 today:不传的话 prune 自己再取一次 UTC 日期,跨 UTC 零点的那一轮会拿 D 写快照、
+    # 却按 D+1 算截断点,把本该留着的 D−35 那份删掉。
+    dropped = snapshots.prune(args.keep_days, today=today)
     if dropped:
         logger.info("清理过期快照 %d 份:%s ~ %s", len(dropped), dropped[0], dropped[-1])
 
@@ -329,6 +321,11 @@ def main() -> int:
     p.add_argument("--skip-evict", action="store_true", help="跳过淘汰阶段")
     p.add_argument("--keep-days", type=int, default=config.SNAPSHOT_KEEP_DAYS)
     args = p.parse_args()
+
+    # 早挡一次:0 会连今天那份一起删光,而快照重算不回来。prune 里也有同样的检查,
+    # 但那时已经采集了两小时。
+    if args.keep_days < 1:
+        p.error(f"--keep-days 至少为 1,收到 {args.keep_days}(0 会删光全部快照)")
 
     log_path = logs.setup(config.LOG_DIR, "snapshot", day=utc_today())
     logger.info("=" * 70)

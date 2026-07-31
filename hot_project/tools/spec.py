@@ -1,26 +1,17 @@
 """工具契约:一个参数只声明一次。
 
-旧包把同一个参数写了两遍 —— `TOOL_PARAM_SCHEMA` 里一份(类型、范围、默认值),
-`AGENT_TOOL_SCHEMAS` 里一份(给模型看的 JSON)—— 再靠 `registry.py` 按名字把两份对上。
-三处必须同时改,漏一处的后果分两档:
+一个 `Param` 同时长出两样东西 —— `json_schema()` 给模型看,`coerce()` 做校验。分成两份写
+的话它们会漂移,而漂移是**静默**的:校验那份认得 `"all"`、模型那份的 enum 里没有,于是
+模型永远请求不到它,谁都不报错。
 
-    注册表对不上   启动时 KeyError,至少炸得很响
-    两份 schema 漂移  静默。`fetch_trending` 的 `"all"` 只写进了校验那份,
-                     模型那份的 enum 里没有,于是模型永远请求不到 `all`,
-                     而流水线内部一直在用它 —— 这个漂移在仓库里活了很久
-
-这里一个 `Param` 同时长出两样东西:`json_schema()` 给模型,`coerce()` 做校验。
-漂移在类型上就不可能。
-
-**只保留严格校验。** 旧包那套「宽松模式」(静默把越界值裁到边界)只服务于 `core.py` 的
-内部调用,而那些内部调用已经不存在了。对模型来说静默纠偏是有害的:它永远学不会
-自己传错了。
+只有严格校验,没有「宽松模式」:静默把越界值裁到边界会让模型永远学不会自己传错了。
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 REQUIRED = object()     # default 取这个值 = 必填
@@ -60,6 +51,10 @@ class Param:
             # bool 是 int 的子类,不拦的话 `top_n=true` 会变成 top_n=1
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return None, "expected_integer"
+            # json.loads 认 `1e400` 和 `NaN`,而 `int()` 对它们抛 OverflowError/ValueError。
+            # 异常从这里逃出去会让那轮的 tool_calls 配不上 tool 回复,会话之后一律 400。
+            if isinstance(value, float) and not math.isfinite(value):
+                return None, "expected_integer"
             number = int(value)
             if self.min is not None and number < self.min:
                 return None, f"must_be_gte_{self.min}"
@@ -87,8 +82,8 @@ class Tool:
     expensive: bool = False                 # 昂贵工具执行前要用户确认
 
     def __post_init__(self) -> None:
-        # 重名参数在 schema 里会静默合并成一条(dict 后来者胜),而校验时两条都跑一遍。
-        # 于是模型看到的定义和实际生效的规则可能不是同一条 —— 直接拦在构造时。
+        # 重名参数在 schema 里会静默合并成一条(后来者胜),校验时却两条都跑 —— 模型看到的
+        # 定义和实际生效的规则就不是同一条了。拦在构造时。
         names = [p.name for p in self.params]
         if len(names) != len(set(names)):
             dupes = sorted({n for n in names if names.count(n) > 1})
@@ -124,8 +119,7 @@ class Tool:
             else:
                 clean[param.name] = value
 
-        # 未知参数显式拒绝:静默吞掉会让模型以为自己的幻觉参数生效了,
-        # 然后一直用同样的错法调下去。
+        # 未知参数显式拒绝:吞掉会让模型以为幻觉参数生效了,然后一直这么调下去。
         known = {p.name for p in self.params}
         errors += [{"param": name, "reason": "unknown_parameter", "received": args[name]}
                    for name in sorted(set(args) - known)]
@@ -136,9 +130,8 @@ class Tool:
 class Ctx:
     """一次工具调用能看到的全部外部世界。
 
-    **没有 `db` 字段。** 旧版把整个 DB 挂在 ctx 上传来传去,工具就地改字典、再由调用方
-    找机会保存;于是「谁改了什么、什么时候落盘」没人说得清,还出过改了不保存的静默丢失。
-    现在要读库的工具自己 `universe.load()`,要写的走 `universe.write_*` —— 每次写都是
+    **刻意没有 `db` 字段**:DB 挂在 ctx 上供人就地改,「谁改了什么、什么时候落盘」就没人
+    说得清了。要读的工具自己 `universe.load()`,要写的走 `universe.write_*` —— 每次写都是
     一个事务,范围写在函数名里。
     """
 

@@ -1,7 +1,7 @@
 """数据层:真实数据的读取自检 + 四类写入拦截。
 
 读那几条打**真实数据**(`data/Github_DB.json` 与 `data/snapshots/*.json.gz`):路径搬家、
-REPO_ROOT 推导错位这类事故的表现都是「读到空」,而拿构造数据测永远发现不了。
+PACKAGE_DIR 推导错位这类事故的表现都是「读到空」,而拿构造数据测永远发现不了。
 写入那几条一律在临时目录上跑,绝不碰真数据。
 
 2026-07-30 之前这里还有三条「与旧包读取层逐条对照」的测试(DB / 快照 / 收藏,逐字段比)。
@@ -49,13 +49,16 @@ def test_the_live_favorites_read_back():
     assert favorites.all_repos(), "读不到任何收藏 —— 路径是不是指错了?"
 
 
-def test_anchor_reports_the_real_window():
-    """锚点的 window_days 必须是它到今天的真实天数,不是请求的天数。"""
-    days = snapshots.available_dates()
-    newest = days[-1]
-    anchor = snapshots.anchor_for_window((snapshots.utc_today() - newest).days)
-    assert anchor is not None
-    assert anchor.window_days == (snapshots.utc_today() - anchor.day).days
+def test_the_live_baseline_reads_back():
+    """基线是增长的唯一减数,路径指错的话榜单会静默变空。"""
+    usable = [d for d in snapshots.available_dates()
+              if (snapshots.utc_today() - d).days >= 1]
+    assert usable, "没有一份「至少一天前」的快照,基线无从取起"
+
+    span = (snapshots.utc_today() - usable[-1]).days     # 只加载最近那一份,别拖慢测试
+    base = snapshots.earliest_in_window(span)
+    assert base.oldest == usable[-1]
+    assert base.stars and set(base.days) == set(base.stars)
 
 
 # ──────────────────────────────────────────────────────────
@@ -140,20 +143,23 @@ def test_discover_only_inserts_new(sandbox):
     assert projects["new/repo"]["star"] == 700
 
 
-# ── 拦截 2:展示字段仅补空,缺 forks 不得写 0(曾真实抹库)──
+# ── 拦截 2:forks 已退出展示字段,既不许写、也不许碰残留旧值 ──
 
 
-def test_display_refresh_missing_forks_keeps_stored_value(sandbox):
-    """周报候选池改读快照后 repo_item 里没有 forks_count,旧代码照写 0 抹掉了全库 fork 数。
+def test_display_refresh_leaves_retired_forks_untouched(sandbox):
+    """forks 不再由 DB 管(现值只走实时接口)。refresh_display 既不能写它,
 
-    「缺」必须区别于「0」:没给这个键 = 这次没查到,保持原值。
+    也不该动 load() 透传下来的历史残留值 —— 老库里那堆 forks 静静躺着,直到自然消亡。
     """
     sandbox({"projects": {"a/b": {"star": 900, "forks": 456}}})
 
-    universe.refresh_display({"a/b": {"language": "Python"}})   # 故意不给 forks
+    with pytest.raises(ValueError, match="不许写字段"):
+        universe.refresh_display({"a/b": {"forks": 0}})        # forks 已是外来字段
+
+    universe.refresh_display({"a/b": {"language": "Python"}})   # 合法字段照常补
 
     record = _read_db()["projects"]["a/b"]
-    assert record["forks"] == 456, "forks 被抹掉了"
+    assert record["forks"] == 456, "残留的旧 forks 不该被碰"
     assert record["language"] == "Python"
 
 
@@ -254,6 +260,56 @@ def test_snapshot_rejects_low_coverage(sandbox):
     assert not list(config.SNAPSHOT_DIR.iterdir()), "低覆盖的快照落盘了"
 
 
+def test_a_better_snapshot_is_never_overwritten_by_a_worse_one(sandbox):
+    """下限只挡「绝对太少」,挡不住「比盘上那份少」。
+
+    两个 run 撞上同一天(schedule 漂移、手动补跑)时,覆盖率 60% 的会盖掉 99% 的 ——
+    通过了下限检查、日志一切正常,而那天的基线从此永久缺一批仓库。
+    """
+    day = snapshots.utc_today()
+    good = {f"o/r{i}": 100 for i in range(99)}
+    assert snapshots.save(day, good, not_found=[], expected=100) is not None
+
+    thin = {f"o/r{i}": 100 for i in range(60)}
+    assert snapshots.save(day, thin, not_found=[], expected=100) is not None  # 不算失败
+    assert len(snapshots.load_stars(day)) == 99, "高覆盖那份被盖掉了"
+
+
+def test_pruning_everything_is_refused_rather_than_obeyed(sandbox):
+    """快照是增长计算的唯一数据源,且重算不回来(star 时间戳已被 GitHub 限权)。
+
+    keep_days=0 会连今天那份一起删光 —— 一个手滑的配置值不该有这种量级的后果。
+    """
+    with gzip.open(snapshots.path_of(snapshots.utc_today()), "wt", encoding="utf-8") as f:
+        json.dump({"stars": {"a/b": 1}}, f)
+
+    for bad in (0, -1):
+        with pytest.raises(ValueError):
+            snapshots.prune(keep_days=bad)
+    assert snapshots.load_stars(snapshots.utc_today()) is not None
+
+
+def test_a_snapshot_with_a_mangled_body_reads_as_missing_not_as_a_crash(sandbox):
+    """损坏快照必须按缺失处理:锚点可替代,顺延到邻近那天即可。
+
+    坑在异常类型上 —— 截断给 EOFError,而压缩体被改坏给的是 `zlib.error`,它**不在**
+    OSError 之下。漏掉后者,一个坏文件就会掀翻整轮排名。
+    """
+    day = snapshots.utc_today()
+    path = snapshots.path_of(day)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump({"stars": {f"o/r{i}": i for i in range(200)}}, f)
+
+    raw = path.read_bytes()
+    middle = len(raw) // 2
+    for broken in (raw[:middle] + bytes([raw[middle] ^ 0xFF]) + raw[middle + 1:],  # zlib.error
+                   raw[:middle],                                                   # EOFError
+                   b"not gzip at all"):                                        # BadGzipFile
+        path.write_bytes(broken)
+        assert snapshots.load_stars(day) is None
+        assert snapshots.load_not_found(day) == []
+
+
 def test_snapshot_roundtrip_with_meta(sandbox):
     day = snapshots.utc_today()
     stars = {f"o/r{i}": 100 + i for i in range(90)}
@@ -305,6 +361,41 @@ def test_prune_only_deletes_snapshots(sandbox):
 
     assert snapshots.prune(keep_days=35) == [stale]
     assert (config.SNAPSHOT_DIR / "2026-01-01.json.gz.lock").exists()
+
+
+def _write_snapshot(day, stars: dict[str, int]) -> None:
+    with gzip.open(snapshots.path_of(day), "wt", encoding="utf-8") as f:
+        json.dump({"stars": stars}, f)
+
+
+def test_the_baseline_takes_each_repos_earliest_measurement_in_the_window(sandbox):
+    """逐仓取窗口内最早的那次,天数也逐仓算。
+
+    `b/late` 三天前才进库,T−7 那份里没有它 —— 旧实现只认单一锚点日,它整个算不出增长、
+    被剔出榜单,而那恰恰是「刚爆火」的形状。天数同样必须逐仓:按全局 7 天折算它的速率会
+    低估一半多,爆发加成于是凭空多给一档。
+    `c/today` 只在今天那份里 —— 今天不作基线,否则窗口 0 天、增长恒为 0,还会除零。
+    """
+    today = snapshots.utc_today()
+    _write_snapshot(today - timedelta(days=7), {"a/old": 100})
+    _write_snapshot(today - timedelta(days=3), {"a/old": 400, "b/late": 2000})
+    _write_snapshot(today, {"a/old": 900, "b/late": 5000, "c/today": 300})
+
+    base = snapshots.earliest_in_window(7, today=today)
+
+    assert base.stars == {"a/old": 100, "b/late": 2000}
+    assert base.days == {"a/old": 7, "b/late": 3}
+    assert base.oldest == today - timedelta(days=7)
+    assert base.span == 7
+
+
+def test_a_snapshot_older_than_the_window_is_not_a_baseline(sandbox):
+    """越窗取基线等于偷偷把窗口拉长,增长阈值就形同虚设了。"""
+    today = snapshots.utc_today()
+    _write_snapshot(today - timedelta(days=9), {"a/old": 100})
+
+    base = snapshots.earliest_in_window(7, today=today)
+    assert base.oldest is None and base.stars == {}
 
 
 def test_a_snapshot_written_today_makes_the_run_idempotent(sandbox):

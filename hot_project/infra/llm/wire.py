@@ -1,14 +1,10 @@
 """线上协议:请求头、请求体、一次请求(含流式)。
 
-各家「兼容 OpenAI」的程度不一样,差异集中在这一个文件里,别处不该再出现 `if backend ==`。
+各家「兼容 OpenAI」的程度不一样,差异集中在这个文件里,别处不该再出现 `if backend ==`。
+已知差异:azure(gpt-5.x)用 max_completion_tokens,不认 temperature 和 thinking 系参数。
 
-已知差异:
-
-    azure(gpt-5.x)   max_completion_tokens,不认 temperature,不认 thinking 系参数
-    openai 兼容      max_tokens / temperature / enable_thinking / thinking_budget
-
-发了对方不认的参数不是「被忽略」,是整个请求 400 —— 所以是白名单而不是黑名单:
-新加参数时默认不发给未知后端,由加参数的人显式列进去。
+发了对方不认的参数不是被忽略,是整个请求 400 —— 所以这里是白名单:新参数默认不发给
+未知后端,由加参数的人显式列进去。
 """
 
 from __future__ import annotations
@@ -62,12 +58,8 @@ def payload(
 
 
 # ── 工具调用泄漏 ─────────────────────────────────────────────────────
-#
-# 有些推理模型偶尔把本该走 tool_calls 结构化通道的调用,当成一段 JSON 文本吐在正文开头:
-#
-#     {"tool_uses":[{"recipient_name":"functions.xxx","parameters":{...}}]}
-#
-# 这段不能给用户看见,得在外发前从正文开头剥掉。
+# 有些推理模型偶尔把本该走 tool_calls 通道的调用当成 JSON 文本吐在正文开头,例如
+# `{"tool_uses":[{"recipient_name":...}]}`。这段不能给用户看见,外发前剥掉。
 
 _LEAK_KEYS = ('"tool_uses"', '"recipient_name"', '"tool_calls"', '"parameters"')
 
@@ -75,11 +67,8 @@ _LEAK_KEYS = ('"tool_uses"', '"recipient_name"', '"tool_calls"', '"parameters"')
 def strip_leaked_toolcall(text: str) -> str | None:
     """剥掉正文开头那段疑似工具调用泄漏的 JSON。
 
-    三态返回,流式那边靠它决定要不要继续缓冲:
-
-        str   开头那段 JSON 含泄漏特征 → 返回剥掉之后的余文;
-              不含 → 原样返回(用户的答案本来就以 JSON 开头,不能动)
-        None  开头是 `{` 但花括号还没闭合 → 判不了,继续缓冲
+    三态返回,流式那边靠它决定要不要继续缓冲:剥完的余文 / 原文(不含泄漏特征,答案本来
+    就以 JSON 开头,不能动)/ None(花括号还没闭合,判不了)。
     """
     s = text.lstrip()
     if not s.startswith("{"):
@@ -114,9 +103,8 @@ def strip_leaked_toolcall(text: str) -> str | None:
 def merge_toolcall_fragment(acc: dict, frag: dict) -> None:
     """把一个流式 tool_call 增量片段按 index 合并进累加器。
 
-    OpenAI 流式约定:首片带 id/type/function.name,后续片只带 arguments 的一截 JSON 串,
-    要按 index 拼。逐片处理顺带修掉了「同一 chunk 里重复 index」的坑(vLLM 的推测解码
-    会这么发)—— 相同 index 落进同一个槽位,而不是各成一项。
+    首片带 id/type/name,后续片只带 arguments 的一截,要按 index 拼。同一 chunk 里出现
+    重复 index(vLLM 推测解码会这么发)必须落进同一槽位,不能各成一项。
     """
     slot = acc.setdefault(frag.get("index", 0),
                           {"id": "", "type": "function",
@@ -135,8 +123,8 @@ def merge_toolcall_fragment(acc: dict, frag: dict) -> None:
 class _HeadGate:
     """正文开头的闸门:只拦「以 `{` 起头、疑似工具泄漏」的那一段。
 
-    其余正文(绝大多数答案以散文或 Markdown 开头)零延迟直接放行 —— 一律缓冲到能判定
-    为止的话,每个回答的首字延迟都要为这个罕见情况买单。
+    散文和 Markdown 零延迟放行 —— 一律缓冲到能判定为止的话,每个回答的首字延迟都要为
+    这个罕见情况买单。
     """
 
     def __init__(self, emit) -> None:
@@ -172,8 +160,7 @@ class _HeadGate:
 def _stream(scheme, model: str, body: dict, on_delta, timeout: int) -> tuple[dict | None, bool]:
     """一次 SSE 请求,边收边把正文增量喂给 `on_delta`。不重试。
 
-    返回 `(data, emitted)`。`emitted` 表示有没有往外发过内容 —— 发过就不能重试了,
-    否则前端会看到重复的文字,宁可只返回已收到的部分。
+    返回 `(data, emitted)`。`emitted` 为真就**不能重试**,否则前端会看到重复的文字。
     """
     body = dict(body, stream=True)
     parts: list[str] = []
@@ -182,7 +169,7 @@ def _stream(scheme, model: str, body: dict, on_delta, timeout: int) -> tuple[dic
     emitted = False
     resp = None
     started = time.time()
-    first_at = None     # 首字耗时:诊断「转半天不吐字」是模型在思考还是流式假死
+    first_at = None     # 首字耗时:分辨「转半天不吐字」是模型在思考还是流式假死
     pieces = 0          # 增量条数:接近字符数 = 逐 token 流;远小于 = 被网关整块缓冲
 
     def emit(text: str) -> None:

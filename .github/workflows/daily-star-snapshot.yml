@@ -3,20 +3,21 @@ name: daily star snapshot
 # 每日 star 快照跑在 GitHub 的机器上，直接提交到 main，本地 git pull 即可拿到。
 # 快照是 N 天增长的唯一基线（star 时间戳接口 2026-06 起对外关闭），漏一天补不回来。
 #
-# 为什么按小时触发而不是每天一次：
+# 为什么每 3 小时触发而不是每天一次：
 #   GitHub 的 schedule 是 best-effort，2026 年社区实测漂移可达数小时（actions/runner#4468），
 #   2026-07-09 还出过约 2% 的 run 直接启动失败的事故，且被跳过时不发任何通知。
-#   脚本本身幂等（当天已有快照就秒退、一个请求都不发），所以按小时触发几乎零成本，
-#   一天 24 次机会里任意一次成功就拿到当天快照。漏掉的那天是补不回来的
-#   （今天无从得知昨天的 star 数），容错只能靠多给自己机会。
+#   脚本本身幂等（当天已有快照就秒退、一个请求都不发），所以额外的尝试几乎零成本，
+#   一天 8 次机会里任意一次成功就拿到当天快照。漏掉的那天是补不回来的
+#   （今天无从得知昨天的 star 数），容错只能靠多给自己机会——8 次全部落空的概率可忽略，
+#   同时比每小时省掉三分之二的空跑。
 #   分钟取 :23 —— :00/:15/:30 是全平台定时任务的高峰批次，冷门分钟排队明显更短。
 #
-# 每天第一次尝试落在北京时间 08:23：快照按 UTC 日命名（与 DB 的 refreshed_at 同基准），
+# 每天第一次尝试落在北京时间 08:23：快照按 UTC 日命名（与 DB 同基准），
 # 而 UTC 零点就是北京时间 8 点，所以 00:23 UTC 这一轮正是当天窗口的第一次机会。
 
 on:
   schedule:
-    - cron: "23 * * * *"
+    - cron: "23 */3 * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -47,10 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CI 只在 snapshots 分支上活动，main 由人工 PR 合并把关。
-          # 必须检出 snapshots 而非默认分支：过期快照清理要看到 snapshots 上已有的快照集合。
-          # 注意 schedule 触发只认默认分支上的 workflow 文件，所以改这个 yaml 得合进 main 才生效。
-          ref: snapshots
+          # 检出 main：代码和数据（快照/DB）都在 main，CI 直接把当天产物提交回 main。
+          # 过期快照清理要先看到 main 上已有的快照集合，所以必须检出它。
+          # 人工改动一律走特性分支 PR 合并；CI 用 github-actions bot 直接推 main。
+          ref: main
         # 默认浅克隆：29MB 的 Github_DB.json 只下最新一版，不拉历史
 
       - uses: actions/setup-python@v5

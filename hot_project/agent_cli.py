@@ -1,12 +1,5 @@
 #!/usr/bin/env python
-"""命令行对话入口。
-
-    python -m hot_project.agent_cli
-
-    你> 帮我找最近 AI Agent 方向的热门项目
-    你> 查一下 vllm-project/vllm 最近的 star 增长
-    你> 把增长阈值降到 300 再搜一次
-    你> quit
+"""命令行对话入口:`python -m hot_project.agent_cli`,自然语言提问,quit 退出。
 
 日志只写文件、不打控制台 —— 对话本身就在控制台上,再混进 INFO 日志就没法看了。
 """

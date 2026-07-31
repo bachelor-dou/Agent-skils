@@ -1,14 +1,9 @@
 """单仓库资料 —— REST `/repos/{owner}/{repo}` 那几个端点。
 
-对外只有一个动作:`profile(name, want=...)` 给一个仓库的资料包。
+对外只有一个动作:`profile(name, want=...)` 给一个仓库的资料包 —— 会变的是「这次要哪几样」,
+所以它是参数而不是四个各自拼 dict 的函数。
 
-**为什么是「资料包」而不是四个函数。** 旧包里 describe_project、报告生成、repo_profile
-各自抄了一遍「抓 info、抓 readme、抓 commits、拼进一个 dict」,三份抄得还不一样:
-describe 用 ThreadPoolExecutor 并发抓、报告生成串行抓且只抓两样、repo_profile 又是另一套。
-真正会变的是「这次要哪几样」,那就让它成为参数。
-
-**限流轮换不在这里写。** 每次请求借一张租约,撞限流时租约在归还时冷却那个 token,
-重试自然会拿到另一个 —— 旧包那个 80 行的 `_with_token_rotation` 整个不需要了。
+限流轮换不在这里写:每次请求借一张新租约,撞限流的那张在归还时被冷却,重试自然拿到另一张。
 """
 
 from __future__ import annotations
@@ -34,8 +29,7 @@ RELEASES = 5
 COMMITS = 10
 COMMIT_MESSAGE_MAX = 140
 
-# 一次请求最多重试几次。单仓库抓取是交互路径(用户在等),不像每日快照那样可以慢慢磨,
-# 所以比任务池的预算小。
+# 单仓库抓取是交互路径(用户在等),所以重试预算比任务池小。
 ATTEMPTS = 3
 
 ALL = ("info", "readme", "releases", "commits")
@@ -45,8 +39,7 @@ async def _get(client: httpx.AsyncClient, pool: TokenPool, path: str,
                *, params: dict | None = None) -> Any | None:
     """请求一个仓库端点。404/422 → None(没有这个东西,不是故障)。
 
-    每次尝试重新借租约:上一次撞限流的那个 token 已经在归还时被冷却了,
-    重借拿到的必然是另一张。
+    每次尝试重新借租约,所以重试必然换一张 token。
     """
     url = f"{API}{path}"
     for attempt in range(ATTEMPTS):
@@ -66,7 +59,10 @@ async def _get(client: httpx.AsyncClient, pool: TokenPool, path: str,
                 if resp.status_code in (403, 429):
                     raise RateLimitError(gh._reset_at(resp.headers))
                 raise RetryableError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        except (RateLimitError, RetryableError, httpx.RequestError) as e:
+        # TokenInvalidError 必须在里面:GitHub 会对好 token 偶发 401,漏掉它就是
+        # 一次瞬时 401 打断整个交互请求,而另外 11 张健康 token 正闲着。
+        except (TokenInvalidError, RateLimitError, RetryableError, httpx.RequestError) as e:
+            logger.debug("仓库端点第 %d/%d 次失败:%s(%s)", attempt + 1, ATTEMPTS, url, e)
             if attempt == ATTEMPTS - 1:
                 logger.warning("仓库端点放弃:%s(%s)", url, e)
                 return None
@@ -135,10 +131,9 @@ _FETCHERS = {"info": info, "readme": readme, "releases": releases, "commits": co
 
 
 async def profile(client, pool, name: str, want: tuple[str, ...] = ALL) -> dict[str, Any]:
-    """一个仓库的资料包。要哪几样由 `want` 决定,几样并发抓。
+    """一个仓库的资料包。要哪几样由 `want` 决定,并发抓。
 
-    某一样失败只让那一样缺席,不拖垮整包 —— 一个仓库没有 releases 是常态,
-    不该让描述生成整个失败。
+    某一样失败只让那一样缺席 —— 没有 releases 是常态,不该让描述生成整个失败。
     """
     keys = [k for k in want if k in _FETCHERS]
     results = await asyncio.gather(
@@ -162,10 +157,7 @@ async def profiles(client, pool, names: list[str],
 
 async def search(client, pool, query: str, *, limit: int = 5,
                  sort: str = "stars") -> list[dict]:
-    """按关键词搜仓库,取前 `limit` 个。用于仓库名消歧和 `search_repos` 工具。
-
-    走 SEARCH 配速而不是 CORE:搜索是另一本限额账(30 次/分),混用会撞墙。
-    """
+    """按关键词搜仓库,取前 `limit` 个。走 SEARCH 配速 —— 搜索是另一本限额账(30 次/分)。"""
     async with pool.lease(SEARCH) as lease:
         return (await gh.search_page(client, lease, query, page=1,
                                      per_page=limit, sort=sort))[:limit]

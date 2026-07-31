@@ -1569,16 +1569,54 @@
 
     // 仅把"真实存在的报告名（latestReports 里有的 *.md）"转成链接，
     // 避免正文里随便出现的 README.md 之类被链成死链。
+    //
+    // 走文本节点而不是在 HTML 串上正则替换：字符串替换分不清匹配到的是正文还是属性值，
+    // 回复里出现 `<a href="https://x/2026-07-30.md">` 时会把一整个 <a> 标签塞进属性里，
+    // 把 DOM 撑坏。顺带跳过 a/code/pre —— 链接里套链接是非法 HTML，代码块里的文件名
+    // 也不该变成链接。
+    const REPORT_NAME_RE = /[\w.-]+\.md/g;
+
     function linkKnownReports(html) {
       const names = new Set((latestReports || []).map((r) => r && r.name).filter(Boolean));
       if (names.size === 0) {
         return html;
       }
-      return html.replace(/([\w.-]+\.md)/g, (match) =>
-        names.has(match)
-          ? `<a href="${getReportHtmlUrl(match)}" target="_blank" rel="noopener">${match}</a>`
-          : match
-      );
+      const host = document.createElement("div");
+      host.innerHTML = html;
+
+      const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+      const targets = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const parent = node.parentElement;
+        if (parent && parent.closest("a, code, pre")) continue;
+        if (node.nodeValue && node.nodeValue.includes(".md")) targets.push(node);
+      }
+
+      for (const node of targets) {
+        const text = node.nodeValue;
+        const frag = document.createDocumentFragment();
+        let cursor = 0;
+        for (const match of text.matchAll(REPORT_NAME_RE)) {
+          if (!names.has(match[0])) continue;
+          if (match.index > cursor) {
+            frag.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+          }
+          const link = document.createElement("a");
+          link.href = getReportHtmlUrl(match[0]);
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = match[0];
+          frag.appendChild(link);
+          cursor = match.index + match[0].length;
+        }
+        if (cursor === 0) continue;       // 这个节点里没有已知报告名
+        if (cursor < text.length) {
+          frag.appendChild(document.createTextNode(text.slice(cursor)));
+        }
+        node.parentNode.replaceChild(frag, node);
+      }
+      return host.innerHTML;
     }
 
     function enhanceReply(text) {
@@ -1590,10 +1628,15 @@
             "target", "class", "type", "data-repo", "title", "aria-label", "aria-hidden",
             "viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "xmlns",
           ],
-          ALLOW_TAGS: [
+          // 选项名是 ALLOWED_TAGS。写成 ALLOW_TAGS 时 DOMPurify 当未知键静默忽略，
+          // 于是这份白名单一行都没生效，用的是库自带那份宽得多的默认表（<style>
+          // <form> 都在里面）。补上 input/b/i/s 等是因为白名单一旦真生效就是**全量替换**
+          // 默认表，漏写的标签会被剥掉 —— 任务列表的复选框就是这么丢的。
+          ALLOWED_TAGS: [
             "h1","h2","h3","h4","h5","h6","p","br","hr","ul","ol","li",
             "strong","em","del","code","pre","blockquote","a","img",
-            "table","thead","tbody","tr","th","td","div","span","sub","sup",
+            "table","thead","tbody","tfoot","caption","tr","th","td",
+            "div","span","sub","sup","b","i","u","s","abbr","input",
             "button","svg","path",
           ],
         });

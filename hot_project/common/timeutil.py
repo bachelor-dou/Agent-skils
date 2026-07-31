@@ -1,16 +1,11 @@
 """时间 —— 全项目只有这一处知道时间长什么样。
 
-项目里有两种时间字符串,它们不能混用:
-
     GitHub 时间戳   "2026-07-30T08:15:00Z"   仓库的 created_at、收藏时刻
     日期串          "2026-07-30"             快照文件名、描述刷新日期、报告文件名
 
-**一律 UTC。** 混用本地时区会让窗口差一天:快照按 UTC 日期命名,而「今天」若按本地算,
-东八区下午跑的任务会去找一个还不存在的锚点。旧包在 `snapshots.utc_today()` 的注释里
-专门叮嘱过这件事,但每个用到时间的模块仍各写一遍 —— 现在没有第二处可写。
-
-解析失败一律返回 None 而不是抛:这些串大多来自 GitHub 或历史数据文件,
-格式意外时该由调用方决定是跳过还是回退,不该让一条脏数据打断整轮。
+**一律 UTC。** 快照按 UTC 日期命名,「今天」若按本地算,东八区下午跑的任务会去找一个还不
+存在的锚点。解析失败一律返回 None 而不是抛:格式意外时由调用方决定跳过还是回退,不该让
+一条脏数据打断整轮。
 """
 
 from __future__ import annotations
@@ -65,12 +60,8 @@ def parse_day(text: str) -> date | None:
 def parse_moment(text: str) -> datetime | None:
     """把**任意一种**时间串解析成时刻。都不认返回 None。
 
-    两种形状都得认,因为它们在同一个字段位置上混着出现:仓库的 `created_at` 来自 GitHub,
-    是完整时间戳;而我们自己写的 `desc_updated_at` 是日期串。只认前者的话,
-    「描述过期了吗」永远答不上来 —— 不报错,只是缓存的描述再也不刷新。
-
-    日期串按当天 00:00 UTC 算。这会让年龄最多虚增不到一天,而所有用它的判断
-    (创建于窗口内、描述超过 60 天)容忍度都远大于一天。
+    两种形状在同一个字段位置上混着出现(`created_at` 是完整时间戳,`desc_updated_at` 是
+    日期串),所以都得认。日期串按当天 00:00 UTC 算,年龄最多虚增不到一天。
     """
     return parse_stamp(text) or (
         datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
@@ -81,8 +72,7 @@ def parse_moment(text: str) -> datetime | None:
 def age_days(text: str, *, now: datetime | None = None) -> float | None:
     """这个时刻距今多少天(小数)。无法解析返回 None。
 
-    返回小数而不是整数:判断「创建于窗口内」时,0.5 天和 0 天是两回事 ——
-    取整会把今天凌晨创建的仓库和昨天创建的算成同一天。
+    返回小数而不是整数:取整会把今天凌晨创建的仓库和昨天创建的算成同一天。
     """
     parsed = parse_moment(text)
     if parsed is None:

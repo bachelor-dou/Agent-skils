@@ -1,30 +1,25 @@
 """榜单流水线 —— 综合 / 新项目 / 关键词三榜共用。
 
-    候选池 → 增长 → 阈值 → 爆发探针 → 打分 → 报告
+    候选名单 → 实时 star → 增长 → 阈值 → 爆发探针 → 打分 → 报告
 
-**整条链路零 GitHub 请求**(报告里生成描述除外)。旧版在这里跑三阶段扫描,一轮几十分钟、
-撞两百次限流。现在候选池就是今天的快照,增长是查表相减 —— 因为一个不在 DB/快照里的仓库
-根本拿不到锚点,增长必然未决、进不了榜,扫它是几十分钟换零个候选。
+**当前 star 一律实时取,不读当天的快照。** 读当天快照会把两个定时任务焊死在一起:榜单的
+数字锚死在每日采集那一刻,采集到出榜之间涨的 star 凭空消失,而且当天采集没跑成榜单就出不来。
+快照只负责一件事 —— 给出窗口内**最早**那天的基线。
 
-## 窗口只有一个来源
+两条不变量:
 
-请求方说「近 7 天」,但真正生效的是锚点的实际跨度(缺快照会顺延)。两者不一致时一律
-以锚点为准,并且报告标题里写实际天数。旧代码在这件事上有两套值并存,导致新仓库被误判
-出局(见 `core/growth.py`)。
-
-## 未决不是零
-
-算不出增长的仓库直接不进候选池,而不是记 0 —— 记 0 它会以「一点没涨」的身份参与排名,
-既永远出不了榜,也没人看得出真实原因是缺基线。漏斗里单独报这个数。
+- **达标才进内存。** 增长低于阈值的当场丢:它既出不了榜,也不参与探针和排序。7.8 万个候选
+  收到几百个,省下的是几十 MB 和之后每一步的全表遍历。
+- **算不出增长的不参与。** 窗口内没有任何快照测到过它、创建时间又不在窗口内 → 这轮它不
+  出现。记 0 的话它会以「一点没涨」的身份进排名,永远出不了榜,也没人看得出原因。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
 from .. import config
-from ..common.timeutil import age_days, utc_today
+from ..common.timeutil import age_days
 from ..core import growth as growth_calc
 from ..core import scoring
 from ..infra.store import snapshots, universe
@@ -52,79 +47,70 @@ def _emit(progress, percent: int, label: str) -> None:
         logger.debug("进度回调异常已忽略", exc_info=True)
 
 
-def candidates(min_star: int) -> dict[str, dict]:
-    """候选池 = 今天的快照 ∩ star 达标。零请求。
+def current_stars(gh, names: list[str]) -> dict[str, int]:
+    """实时取这批仓库此刻的 star。批量走任务池 + token 池,和每日采集同一条路。
 
-    star 取快照而不是 DB 里的值:DB 的 star 只在每日任务里刷新,而增长的减数(锚点)
-    是快照,被减数必须来自同一条链,否则窗口两端口径不一致。
-
-    **不套 max_star**:那是星段扫描的分段上限(避免浪费 Search 页),对读库毫无意义,
-    照搬会把两万星以上的仓库整批挡在榜外。
+    只取 `stars`:「GitHub 查不到」和「这次没问到」在这里都只意味着它这轮排不了名,
+    而两者的区别只对淘汰判定有意义(见 `cron_daily_snapshot`),那不是榜单的事。
     """
-    stars = snapshots.load_stars(utc_today())
-    if not stars:
-        logger.error("今天的快照还没落盘,榜单无从算起(每日任务挂了?)。")
+    if gh is None or not getattr(gh, "usable", False):
+        logger.error("没有可用的 GitHub token,取不到当前 star,本轮无从算起。")
         return {}
-    saved = universe.load()
-    pool = {
-        name: {"star": star, "created_at": saved.get(name, {}).get("created_at", "")}
-        for name, star in stars.items() if star >= min_star
-    }
-    logger.info("候选池:%d 个(快照共 %d,star >= %d),零请求。",
-                len(pool), len(stars), min_star)
-    return pool
+    harvest = gh.stars(names)
+    logger.info("实时取 star:请求 %d 个,取到 %d,GitHub 查不到 %d,没问到 %d。",
+                len(names), len(harvest.stars), len(harvest.missing), len(harvest.failed))
+    return harvest.stars
 
 
-def growths(pool: dict[str, dict], window_days: int) -> tuple[dict[str, dict], int, str]:
-    """给候选池算增长。返回 `(算得出来的候选, 实际窗口天数, 口径摘要)`。
+def qualify(stars: dict[str, int], meta: dict[str, dict], base: snapshots.Baseline,
+            *, min_star: int, threshold: int) -> tuple[dict[str, dict], int]:
+    """边算边筛:算一个增长,达标才留。返回 `(候选池, 缺基线算不出的个数)`。
 
-    算不出来的直接不在返回值里 —— 见模块头部「未决不是零」。
+    低于阈值的当场丢,而不是先建一张全量表再过滤 —— 那张表 7.8 万条、几十 MB,建出来只为
+    下一行被整批扔掉。
     """
-    anchor = snapshots.anchor_for_window(window_days)
-    if anchor is None:
-        logger.error("找不到 T−%d 天附近的快照,本轮算不了增长。", window_days)
-        return {}, window_days, "无锚点"
-    if anchor.window_days != window_days:
-        logger.warning("锚点顺延到 %s:实际窗口 %d 天而非请求的 %d 天,全程按实际天数。",
-                       anchor.day, anchor.window_days, window_days)
-
-    tally = growth_calc.resolve_all(
-        stars={n: info["star"] for n, info in pool.items()},
-        anchor_stars=anchor.stars,
-        ages={n: age_days(info.get("created_at", "")) for n, info in pool.items()},
-        window_days=anchor.window_days,
-    )
-    decided = {
-        name: {**pool[name], "growth": value}
-        for name, value in tally.decided.items()
-    }
-    logger.info("增长口径:%s。", tally.summary())
-    return decided, anchor.window_days, tally.summary()
+    pool: dict[str, dict] = {}
+    unresolved = 0
+    for name, star in stars.items():
+        if star < min_star:
+            continue
+        created = meta.get(name, {}).get("created_at", "")
+        result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
+                                     age_days(created), base.span)
+        if result is None:
+            unresolved += 1
+            continue
+        if result.value < threshold:
+            continue
+        pool[name] = {"star": star, "growth": result.value,
+                      "window_days": result.window_days, "created_at": created}
+    return pool, unresolved
 
 
-def recent(pool: dict[str, dict], days: int) -> tuple[dict[str, int], int]:
-    """爆发探针:最近几天的增长,同样是锚点相减。返回 `(增长表, 实际天数)`。
+def recent(pool: dict[str, dict], days: int) -> int:
+    """爆发探针:把最近几天的增长写回每个候选。返回名义天数。
 
-    以前靠实时二分法逐个仓库发请求(上期三分钟,而 2026-06 后 stargazers 全部 404,
-    结果必然为空)。现在是一次查表:零请求,而且拿到的是真实测得的短窗口速率,
-    不再是把周均速原样折算过来(那样加速比恒为 1,探针纯空转)。
-
-    缺快照时返回空表 —— 探针不加成即可,绝不能让出榜失败。
+    缺快照时什么都不写 —— 探针不加成即可,绝不能让出榜失败。
     """
     if not pool:
-        return {}, days
-    anchor = snapshots.anchor_for_window(days)
-    if anchor is None:
-        logger.info("没有 T−%d 天附近的快照,本轮跳过爆发加成。", days)
-        return {}, days
-    out = {
-        name: info["star"] - base
-        for name, info in pool.items()
-        if isinstance(base := anchor.stars.get(name), int) and info["star"] >= base
-    }
-    logger.info("爆发探针锚点 %s(%d 天):%d/%d 个候选可算。",
-                anchor.day, anchor.window_days, len(out), len(pool))
-    return out, anchor.window_days
+        return days
+    base = snapshots.earliest_in_window(days)
+    if base.oldest is None:
+        logger.info("最近 %d 天内没有快照,本轮跳过爆发加成。", days)
+        return days
+
+    hit = 0
+    for name, info in pool.items():
+        anchor = base.stars.get(name)
+        # 掉星的跳过:负的最近增长喂进加速比是没有意义的输入。
+        if anchor is None or info["star"] < anchor:
+            continue
+        info["recent_growth"] = info["star"] - anchor
+        info["recent_days"] = base.days.get(name, base.span)
+        hit += 1
+    logger.info("爆发探针基线 %s(%d 天):%d/%d 个候选可算。",
+                base.oldest, base.span, hit, len(pool))
+    return base.span
 
 
 def run(*, mode: str = "comprehensive", min_star: int = config.MIN_STAR,
@@ -135,19 +121,32 @@ def run(*, mode: str = "comprehensive", min_star: int = config.MIN_STAR,
         gh=None, progress=None, pool: dict[str, dict] | None = None) -> dict:
     """跑一轮榜单。返回排名结果 + 漏斗。
 
-    `pool` 给了就用给的(关键词榜按搜索结果筛过一遍),否则取今天的整份快照。
+    `pool` 给了就只在那批里排(关键词榜的搜索结果),否则排 DB 全库。它只提供名单和
+    `created_at` —— star 一律现取,不接受调用方递进来的旧值。
     """
-    _emit(progress, 5, "读取候选池…")
-    if pool is None:
-        pool = candidates(min_star)
-    collected = len(pool)
+    _emit(progress, 5, "读取候选名单…")
+    meta = universe.load() if pool is None else pool
+    names = sorted(meta)
+    collected = len(names)
 
-    _emit(progress, 20, "计算增长…")
-    scored_pool, window, basis = growths(pool, growth_days)
+    _emit(progress, 15, "实时取当前 star…")
+    stars = current_stars(gh, names)
 
-    _emit(progress, 45, "筛选达标候选…")
-    qualified = {n: i for n, i in scored_pool.items() if i["growth"] >= growth_threshold}
-    logger.info("达标候选(增长 >= %d):%d 个。", growth_threshold, len(qualified))
+    _emit(progress, 50, "计算增长,筛选达标候选…")
+    base = snapshots.earliest_in_window(growth_days)
+    window, unresolved = growth_days, 0
+    qualified: dict[str, dict] = {}
+    if base.oldest is None:
+        logger.error("最近 %d 天内一份快照都没有,算不了增长(每日任务挂了?)。", growth_days)
+    else:
+        window = base.span
+        if window != growth_days:
+            logger.warning("窗口内最早的快照是 %s:实际窗口 %d 天而非请求的 %d 天,全程按实际算。",
+                           base.oldest, window, growth_days)
+        qualified, unresolved = qualify(stars, meta, base,
+                                        min_star=min_star, threshold=growth_threshold)
+    logger.info("达标候选(增长 >= %d):%d 个;另有 %d 个缺基线算不出增长。",
+                growth_threshold, len(qualified), unresolved)
 
     if mode == "hot_new":
         window_created = created_days if created_days is not None else config.DAYS_SINCE_CREATED
@@ -157,20 +156,17 @@ def run(*, mode: str = "comprehensive", min_star: int = config.MIN_STAR,
         }
         logger.info("新项目窗口(<= %d 天):剩 %d 个。", window_created, len(qualified))
 
-    _emit(progress, 55, "爆发探针…")
+    _emit(progress, 60, "爆发探针…")
     recent_window = config.RECENT_GROWTH_DAYS
     boosted = 0
     if mode != "hot_new" and qualified:
-        probed, recent_window = recent(qualified, config.RECENT_GROWTH_DAYS)
-        for name, value in probed.items():
-            qualified[name]["recent_growth"] = value
-        if window > 0 and recent_window > 0:
-            boosted = sum(1 for i in qualified.values()
-                          if (rg := i.get("recent_growth")) is not None and i["growth"] > 0
-                          and rg / recent_window > i["growth"] / window)
-        logger.info("爆发探针:%d 个候选可算,加成生效 %d 个。", len(probed), boosted)
+        recent_window = recent(qualified, config.RECENT_GROWTH_DAYS)
+        boosted = sum(1 for i in qualified.values()
+                      if (rg := i.get("recent_growth")) is not None and i["growth"] > 0
+                      and rg / i["recent_days"] > i["growth"] / i["window_days"])
+        logger.info("爆发加成生效 %d 个。", boosted)
 
-    _emit(progress, 65, "排序…")
+    _emit(progress, 70, "排序…")
     weights = scoring.Weights(window_days=window, recent_days=recent_window,
                               alpha=config.BURST_ALPHA, cap=config.BURST_CAP)
     rank_mode = scoring.HOT_NEW if mode == "hot_new" else scoring.COMPREHENSIVE
@@ -178,12 +174,12 @@ def run(*, mode: str = "comprehensive", min_star: int = config.MIN_STAR,
     ranked = ordered[:top_n] if top_n else ordered
 
     if top_n and len(ranked) < top_n:
-        logger.warning("达标候选不够:要 %d 个,只有 %d 个(候选池 %d,达标 %d)。",
-                       top_n, len(ranked), collected, len(qualified))
+        logger.warning("达标候选不够:要 %d 个,只有 %d 个(名单 %d,取到 star %d,达标 %d)。",
+                       top_n, len(ranked), collected, len(stars), len(qualified))
 
-    funnel = Funnel(收集=collected, 增长可算=len(scored_pool), 达标=len(qualified),
+    funnel = Funnel(名单=collected, 取到star=len(stars), 达标=len(qualified),
                     爆发加成=boosted, 出榜=len(ranked))
-    logger.info("漏斗:%s(%s)", funnel.line(), basis)
+    logger.info("漏斗:%s", funnel.line())
 
     result = {"mode": mode, "ranked": ranked, "growth_days": window,
               "recent_days": recent_window, "funnel": dict(funnel)}

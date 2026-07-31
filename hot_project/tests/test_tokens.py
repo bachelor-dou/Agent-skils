@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -141,6 +142,52 @@ async def test_waiter_wakes_itself_on_real_clock():
 
     async with pool.lease() as lease:      # 无人唤醒,只能靠定时器
         assert _index_of(lease) == 0
+
+
+def test_a_pool_survives_being_used_by_a_second_event_loop():
+    """`facade` 是同步门面,每个方法各起一个 `asyncio.run` —— 池必须扛得住换循环。
+
+    `asyncio.Condition` 绑死在第一个 await 它的循环上,于是第二次调用只要有人**真的**
+    等锁就 `RuntimeError: bound to a different event loop`,而且池从此报废。所以这里
+    刻意让 worker 数超过 token 数,逼出 `_cond.wait()`;不这么写两次都会"成功"。
+
+    刻意不加 async 标记:这条测的就是「起了两个循环」,不能待在测试自己那个循环里。
+    """
+    pool = TokenPool(["a", "b"])
+
+    async def contend():
+        async def once(_):
+            async with pool.lease(SEARCH):
+                await asyncio.sleep(0)
+        await asyncio.gather(*(once(i) for i in range(4)))   # 4 抢 2
+
+    for _ in range(3):
+        asyncio.run(contend())
+    assert pool.stats["waits"] > 0, "没走到 wait(),这条测试就什么都没测到"
+
+
+def test_two_live_loops_sharing_one_pool_is_an_error_not_a_silent_free_for_all():
+    """换锁的前提是同一时刻只有一个存活的循环。真有两个并存就说明用法变了,
+    此时静默换锁会悄悄废掉互斥(两个循环各拿一把锁,同一个 token 会被借出两次)。
+    """
+    pool = TokenPool(["a", "b"])
+    errors: list[str] = []
+
+    def in_thread() -> None:
+        async def hold():
+            async with pool.lease(SEARCH):
+                await asyncio.sleep(0.3)        # 拖住,让两个循环真正重叠
+        try:
+            asyncio.run(hold())
+        except RuntimeError as e:
+            errors.append(str(e))
+
+    threads = [threading.Thread(target=in_thread) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert any("两个存活的事件循环" in e for e in errors)
 
 
 async def _take_one(pool, pace: Pace = CORE) -> int:

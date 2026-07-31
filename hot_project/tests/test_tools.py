@@ -4,6 +4,8 @@
 永远请求不到)。这里的第一组测试就是为了让那种漂移在类型上不可能发生。
 """
 
+import json
+
 import pytest
 
 from hot_project import tools
@@ -91,6 +93,18 @@ def test_true_is_not_an_integer():
     assert errors[0]["reason"] == "expected_integer"
 
 
+@pytest.mark.parametrize("raw", ["1e400", "-1e400", "NaN"])
+def test_a_json_legal_infinity_is_an_error_not_a_crash(raw):
+    """`json.loads` 认这三种写法,`int()` 对它们抛的却是 OverflowError/ValueError。
+
+    抛出去比传错值更糟:异常逃出这一轮,tool_calls 就配不上 tool 回复,该会话之后
+    每次请求都被接口 400。这里必须返回错误码,让模型看见自己传错了。
+    """
+    _, errors = tools.registry().get("search_repos").validate(
+        {"query": "x", "top_n": json.loads(raw)})
+    assert errors[0]["reason"] == "expected_integer"
+
+
 def test_a_list_of_non_strings_is_rejected():
     _, errors = tools.registry().get("keyword_ranking").validate({"keywords": [1, 2]})
     assert any(e["reason"] == "expected_array_of_strings" for e in errors)
@@ -138,6 +152,38 @@ def test_confirming_clears_the_pending_state_so_the_next_run_asks_again(monkeypa
     tool.run(ctx, {"top_n": 20})
     tool.run(ctx, {"confirm": True})
     assert tool.run(ctx, {"top_n": 30})["needs_confirmation"] is True
+
+
+def test_confirming_one_ranking_does_not_authorize_a_different_one(monkeypatch):
+    """确认必须认「是哪张榜」,不能只看"有没有待确认的东西"。
+
+    待确认槽是会话全局的一个格子。只看它非空的话:先请求关键词榜(参数回显给用户看),
+    再拿 `confirm=true` 去调综合榜 —— 门就开了,而且跑的是模型这次传的参数,不是屏幕上
+    那份。用户为一次自己从没见过的昂贵执行付账,而"回显即执行"是这套机制的全部意义。
+    """
+    ran = []
+    monkeypatch.setattr(rank_tools, "_run",
+                        lambda ctx, mode, params: ran.append((mode, params)) or {})
+    ctx = Ctx(state=_State())
+    registry = tools.registry()
+
+    shown = registry.get("keyword_ranking").run(ctx, {"keywords": ["vector db"]})
+    assert shown["needs_confirmation"] is True
+
+    other = registry.get("comprehensive_ranking").run(ctx, {"top_n": 200, "confirm": True})
+
+    assert ran == [], f"换个工具带 confirm 就绕过了确认:{ran}"
+    assert other["needs_confirmation"] is True, "综合榜应当自己再回显一次"
+
+
+def test_an_empty_keyword_list_never_degrades_into_a_whole_database_ranking(monkeypatch):
+    """`keywords=[]` 能过校验(`any([])` 是假),此时候选池必须是空的,不能是"没有池"。
+
+    "没有池"在 `ranking.run` 里的含义是"排全库" —— 于是用户要的关键词榜变成一份综合榜,
+    标题还写着关键词,几分钟的模型调用全花在不相关的项目上,一处都不报错。
+    """
+    pool = rank_tools._keyword_pool(Ctx(), {"keywords": [], "min_star": 500})
+    assert pool == {}, "返回 None 会被当成「调用方没给池」,进而去排全库"
 
 
 def test_the_confirmation_text_shows_every_parameter_that_will_take_effect():

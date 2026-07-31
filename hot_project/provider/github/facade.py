@@ -3,15 +3,9 @@
     gh = GitHub()
     pack = gh.profile("langchain-ai/langchain", want=("info", "readme"))
 
-一次调用 = 一个事件循环 = 一个 httpx 客户端。听起来浪费,但这条路上的调用都是交互式的
-(用户在等一个仓库的资料),连接建立那 100ms 淹没在 LLM 的几秒里;而**批量**入口
-(`profiles`)一次 `asyncio.run` 抓完全部,该省的地方省到了。
-
-**为什么可以直接 `asyncio.run`。** 整个服务端里工具永远跑在工作线程上,不在事件循环里:
-FastAPI 的 `/api/chat` 是有意写成同步 `def`(框架自动丢进线程池),WebSocket 那条路
-显式用 `asyncio.to_thread`,cron 脚本本来就是同步的。所以旧包那个「已在循环里就另起
-一个线程跑」的 `_run_coroutine_sync` 不需要 —— 那 24 行是为一种不存在的情况准备的。
-真有一天要在协程里用,直接 `await` 底下的 async 函数就是了,它们都在。
+一次调用 = 一个事件循环 = 一个 httpx 客户端。可以直接 `asyncio.run`,是因为工具永远跑在
+工作线程上而不在循环里(`/api/chat` 是同步 `def`,WebSocket 走 `asyncio.to_thread`,
+cron 本来就是同步的)。真要在协程里用,直接 await 底下的 async 函数。
 """
 
 from __future__ import annotations
@@ -27,13 +21,15 @@ from . import client as gh
 from . import repo as repo_api
 from . import tasks as gh_tasks
 from . import trending as trending_api
-from .tokens import SEARCH, TokenPool
+from .tokens import CORE, SEARCH, TokenPool
 
 logger = logging.getLogger("hot_project")
 
-# 关键词榜一次最多几路并发搜。和每日快照那边一个口径:每个 token 有独立的
-# 30 次/分钟额度,配速由 token 池管,这里只是别开出比 token 还多的 worker。
+# 关键词榜一次最多几路并发搜。配速由 token 池管,这里只是别开出比 token 还多的 worker。
 SEARCH_WORKERS = 12
+
+# 任务只说自己要哪种 token,配速由这里翻译。和 `cron_daily_snapshot._make_pool` 同一张表。
+_PACES = {gh_tasks.SEARCH_TOKEN: SEARCH, gh_tasks.CORE_TOKEN: CORE}
 
 
 class GitHub:
@@ -75,6 +71,31 @@ class GitHub:
         return self._run(lambda c: repo_api.search(c, self.pool, query,
                                                    limit=limit, sort=sort))
 
+    def stars(self, names: list[str]) -> gh_tasks.Harvest:
+        """批量取**当前** star。榜单的被减数走这里,和每日采集是同一条路。
+
+        `Harvest` 把三种结果分开(取到 / GitHub 确认查不到 / 这次没问到),调用方不能把后两者
+        混为一谈 —— 「没问到」当成「查不到」,一次限流高峰就能让上万个活仓库集体从榜上消失。
+        """
+        if not names:
+            return gh_tasks.Harvest()
+        if self.pool.capacity < 1:
+            logger.error("所有 token 都已失效,取不到当前 star。")
+            return gh_tasks.Harvest()
+
+        async def harvest(client):
+            sink = gh_tasks.Harvest()
+            async with tasks.TaskPool(
+                lanes={gh_tasks.GRAPHQL_LANE: gh_tasks.GRAPHQL_WORKERS},
+                leaser=lambda kind: self.pool.lease(_PACES[kind]),
+            ) as pool:
+                for group in gh_tasks.batches(names):
+                    pool.submit(gh_tasks.StarBatch(sink, client, group))
+                await pool.join()
+            return sink
+
+        return self._run(harvest)
+
     def trending(self, period: str = trending_api.DEFAULT_PERIOD) -> list[dict]:
         """Trending 不吃 token,所以没有租约 —— 它抓的是普通网页。"""
         try:
@@ -86,17 +107,23 @@ class GitHub:
     def keyword_sweep(self, words: list[str], min_star: int) -> dict[str, dict]:
         """按一批关键词并发搜,合并去重。关键词榜的候选来源。
 
-        这是工具层唯一还要真扫一遍 GitHub 的地方:按关键词挑出来的仓库集合无法从快照
-        推导 —— 快照只有 star 数,没有「这个仓库和向量数据库有关」这种信息。
+        工具层唯一还要真扫 GitHub 的地方 —— 快照只有 star 数,推不出"这个仓库和向量库有关"。
         """
         if not words:
+            return {}
+
+        # capacity 会因为 401 strike 掉到 0,而 TaskPool 对 workers=0 抛 ValueError。
+        if self.pool.capacity < 1:
+            logger.error("所有 token 都已失效,关键词搜索无法进行。")
             return {}
 
         async def sweep(client):
             sink = gh_tasks.Discovered()
             async with tasks.TaskPool(
                 lanes={gh_tasks.SEARCH_LANE: min(SEARCH_WORKERS, self.pool.capacity)},
-                leaser=lambda kind: self.pool.lease(SEARCH),
+                # 必须按 kind 分派:写死 SEARCH 会让非搜索任务白挨 2.1 秒配速,慢一个
+                # 数量级而且不报错。
+                leaser=lambda kind: self.pool.lease(_PACES[kind]),
             ) as pool:
                 for word in words:
                     pool.submit(gh_tasks.KeywordPage(sink, client, word, min_star))

@@ -3,20 +3,8 @@
 每个类只回答两件事:走哪条道、这一次请求做什么。分页与拆段一律靠**派生**(`ctx.submit`),
 不在任务内部循环 —— 一个任务 = 一次请求,理由见 `infra/tasks/task.py`。
 
-## 收集的三个阶段互不依赖
-
-关键词搜索、星段扫描、Trending 都只为一件事:把 star ≥ 门槛的仓库尽量收全。三者之间没有
-先后关系,可以一次性全提交,最后按 `full_name` 合并去重(去重只是事后过滤,省不掉请求)。
-Trending 不吃 token 也不受 Search 限额,走 free 道,完全免费地和另外两个并行。
-
-## 星段拆分改成按层并发
-
-旧包 `auto_split_star_range` 是深度优先**串行**递归,每次请求间隔 1.3 秒。2026-07-30 那轮
-它耗了 5 分 17 秒(11:09:26 → 11:14:43,全程零日志)才产出 95 个子区间,期间 12 个 token
-有 87% 闲着。而递归的兄弟节点互不依赖:探完 `500..1000` 溢出后拆出的两半谁先探完全无关。
-
-`SegmentProbe` 派生 `SegmentProbe`,自然就是按层展开(BFS)—— 同一层的探测全在队列里,
-worker 一起领走。7 层替代约 190 次串行请求。
+关键词搜索、星段扫描、Trending 三个阶段互不依赖,可一次性全提交,最后按 `full_name` 去重。
+Trending 不吃 token 也不受 Search 限额,走 free 道。
 """
 
 from __future__ import annotations
@@ -38,6 +26,11 @@ SEARCH_LANE = "search"
 GRAPHQL_LANE = "graphql"
 FREE_LANE = "free"
 
+# GraphQL 并发限的是二级限流(按速率算,不是按配额),不是每小时的点数 —— 一批 100 个仓库
+# 才 1 点,5000 点/小时怎么都用不完。6 是待验的试探值:GraphQL 侧至今没在日志里见过限流,
+# 撞墙的一直是 Search 那条道。每日采集和榜单实时取 star 走同一条道,所以这个数只能有一处。
+GRAPHQL_WORKERS = 6
+
 # 任务自称需要哪种 token。对任务池是不透明字符串,由接线处映射成配速。
 SEARCH_TOKEN = "search"
 CORE_TOKEN = "core"
@@ -47,7 +40,6 @@ MAX_PAGES = 10
 PER_PAGE = 100
 SEARCH_CAP = MAX_PAGES * PER_PAGE
 
-# 来源名的前缀,给 `Discovered.sources` 记账用(见那个类的说明)
 KEYWORD_SOURCE = "kw:"
 SEGMENT_SOURCE = "segment"
 TRENDING_SOURCE = "trending"
@@ -62,10 +54,8 @@ TRENDING_SOURCE = "trending"
 class Discovered:
     """三个阶段共用的收集箱。按 full_name 去重,先到先得。
 
-    `sources` 额外记「每个来源各自返回了哪些仓库」,注意它和 `repos` 的去重口径不同:
-    一个仓库被十个关键词搜到,`repos` 里只有一条,但十个来源的集合里都有它。要的就是这个
-    —— 判断某个关键词能不能砍,看的是「它带来的新仓库」,而不是「它抢到了几个」。
-    后者取决于并发下谁先跑完,同一个关键词今天 0 个明天 50 个,量不出任何东西。
+    `sources` 的去重口径和 `repos` **不同**:一个仓库被十个关键词搜到,`repos` 里只有一条,
+    但十个来源的集合里都有它 —— 否则「某关键词抢到几个」只反映并发下谁先跑完,量不出东西。
     """
 
     repos: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -101,7 +91,7 @@ class _SearchTask(Task):
         items = await gh.search_page(
             self.client, lease, self.query, page=self.page, per_page=PER_PAGE
         )
-        # 满页才可能还有下一页。不满就到底了 —— 别再多发一次注定为空的请求。
+        # 满页才可能还有下一页 —— 不满就到底了,别再发一次注定为空的请求。
         if len(items) == PER_PAGE and self.page < MAX_PAGES:
             ctx.submit(self._next_page())
         return items
@@ -165,11 +155,8 @@ class SegmentPage(_SearchTask):
 class SegmentProbe(Task):
     """探一个 star 区间有多少条:装得下就直接翻页,装不下就对半劈开再探。
 
-    「装得下」= 命中数 ≤ 1000,也就是 Search API 一个查询能翻到的极限。超过这个数
-    再怎么翻页也拿不到后面的,只能把区间切细。
-
-    切分按**仓库密度**而不是区间宽度:`500..100000` 里 96% 的仓库挤在 500..20000,
-    上面稀疏得很。所以把 MAX_STAR 提到 10 万只多出三五层,耗时几乎全在低星段。
+    「装得下」= 命中数 ≤ 1000,即 Search API 一个查询能翻到的极限;超过就只能把区间切细,
+    再怎么翻页也拿不到后面的。
     """
 
     lane = SEARCH_LANE
@@ -187,8 +174,7 @@ class SegmentProbe(Task):
             return
 
         if count <= SEARCH_CAP or self.lo >= self.hi:
-            # 装得下,或者已经细到不能再切(单个 star 值上挤了 1000+ 个仓库,
-            # 那多出来的确实拿不到,不是切分能解决的)。
+            # 装得下,或已细到不能再切(单个 star 值上挤了 1000+ 个,那多出来的确实拿不到)。
             ctx.submit(SegmentPage(self.sink, self.client, self.lo, self.hi))
             return
 
@@ -249,8 +235,7 @@ class Harvest:
 class StarBatch(Task):
     """取一批仓库的 star。整批退化成 null 就对半拆开重来。
 
-    拆分靠派生而不是递归调用:递归会让一个 worker 抱着 token 把整棵子树跑完,
-    而派生出去的两半可以被两个 worker 同时领走。
+    拆分靠派生而不是递归调用:递归会让一个 worker 抱着 token 把整棵子树跑完。
     """
 
     lane = GRAPHQL_LANE
@@ -266,6 +251,11 @@ class StarBatch(Task):
             # 全 null 的退化响应。**不是**「这批仓库都没了」—— 拆开各问一遍。
             logger.warning("%d 个仓库整批为 null,拆半重试(疑似查询过大退化)。", len(self.names))
             mid = len(self.names) // 2
+            if mid == 0:
+                # 拆不动了(1 个或 0 个)。再派生就是拆出一个空批加一个原样的批,无限循环。
+                # `fetch_stars` 现在对单名批改抛异常,所以这里到不了;留着是因为这个循环
+                # 会把 worker 全占死、`join()` 永不返回,代价太高,不值得靠"到不了"兜着。
+                raise RetryableError(f"{self.names} 返回 null 且无法再拆分")
             ctx.submit(StarBatch(self.sink, self.client, self.names[:mid]))
             ctx.submit(StarBatch(self.sink, self.client, self.names[mid:]))
         return stars

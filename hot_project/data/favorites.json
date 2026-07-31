@@ -2,6 +2,13 @@
   "users": {
     "dou": [
       {
+        "repo": "alibaba/open-code-review",
+        "favorited_at": "2026-07-30T13:15:21Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "混合架构代码审查工具，支持精准行级评论，内置NPE、线程安全、XSS、SQL注入规则，并兼容OpenAI和Anthrop",
+        "category": "效率"
+      },
+      {
         "repo": "headroomlabs-ai/headroom",
         "favorited_at": "2026-07-28T05:13:01Z",
         "source_report": "2026-07-22.md",

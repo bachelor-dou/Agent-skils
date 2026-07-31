@@ -1,16 +1,11 @@
 """模型目录 → 可调用的方案表。
 
-`config.LLM_MODELS` 是手写的**声明**:字段可能缺、`enabled` 可能写成 `"0"`、key 只记了
-环境变量名。这个模块把它变成下游可以无条件依赖的结构,好让客户端里不再出现一行
-`m.get("backend", "openai")`。
+`config.LLM_MODELS` 是手写的**声明**(字段可能缺、`enabled` 可能写成 `"0"`),这里把它
+归一成下游能无条件依赖的结构。归一化放在 infra 而不是 config,方向才是单一的:
+config 只声明,infra 读它。
 
-**归一化在这里而不在 config 里。** 旧 `config.py:153` 为了归一化反过来
-`from .infra.llm_client import normalize_models` —— 配置依赖实现,循环 import 的温床
-(而且 import 顺序一变就炸,炸的方式还很难看:`AttributeError: partially initialized module`)。
-现在方向单一:config 只声明,infra 读它。
-
-**key 在这里才落地。** 目录里只有 `key_env`,真值到构造方案时才从环境变量取。这样
-`config.LLM_MODELS` 整个可以安全地打日志、进 `/api` 响应、被异常回溯带出去。
+key 到这一步才从环境变量取,所以 `config.LLM_MODELS` 整个可以安全打日志、进 API 响应、
+被异常回溯带出去。
 """
 
 from __future__ import annotations
@@ -24,8 +19,7 @@ from ...common.env import truthy
 class Scheme:
     """一个可以直接拿去发请求的平台。
 
-    `key` 在这里是明文,所以 `Scheme` **不该**被整体序列化或打日志。
-    需要给前端列模型时用 `public()`。
+    `key` 是明文,所以**不该**被整体序列化或打日志 —— 给前端列模型走 `public()`。
     """
 
     id: str
@@ -53,7 +47,7 @@ class Scheme:
 def _lite_names(raw: object) -> list[str]:
     """`"a, b, a"` → `["a", "b"]`。平台内去重,顺序保留(第一个是「自动」时的首选)。
 
-    跨平台的融合去重不在这里做:那是前端展示的事,混进来会污染内部回退顺序。
+    跨平台去重是前端展示的事,混进来会污染内部回退顺序。
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -67,9 +61,8 @@ def _lite_names(raw: object) -> list[str]:
 def build(catalog: list[dict], resolve_key) -> list[Scheme]:
     """模型目录 → 方案表。`resolve_key(env_name) -> str` 负责把机密取进来。
 
-    `enabled=0` 的条目直接不出现在结果里 —— 关掉的平台既不该被前端选中,也不该在内部
-    回退时被试到。缺 `id` 的跳过(没有 id 就无法被选择,留着也用不上);id 撞车直接报错,
-    因为它是整条选择链路的键,重复会让「选 A 却调到 B」这种事静默发生。
+    `enabled=0` 和缺 id 的条目直接不出现。id 撞车**报错**而不是后来居上 —— 它是整条
+    选择链路的键,重复会让「选 A 却调到 B」静默发生。
     """
     out: list[Scheme] = []
     seen: set[str] = set()

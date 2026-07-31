@@ -10,11 +10,8 @@
     report.py        Markdown 报告生成
     describe.py      项目介绍:抓素材 + 提示词 + 调 LLM
 
-**参数只声明一次。** 给模型看的 JSON schema 和运行时校验规则都从同一个 `Param` 长出来,
-所以不可能漂移 —— 旧包那两份清单靠人工保持同步,`fetch_trending` 的 `all` 就是这么丢的。
-
-**提示词在这一层,不在 `infra/llm`。** 「用中文、四段式、不许编造」是产品决定;
-「某家挂了换哪家」才是基础设施。
+给模型看的 JSON schema 和运行时校验规则都从同一个 `Param` 长出来,不可能漂移。
+提示词也在这一层:「用中文、四段式、不许编造」是产品决定,「某家挂了换哪家」才是基础设施。
 """
 
 from __future__ import annotations

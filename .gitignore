@@ -13,12 +13,8 @@ logs/
 *.lock
 # graphify 的产物：几百个 AST 缓存文件，代码一改就重算，入库只会污染 diff
 graphify-out/
-hot_projects/graphify-out/
-# hot_project/data/snapshots/ 刻意不入 main：一天约 700KB，一年就是 250MB 永久留在
-# main 的历史里。它只跟踪在 snapshots 分支上（CI 每天往那儿提交），本地切过去拉一下即可，
-# 所以在 main 上它会一直显示为未跟踪 —— 这是有意的，不要 git add，也不要在本地自行采集
-# （会和 CI 的同名文件撞车）。DB、收藏和 report/ 则两边都跟踪。
-# Environment
+hot_projects/
+
 .env
 .venv/
 venv/
@@ -31,5 +27,3 @@ venv/
 *.swp
 *.swo
 .cursor/
-
-.ocr/

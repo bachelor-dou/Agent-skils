@@ -10,7 +10,6 @@ import json
 import logging
 
 from .. import config
-from ..common.timeutil import age_days
 from ..infra.store import snapshots, universe
 from ..provider.github import trending as trending_api
 from . import describe
@@ -44,11 +43,7 @@ def get_db_info(ctx, args: dict) -> dict:
 
 
 def get_keyword_catalog(ctx, args: dict) -> dict:
-    """返回预设关键词分组表。
-
-    这张表约 4k 字符。常驻 system 提示词的话,对不做关键词榜的对话是纯浪费,
-    所以改成模型判断需要挑词时按需来取。
-    """
+    """返回预设关键词分组表。约 4k 字符,常驻 system 提示词对不挑词的对话是纯浪费。"""
     return {
         "categories": config.SEARCH_KEYWORDS,
         "usage": "从相关分组挑关键词,再补充分组没覆盖到的英文搜索词,"

@@ -1,7 +1,7 @@
 """微信推送(Server酱)。可选功能:没配 key 就静默跳过。
 
-**推送失败绝不影响主流程。** 周报生成了两个小时,最后推送这一步网络抖一下就把整个任务
-判失败、CI 变红、报告不落盘 —— 这个交换比是荒唐的。所以这里吞掉一切异常,只记 warning。
+**推送失败绝不影响主流程** —— 不能让最后这一步的网络抖动把整轮判失败、报告不落盘。
+所以这里吞掉一切异常,只记 warning。
 """
 
 from __future__ import annotations
@@ -34,5 +34,7 @@ def send(title: str, body: str = "") -> bool:
             return True
         logger.warning("微信推送失败:HTTP %s %s", resp.status_code, resp.text[:200])
     except Exception as e:      # noqa: BLE001 —— 见模块文档:推送绝不影响主流程
-        logger.warning("微信推送异常:%s", e)
+        # SendKey 是 URL 的一段,而 requests 的连接类异常消息里带完整 URL —— 原样记就是
+        # 把密钥写进 logs/,违反 config.py 里「密钥永不落文件」。脱敏后再记。
+        logger.warning("微信推送异常:%s", str(e).replace(key, "***"))
     return False

@@ -3,21 +3,11 @@
 
     python -m hot_project.api_server
 
-这个文件只做**路由**:收请求、调下面的层、把结果变成 HTTP 响应。别的都不在这里 ——
+这个文件只做**路由**:收请求、调 web/{render,sessions,security},把结果变成 HTTP 响应。
 
-    web/render.py     报告 → HTML
-    web/sessions.py   会话池、全局工具锁、断线待发缓冲
-    web/security.py   黑名单、限速、CORS
-
-旧版这四件事挤在一个 1291 行的文件里,其中 500 行是 HTML 拼装。
-
-## 为什么对话接口是同步 `def`
-
-FastAPI 看到同步 `def` 会自动丢进线程池,不阻塞事件循环。而 agent 一路是同步的
-(LLM 用 requests、工具里的 `asyncio.run` 需要一个干净的线程),写成 `async def`
-反而会把事件循环锁死几分钟。WebSocket 那条路同理,用 `asyncio.to_thread`。
-
-这也是 `provider.github.facade` 能直接 `asyncio.run` 的前提:工具永远不在事件循环里跑。
+**规矩:碰存储或渲染的处理器一律写同步 `def`。** FastAPI 会把同步 `def` 丢进线程池,而
+agent 一路是同步的,写成 `async def` 会把事件循环连同 WS 心跳一起锁死几分钟;只有纯内存/
+纯配置的接口才留 `async def`。这也是工具能直接 `asyncio.run` 的前提:它永不在事件循环里跑。
 """
 
 from __future__ import annotations
@@ -33,7 +23,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -133,9 +123,16 @@ def chat(body: ChatIn):
     """同步 `def` 是有意的,见文件头。"""
     logger.info("HTTP 对话:session=%s message=%s", body.session_id, body.message[:120])
     agent = sessions.get(body.session_id)
-    with sessions.tool_lock:
+    # 必须带超时。同步 `def` 跑在全站共享的线程池里,无超时地等这把全局锁会把池占满 ——
+    # 之后每个同步接口都无限期排队,整台服务卡死。
+    if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
+        logger.warning("HTTP 等执行锁超时:%s", body.session_id)
+        raise HTTPException(status_code=503, detail="系统繁忙,请稍后重试。")
+    try:
         reply = agent.chat(body.message, user_id=body.user_id,
                            model=body.model, lite=body.lite)
+    finally:
+        sessions.tool_lock.release()
     return ChatOut(session_id=body.session_id, reply=reply,
                    session_ttl_seconds=sessions.TTL_SECONDS,
                    session_expires_at=sessions.expires_at())
@@ -154,8 +151,7 @@ async def drop_session(session_id: str):
 async def models():
     """给网页的模型切换器。
 
-    子模型跨平台融合成一个共享池:主/子选择是解耦的,任意主模型可以配任意平台的子模型
-    (按子模型自己所属的平台去调)。同名的只留先出现的那个。
+    子模型跨平台融合成一个共享池:主/子选择解耦,同名的只留先出现的那个。
     """
     schemes = llm.get().usable()
     pool, seen = [], set()
@@ -172,8 +168,7 @@ async def models():
 def test_models(body: ModelTestIn):
     """预检:对选中的主/子模型各发一次极小的真实调用。
 
-    前端切完模型、开始对话前调它。真发一次是必要的 —— key 配错、额度用完、
-    区域限制,全都只有真发一次才知道,而在对话中途才发现意味着用户白等了一轮。
+    key 配错、额度用完、区域限制都只有真发一次才知道,对话中途才发现意味着用户白等一轮。
     """
     client = llm.get()
     bad: list[str] = []
@@ -197,7 +192,7 @@ def _resolved(name: str) -> str:
 
 
 @app.get("/api/reports")
-async def report_list():
+def report_list():
     directory = reports.directory()
     out = []
     for item in reports.listing():
@@ -205,27 +200,26 @@ async def report_list():
         out.append({"name": item.name, "title": item.title,
                     "day": str(item.day) if item.day else "",
                     "size": stat.st_size,
-                    # 必须是 ISO 字符串:前端 `new Date(v)` 把裸数字当**毫秒**,
-                    # 给 st_mtime(秒)会把 2026 年显示成 1970-01-21。
+                    # 必须是 ISO 字符串:前端 `new Date(v)` 把裸数字当**毫秒**,给秒会错到 1970。
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat()})
     return {"reports": out}
 
 
 @app.get("/api/reports/{name}")
-async def report_markdown(name: str):
+def report_markdown(name: str):
     resolved = _resolved(name)
     return {"name": resolved, "content": reports.read(resolved) or ""}
 
 
 @app.get("/api/reports/{name}/html", response_class=HTMLResponse)
-async def report_page(name: str):
+def report_page(name: str):
     resolved = _resolved(name)
     return HTMLResponse(render.report_html(resolved, reports.read(resolved) or ""),
                         headers=NO_CACHE)
 
 
 @app.delete("/api/reports/{name}")
-async def report_delete(name: str):
+def report_delete(name: str):
     resolved = _resolved(name)
     if not reports.delete(resolved):
         raise HTTPException(status_code=500, detail="删除失败")
@@ -233,7 +227,7 @@ async def report_delete(name: str):
 
 
 @app.get("/api/star-trend")
-async def star_trend(repo: str):
+def star_trend(repo: str):
     """报告卡片上「star 走势」按钮的数据源。"""
     if not REPO_NAME.match(repo or ""):
         raise HTTPException(status_code=400, detail="无效的仓库名")
@@ -250,7 +244,7 @@ async def favorite_tags():
 
 
 @app.get("/api/favorites")
-async def favorite_list(user_id: str):
+def favorite_list(user_id: str):
     if not favorites.valid_user_id(user_id):
         raise HTTPException(status_code=400, detail="无效的 user_id")
     counts, total = reports.appearance_counts()
@@ -263,7 +257,7 @@ async def favorite_list(user_id: str):
 def _short_desc(repo: str) -> str:
     """收藏卡片上那句中文概要。和 `add_favorite` 工具同一条路径。
 
-    收藏时才生成,不在出报告时给几百个项目预生成 —— 绝大多数项目没人收藏。
+    收藏时才生成,不在出报告时给几百个项目预生成。
     """
     gh_desc = (universe.load().get(repo, {}).get("gh_desc") or "").strip()
     if not gh_desc:
@@ -273,14 +267,12 @@ def _short_desc(repo: str) -> str:
 
 
 @app.post("/api/favorites")
-async def favorite_update(body: FavoriteIn):
-    from starlette.concurrency import run_in_threadpool
-
+def favorite_update(body: FavoriteIn):
     short = None
     if body.action == "add":
         # 用户手填的(含清空)直接用,不再花一次 LLM
         short = (body.short_desc.strip()[:SHORT_DESC_MAX] if body.short_desc is not None
-                 else (await run_in_threadpool(_short_desc, body.repo)) or None)
+                 else _short_desc(body.repo) or None)
     try:
         items = favorites.set_favorite(body.user_id, body.repo, body.action,
                                        source_report=body.source_report,
@@ -296,8 +288,16 @@ async def favorite_update(body: FavoriteIn):
 async def ws_chat(websocket: WebSocket, session_id: str):
     """实时对话:执行期间推进度 + 心跳 + 正文增量,最后再整段发一次权威全文。
 
-    整段重发不是冗余:增量可能在中途断掉,而前端要拿一份完整的做最终渲染和历史存档。
+    整段重发不是冗余:增量可能中途断掉,前端要一份完整的做最终渲染和历史存档。
     """
+    # 安全中间件对 WebSocket 不生效(starlette 见到非 http scope 直接放行),必须自己问一次
+    # —— 否则最该保护的入口是唯一没保护的入口。
+    ip = security.client_ip(websocket)
+    if verdict := security.check(ip, websocket.url.path):
+        logger.warning("WS %s拦截:%s %s", verdict.reason, ip, session_id)
+        await websocket.close(code=1008)        # 1008 = policy violation
+        return
+
     await websocket.accept()
     params = websocket.query_params
     user_id, model, lite = (params.get(k, "") for k in ("user_id", "model", "lite"))
@@ -336,10 +336,8 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 async def _pump(websocket, session_id: str, message: str, run) -> str | None:
     """在线程里跑一轮对话,同时把进度和正文增量实时推出去。
 
-    连接断了**不中断 agent**:它可能正跑在出榜的第三分钟上,掐掉等于白烧一次。
-    让它跑完,回复存进待发缓冲,重连时补推。
-
-    返回最终回复;连接已断、回复已缓存时返回 None。
+    连接断了**不中断 agent**:它可能正跑在出榜的第三分钟上,掐掉等于白烧一次;让它跑完,
+    回复存进待发缓冲。返回最终回复;连接已断、回复已缓存时返回 None。
     """
     events: queue.Queue = queue.Queue()
     DONE = object()

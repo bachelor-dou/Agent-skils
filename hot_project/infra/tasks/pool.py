@@ -1,24 +1,12 @@
-"""任务池:每条道一个队列 + 固定数量的 worker。
+"""任务池:每条道一个队列 + 固定数量的 worker。设计取舍写在 `__init__.py`。
 
-设计取舍写在 `__init__.py`。这里只讲两处容易写错的地方。
+「全部完成」用跨所有道的 `_pending` 计数,不能用「所有队列都空了」:任务可以派生任务,
+父任务跑到一半时队列可能恰好是空的。提交时 +1,**终态**时 -1;重排不动它,派生任务在父任务
+减一之前就已经加一,所以计数不会中途归零。
 
-## 「全部完成」怎么判定
-
-不能用「所有队列都空了」:任务可以派生任务,父任务跑到一半时队列可能恰好是空的,
-而它马上就要塞进两个子任务。旧包的星段扫描正是这种形状(先探 total_count,再按结果拆段)。
-
-用一个跨所有道的 `_pending` 计数:提交时 +1,**终态**时 -1(成功或最终失败)。
-重排不动它 —— 任务还在飞,只是换了个时刻。派生任务在父任务减一之前就已经加一,
-所以计数不会中途归零。
-
-## 异常分三类,处置不同
-
-    RateLimitError      限流。**不计入重试次数**:这不是任务的错,是外部节流,
-                        计入的话一轮限流高峰就能把所有任务的重试额度烧光。
-    RetryableError      瞬时故障(网络抖动、5xx)。计入重试次数,超限按失败收尾。
-    其他                当场失败,不重排。程序 bug 重排一万次还是 bug,只会刷屏。
-
-`CancelledError` 必须原样抛出,不能被「其他」那一支吞掉,否则关不掉池子。
+异常分三类:`RateLimitError` 回队且**不计入重试次数**(外部节流不是任务的错,计入的话一轮
+限流高峰就能烧光所有任务的额度);`RetryableError` 回队并计入,超限按失败收尾;其他当场
+失败、不重排。`CancelledError` 必须原样抛出,不能被「其他」那一支吞掉,否则关不掉池子。
 """
 
 from __future__ import annotations
@@ -129,9 +117,8 @@ class TaskPool:
             raise                                   # 关池子,别当成任务失败
 
         except RateLimitError as e:
-            # 不计入重试次数:外部节流不是这个任务的问题。租约已经在池里记过账并冷却了
-            # 那个 token,所以直接回队即可 —— 下次它会拿到另一个 token。
-            # 但另记一本有界的账,理由见 `Task.max_rate_limits`。
+            # 不计入重试次数:外部节流不是这个任务的问题。租约已经记过账并冷却了那个 token,
+            # 直接回队即可,下次会拿到另一个。另记一本有界的账,理由见 `Task.max_rate_limits`。
             task.attempts -= 1
             task.rate_limits += 1
             self.stats["rate_limited"] += 1
@@ -143,7 +130,7 @@ class TaskPool:
 
         except (RetryableError, TokenInvalidError) as e:
             # 401 也归这里:租约已按 strikes 处置过了,换个 token 多半就好。但**计入**次数,
-            # 免得 token 真的集体坏掉时无限自旋(那时 `AllTokensInvalid` 会走下面的兜底)。
+            # 免得 token 真的集体坏掉时无限自旋。
             if task.attempts > task.max_retries:
                 self._finish(task, err=e)
             else:

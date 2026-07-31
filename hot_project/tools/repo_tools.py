@@ -28,8 +28,8 @@ DISAMBIGUATION_CANDIDATES = 5
 def resolve(ctx, raw: str) -> tuple[str | None, dict | None]:
     """返回 `(仓库全名, None)` 表示定位成功;`(None, 回给模型的话)` 表示要消歧或没找到。
 
-    用户可能给完整的 `owner/repo`、只给项目名、拼错、或者干脆一句描述。能唯一定位就直接用,
-    真有歧义才把候选交回去让模型问用户 —— 猜错一个仓库比多问一句代价大得多。
+    用户可能给全名、只给项目名、拼错、或一句描述。能唯一定位就直接用,真有歧义才交回候选
+    让模型问 —— 猜错一个仓库比多问一句代价大得多。
     """
     raw = (raw or "").strip()
     if not raw:
@@ -85,25 +85,20 @@ def repo_growth(ctx, args: dict) -> dict:
     if star is None:
         return {"error": f"拿不到 {name} 的当前 star。"}
 
-    anchor = snapshots.anchor_for_window(days)
-    if anchor is None:
+    base = snapshots.earliest_in_window(days)
+    result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
+                                 age_days(info.get("created_at", "")), base.span)
+    if result is None:
+        # 单仓库查询和榜单不同:这里「算不出来」本身就是用户要的答案,得说清原因。
         return {"repo": name, "star": star, "growth": None,
-                "growth_status": "no_anchor",
-                "message": f"没有 T−{days} 天附近的快照,这个窗口算不了增长。"}
-
-    result = growth_calc.resolve(
-        star, anchor.stars.get(name),
-        age_days(info.get("created_at", "")), anchor.window_days)
+                "message": f"最近 {days} 天的快照里一次都没测到过 {name}(多半是它刚进库),"
+                           "这个窗口算不出增长 —— 不要当成零增长,过一天有了基线就能算。"}
 
     out = {"repo": name, "star": star, "growth": result.value,
-           "growth_basis": result.basis, "growth_calc_days": anchor.window_days,
-           "anchor_day": str(anchor.day)}
-    if not result.decided:
-        out["growth_status"] = "snapshot_unresolved"
-        out["message"] = ("这个仓库在锚点那天的快照里没有,创建时间也不在窗口内 —— "
-                          "算不出增长,**不要当成零增长**。")
-    if anchor.window_days != days:
-        out["note"] = f"当天缺快照,锚点顺延,实际窗口 {anchor.window_days} 天(请求 {days} 天)。"
+           "growth_basis": result.basis, "growth_calc_days": result.window_days}
+    if result.window_days != days:
+        out["note"] = (f"它最早的基线只到 {result.window_days} 天前,"
+                       f"所以这是 {result.window_days} 天的增长(请求的是 {days} 天)。")
     return out
 
 
@@ -206,7 +201,7 @@ def add_favorite(ctx, args: dict) -> dict:
         universe.insert_discovered({name: {"star": info.get("stargazers_count", 0),
                                            "created_at": info.get("created_at", "")}})
         universe.refresh_display({name: {
-            "language": info.get("language") or "", "forks": info.get("forks_count", 0),
+            "language": info.get("language") or "",
             "topics": info.get("topics") or [], "gh_desc": info.get("description") or ""}})
         saved = universe.load().get(name, {})
 
@@ -230,9 +225,9 @@ _REPO = Param("repo", "str",
 
 TOOLS = (
     Tool("repo_growth",
-         "【单仓库增长】查单个仓库近期 star 增长(当前 star 减去每日快照里 N 天前的 star)。"
-         "缺该仓库当时的快照时返回 growth_status=snapshot_unresolved,此时 growth 为 null,"
-         "不要当成零增长。若精确仓库查不到,会返回相似候选供用户选择。",
+         "【单仓库增长】查单个仓库近期 star 增长(实时 star 减去窗口内最早那份快照里的 star)。"
+         "窗口内没测到过它时 growth 为 null 并附原因说明,不要当成零增长。"
+         "若精确仓库查不到,会返回相似候选供用户选择。",
          repo_growth,
          (_REPO,
           Param("growth_calc_days", "int", f"增长统计窗口(天),默认{config.GROWTH_CALC_DAYS}",

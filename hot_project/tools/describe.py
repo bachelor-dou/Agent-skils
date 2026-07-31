@@ -1,15 +1,9 @@
 """项目介绍生成 —— 抓素材 + 写提示词 + 调 LLM。
 
-旧包里这件事做了三遍:`core.describe_project`(单项目、四段式)、
-`report.step3_generate_report`(报告条目、也是四段式)、`add_favorite`(收藏时的一句话)。
-三份各自抓 GitHub 上下文、各自拼提示词、各自从 LLM 响应里取值,于是「README 摘录截多长」
-在三处是三个数,而修其中一处不会影响另外两处。
+报告条目、单项目查询、收藏时的一句话都走这一份,只差 `level`。
 
-现在只有一份:素材由 `provider.github.repo.profile` 给,提示词在这里,取值在
-`LLMClient.text`。
-
-**提示词在工具层而不是 infra/llm。** 「用中文、四段式、不许编造」是产品决定,
-换个项目就得重写;而「怎么把消息发出去、某家挂了换哪家」换个项目照样能用。
+**提示词在工具层而不是 infra/llm**:「用中文、四段式、不许编造」是产品决定,换个项目就得
+重写;而「怎么把消息发出去、某家挂了换哪家」换个项目照样能用。
 """
 
 from __future__ import annotations
@@ -89,7 +83,7 @@ def _commits_line(items: list[dict]) -> str:
 def build_prompt(name: str, facts: dict, level: str = STANDARD) -> str:
     """把手上的素材拼成提示词。
 
-    `facts` 可以来自 DB(gh_desc / topics / readme_url)、也可以来自实时抓取
+    `facts` 可以来自 DB(gh_desc / topics)、也可以来自实时抓取
     (readme / releases / commits),两边字段名一致,所以调用方想混就混。
     """
     lines = [f"项目名称: {name}", f"项目地址: https://github.com/{name}"]
@@ -98,8 +92,6 @@ def build_prompt(name: str, facts: dict, level: str = STANDARD) -> str:
         lines.append(f"官方简介: {desc}")
     if topics := facts.get("topics"):
         lines.append(f"标签: {', '.join(topics)}")
-    if url := facts.get("readme_url"):
-        lines.append(f"README链接(仅供标识,不能视为已读取内容): {url}")
     if excerpt := facts.get("readme_excerpt"):
         lines.append(f"README摘录(已读取文本,可能截断): {_clip(str(excerpt), README_IN_PROMPT)}")
     if line := _releases_line(facts.get("recent_releases") or []):
@@ -113,8 +105,7 @@ def build_prompt(name: str, facts: dict, level: str = STANDARD) -> str:
 def merge_profile(facts: dict, pack: dict) -> dict:
     """把实时抓来的资料包并进已有的事实。原地不改,返回新字典。
 
-    `profile` 的键(readme / releases / commits)和提示词认的键
-    (readme_excerpt / recent_releases / recent_commits)不同名,翻译只在这一处。
+    `profile` 的键和提示词认的键不同名(readme / readme_excerpt),翻译只在这一处。
     """
     merged = dict(facts)
     if text := (pack.get("readme") or {}).get("text"):
@@ -133,8 +124,7 @@ def merge_profile(facts: dict, pack: dict) -> dict:
 def describe(name: str, facts: dict, level: str = STANDARD) -> str:
     """生成一段中文介绍。LLM 没配、或全部平台失败 → 空串。
 
-    空串是有意的返回值而不是异常:描述是锦上添花,报告少一段介绍照样能出,
-    抛异常会让整份报告因为一个仓库的描述失败而作废。
+    空串是有意的:抛异常会让整份报告因为一个仓库的描述失败而作废。
     """
     client = llm.get()
     if not client.configured():
@@ -154,9 +144,8 @@ CONDENSE_MIN_PARSED = 0.5       # 解析出的条数低于这个比例就整批�
 def condense(repos: list[dict], max_chars: int = 70) -> list[str]:
     """把一批项目的英文简介批量浓缩成中文短句。返回和输入等长。
 
-    一次请求处理整批,而不是一个项目一次:Trending 一次 75 个项目,逐个调用是 75 次
-    往返。代价是解析要靠序号对齐,所以解析不出一半以上就整批回退截断原文
-    —— 半份结果比没有结果更糟,用户看到的是「一部分中文一部分英文」。
+    整批一次请求(Trending 一次 75 个,逐个调是 75 次往返),代价是解析要靠序号对齐。
+    解析不出一半以上就整批回退截断原文 —— 半份结果是「一部分中文一部分英文」,更糟。
     """
     if not repos:
         return []

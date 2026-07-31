@@ -3,8 +3,7 @@
     logs/2026-07/snapshot-2026-07-30.log
     logs/2026-07/weekly-2026-07-30.log
 
-三个入口(每日快照、周报、api_server)本来各写一份几乎一样的 `basicConfig`,其中一份
-忘了压 httpx 的 INFO,于是全量近千个批次每个打一行,业务日志被淹掉。
+三个入口(每日快照、周报、api_server)共用这一份 `basicConfig`,免得哪一份忘了压 httpx。
 
 这里不知道项目在干什么,只知道「按月分目录、同时写文件和控制台、压掉几个吵闹的库」。
 """
@@ -12,17 +11,21 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
-# 这几个库在 INFO 级别逐请求打日志。全量采集近千个批次,不压的话业务日志一行都看不见。
+from .timeutil import utc_today
+
+# 这几个库在 INFO 级别逐请求打日志,不压的话业务日志一行都看不见。
 NOISY = ("httpx", "httpcore", "urllib3", "asyncio")
 
 
 def setup(directory: Path, prefix: str, *, day: date | None = None,
           level: int = logging.INFO, console: bool = True) -> Path:
     """配好日志,返回日志文件路径。"""
-    day = day or datetime.now().date()
+    # 必须和其余部分同一个时区口径:两个 cron 显式传 utc_today(),web/CLI 走这里的默认。
+    # 取本地日期会让 UTC+8 下 16:00 之后的日志归到"第二天",跨月还会落进下个月的目录。
+    day = day or utc_today()
     month_dir = directory / f"{day:%Y-%m}"
     month_dir.mkdir(parents=True, exist_ok=True)
     path = month_dir / f"{prefix}-{day}.log"
