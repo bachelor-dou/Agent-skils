@@ -11,29 +11,26 @@ from pathlib import Path
 from .common.env import csv_list, flag, text
 
 # ══════════════════════════════════════════════════════════════
-# 一、策略旋钮 —— 用户真会去调的数,每个都注明调大调小会发生什么
+# 一、策略旋钮
 # ══════════════════════════════════════════════════════════════
-
-# ── 观测宽度与出榜闸门:两个独立参数,勿混为一谈 ──
 
 # 观测宇宙宽度:涨过它收进 DB 记快照,掉下淘汰。也是榜单候选池下界和 Agent min_star 默认值。
 # 调低只是提前记快照,不影响入选标准 —— 谁出榜由 STAR_GROWTH_THRESHOLD 独立决定。
-MIN_STAR: int = 500
+MIN_STAR: int = 400
 
-# 出榜的唯一闸门:窗口期涨够这么多 star 才入选。想收紧/放宽榜单只动这个数。
-STAR_GROWTH_THRESHOLD: int = 1000
+# 增长阈值。
+STAR_GROWTH_THRESHOLD: int = 1100
 
-# 星段扫描上限,仅每日发现阶段用;榜单读快照不设上限,否则超大仓库出不了榜。
-# 调高几乎不费时(按密度二分,96% 集中在 2 万以下),超出的约 91 个由无上限关键词搜索兜底。
-MAX_STAR: int = 3000
+# 星段扫描上限,仅每日发现阶段用;
+MAX_STAR: int = 4000
 
 # ── 窗口与数量 ──
 
 GROWTH_CALC_DAYS: int = 7        # 增长统计窗口(天);实际跨度以锚点快照为准,本值是请求值
-DAYS_SINCE_CREATED: int = 45     # 新项目判定:创建距今 <= 此值算新项目
-DESC_REFRESH_DAYS: int = 60      # LLM 描述刷新周期(天),超期则重新生成
+DAYS_SINCE_CREATED: int = 45     # 新项目判定阈值(天)
+DESC_REFRESH_DAYS: int = 60      # LLM 描述刷新周期(天)
 HOT_PROJECT_COUNT: int = 100     # 综合/关键词榜默认输出上限(有几个出几个)
-HOT_NEW_PROJECT_COUNT: int = 13  # 新项目榜默认输出数量
+HOT_NEW_PROJECT_COUNT: int = 12  # 新项目榜默认输出数量
 SNAPSHOT_KEEP_DAYS: int = 35     # 快照保留天数(按日期截断,够覆盖月度窗口)
 
 # 关键词榜:LLM 动态补充关键词的数量上限,也是 Search 配额闸门 —— 调大线性增请求。预设类别不受此限。
@@ -50,7 +47,7 @@ BURST_CAP: float = 2.0        # acceleration-1 的封顶(boost 最高 1 + ALPHA*
 
 # ── 其他 ──
 
-# 收藏默认标签:点 ★ 时可选的分类,用户仍可自定义新标签。
+# 收藏默认标签
 FAVORITE_DEFAULT_TAGS: list[str] = ["效率", "工具"]
 
 
