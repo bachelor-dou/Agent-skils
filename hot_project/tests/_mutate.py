@@ -70,7 +70,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_discover_rejects_foreign_fields",
     ),
     (
-        "发现任务顺手覆盖已有条目",
+        "发现任务附带覆盖已有条目",
         STORE / "universe.py",
         """            if name in projects:
                 continue
@@ -1031,7 +1031,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_a_lone_null_without_not_found_counts_as_unanswered_not_as_deleted",
     ),
     (
-        "token 池不重绑事件循环(facade 第二次调用只要有人等锁就永久报废)",
+        "token 池不重绑事件循环(client 第二次调用只要有人等锁就永久报废)",
         TOKENS,
         "        self._cond = asyncio.Condition()\n        self._cond_loop = loop",
         "        pass",

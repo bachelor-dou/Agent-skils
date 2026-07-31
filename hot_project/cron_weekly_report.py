@@ -23,7 +23,7 @@ from .common.timeutil import format_day, utc_today
 from .core import report_parse
 from .infra import notify
 from .infra.store import reports
-from .provider.github import facade
+from .provider.github import client as github
 from .tools import ranking
 
 logger = logging.getLogger("hot_project")
@@ -86,7 +86,7 @@ def run(args: argparse.Namespace) -> int:
         mode="comprehensive", min_star=config.MIN_STAR,
         growth_threshold=config.STAR_GROWTH_THRESHOLD,
         growth_days=args.growth_days, top_n=args.top_n,
-        do_report=not args.no_report, gh=facade.get(),
+        do_report=not args.no_report, gh=github.shared(),
     )
 
     if not result["ranked"]:

@@ -135,7 +135,7 @@ class Ctx:
     一个事务,范围写在函数名里。
     """
 
-    gh: Any = None                      # provider.github 的同步门面;None = 不联网的场景
+    gh: Any = None                      # provider.github 的同步客户端;None = 不联网的场景
     state: Any = None                   # 会话状态,只有 agent 路径有
     user_id: str = ""
     progress: Callable[[int, str], None] | None = None

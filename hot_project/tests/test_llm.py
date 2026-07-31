@@ -254,7 +254,7 @@ def test_a_leaked_toolcall_blob_never_reaches_the_user(post):
 
 
 def test_an_answer_that_legitimately_starts_with_json_is_left_alone(post):
-    """用户问「给我一段 JSON」时,回答本来就以 `{` 开头 —— 不能顺手剥掉。"""
+    """用户问「给我一段 JSON」时,回答本来就以 `{` 开头 —— 不能误剥。"""
     answer = '{"name": "demo", "version": 1}'
     post(_sse({"choices": [{"delta": {"content": answer}}]}))
     seen = []

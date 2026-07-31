@@ -336,7 +336,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 async def _pump(websocket, session_id: str, message: str, run) -> str | None:
     """在线程里跑一轮对话,同时把进度和正文增量实时推出去。
 
-    连接断了**不中断 agent**:它可能正跑在出榜的第三分钟上,掐掉等于白烧一次;让它跑完,
+    连接断开**不中断 agent**:它可能正处于出榜计算的第三分钟,中断等于浪费本次运行;让它跑完,
     回复存进待发缓冲。返回最终回复;连接已断、回复已缓存时返回 None。
     """
     events: queue.Queue = queue.Queue()

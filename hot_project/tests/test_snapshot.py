@@ -15,7 +15,7 @@ import pytest
 from hot_project import cron_daily_snapshot as cron
 from hot_project.infra.exceptions import RateLimitError, RetryableError, TokenInvalidError
 from hot_project.infra.tasks import TaskPool
-from hot_project.provider.github import client as gh
+from hot_project.provider.github import request as gh
 from hot_project.provider.github import tasks as gh_tasks
 from hot_project.provider.github import tokens as gh_tokens
 from hot_project.provider.github import trending as gh_trending

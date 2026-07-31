@@ -65,7 +65,7 @@ def rate_limited(ip: str) -> bool:
         if len(window) >= RATE_LIMIT:
             return True
         window.append(now)
-        # 顺手扫掉整窗都过期的键。判据不能是"deque 空了" —— 伪造 IP 是一次性的,永远不会
+        # 同时清除整窗都过期的键。判据不能是"deque 空了" —— 伪造 IP 是一次性的,永远不会
         # 回来把自己 popleft 清空;所以看最后一次命中是否已出窗(刚 append 过的当前键不会误删)。
         # ponytail: 每次触发时扫全表,O(n)。n 是"表里现存的键数",正常是个位数;
         # 真要扛住百万级扫描,得换成分桶轮转过期。
@@ -115,7 +115,7 @@ class Guard(BaseHTTPMiddleware):
 
 
 def cors_options() -> dict:
-    """CORS 参数,顺手挡住一个高危组合。
+    """CORS 参数,同时拦截一个高危组合。
 
     `allow_origins=["*"]` 配上 `allow_credentials=True` 意味着任何网站都能带着用户的
     cookie 调这里的接口。中间件不会报错,所以这里明确降级并留一行警告。

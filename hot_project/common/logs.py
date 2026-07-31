@@ -3,7 +3,7 @@
     logs/2026-07/snapshot-2026-07-30.log
     logs/2026-07/weekly-2026-07-30.log
 
-三个入口(每日快照、周报、api_server)共用这一份 `basicConfig`,免得哪一份忘了压 httpx。
+三个入口(每日快照、周报、api_server)共用这一份 `basicConfig`,以免某一入口遗漏压制 httpx。
 
 这里不知道项目在干什么,只知道「按月分目录、同时写文件和控制台、压掉几个吵闹的库」。
 """

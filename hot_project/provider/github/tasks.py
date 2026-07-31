@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 
 from ...infra.tasks import Ctx, Task
-from . import client as gh
+from . import request as gh
 from .tokens import Lease
 from .trending import fetch_trending
 

@@ -1,32 +1,18 @@
-name: daily star snapshot
+name: daily snapshot
 
-# 每日 star 快照跑在 GitHub 的机器上，直接提交到 main，本地 git pull 即可拿到。
-# 快照是 N 天增长的唯一基线（star 时间戳接口 2026-06 起对外关闭），漏一天补不回来。
+# 每日 star 快照:跑在 GitHub 机器上,直接提交回 main,本地 git pull 拿到。
+# 快照是 N 天增长的唯一基线(star 时间戳接口 2026-06 起关闭),漏一天补不回来。
 #
-# 为什么每 3 小时触发而不是每天一次：
-#   GitHub 的 schedule 是 best-effort，2026 年社区实测漂移可达数小时（actions/runner#4468），
-#   2026-07-09 还出过约 2% 的 run 直接启动失败的事故，且被跳过时不发任何通知。
-#   脚本本身幂等（当天已有快照就秒退、一个请求都不发），所以额外的尝试几乎零成本，
-#   一天 8 次机会里任意一次成功就拿到当天快照。漏掉的那天是补不回来的
-#   （今天无从得知昨天的 star 数），容错只能靠多给自己机会——8 次全部落空的概率可忽略，
-#   同时比每小时省掉三分之二的空跑。
-#   分钟取 :23 —— :00/:15/:30 是全平台定时任务的高峰批次，冷门分钟排队明显更短。
-#
-# 每天第一次尝试落在北京时间 08:23：快照按 UTC 日命名（与 DB 同基准），
-# 而 UTC 零点就是北京时间 8 点，所以 00:23 UTC 这一轮正是当天窗口的第一次机会。
+# 多次触发而非每天一次:GitHub schedule 是 best-effort(实测漂移可达数小时、约 2% run 启动
+# 失败且不通知)。脚本幂等(当天有快照就秒退、不发请求),多试几次近乎零成本,任一次成功即可。
+# 分钟取 :23 避开 :00/:15/:30 高峰;首次落在 00:23 UTC = 北京 08:23,正好是 UTC 当天窗口起点。
 
 on:
   schedule:
-    - cron: "23 */3 * * *"
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "当天已有快照也重新采集（用于验证「采集→提交→推送」整条链路）"
-        type: boolean
-        default: false
+    - cron: "23 */6 * * *"
+  workflow_dispatch:      # 手动触发一轮;当天已有快照仍会秒退(幂等在脚本里)
 
-# 只用 schedule / workflow_dispatch 触发，绝不用 pull_request_target：
-# 这是公开仓库存放 PAT 的前提——fork 的 PR 拿不到 secrets，外人无法借 token 干活。
+# 绝不用 pull_request_target:公开仓库存 PAT 的前提是 fork 的 PR 拿不到 secrets。
 permissions:
   contents: write
 
@@ -36,23 +22,18 @@ concurrency:
 
 jobs:
   snapshot:
-    # fork 出去的仓库不跑，免得白烧别人配额、也免得往上游推东西
     if: github.repository == 'bachelor-dou/Agent-skils'
     runs-on: ubuntu-latest
-    # 发现三阶段约 25 分钟 + 采集约 10 分钟。
-    # 发现那 25 分钟里九成在等限流：实测搜索撞的是按 IP 共享的**二级限流**，
-    # 与 token 数无关（12 个不同账号的 token 会在同一刻一起 403，各自额度都还没用完），
-    # 所以多放 token 不会缩短它。留足余量应对退避；公开仓库不计费，跑久点不心疼。
+    # 发现约 25 分钟(受按 IP 共享的二级限流约束) + 采集约 10 分钟,余量应对退避。
     timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # 检出 main：代码和数据（快照/DB）都在 main，CI 直接把当天产物提交回 main。
-          # 过期快照清理要先看到 main 上已有的快照集合，所以必须检出它。
-          # 人工改动一律走特性分支 PR 合并；CI 用 github-actions bot 直接推 main。
+          # 检出 main:代码和数据(快照/DB)都在 main,CI 直接把产物提交回 main;
+          # 过期快照清理也要先看到 main 上已有的快照集合。人工改动走特性分支 PR。
           ref: main
-        # 默认浅克隆：29MB 的 Github_DB.json 只下最新一版，不拉历史
+        # 默认浅克隆:29MB 的 Github_DB.json 只下最新一版
 
       - uses: actions/setup-python@v5
         with:
@@ -61,16 +42,12 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      # 幂等在脚本里：当天已有快照就秒退、一个请求都不发，所以这一步一天跑 24 次不心疼。
       - name: 发现新仓库 + 采集当天快照
         env:
-          # secret 名不能以 GITHUB_ 开头（GitHub 保留前缀），故用 GH_STAR_TOKENS 再映射过来。
-          # 逗号分隔，放几个都行：并发上限是 min(SNAPSHOT_MAX_CONCURRENCY, token 数)，
-          # 池子在所有 token 间轮转、自动跳过被限流的那个，多余的 token 就是备用配额。
+          # secret 名不能以 GITHUB_ 开头(GitHub 保留前缀),故用 GH_STAR_TOKENS 再映射。
+          # 逗号分隔,多放的 token 是备用配额:池子自动轮转、跳过被限流的那个。
           GITHUB_TOKENS: ${{ secrets.GH_STAR_TOKENS }}
-        run: |
-          python -m hot_project.cron_daily_snapshot \
-            ${{ inputs.force && '--force' || '' }}
+        run: python -m hot_project.cron_daily_snapshot
 
       # DB 和快照一起提交:发现阶段往 DB 插了新仓库,而当天快照里已经含它们了。
       # 只提交快照会让下一轮从旧 DB 出发把同一批仓库再发现一遍。

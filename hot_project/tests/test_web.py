@@ -291,7 +291,7 @@ def test_raw_script_tags_in_a_report_never_reach_the_page(report_dir):
     # 白名单只认带引号的属性值,裸写的直接穿过去
     "<a href=javascript:alert(1)>click</a>",
     "<img SRC=javascript:alert(1)>",
-    # 这几条旧版就挡得住,一并钉住,免得改清洗逻辑时把它们弄丢
+    # 这几条旧版就挡得住,一并钉住,以免修改清洗逻辑时遗漏它们
     '<a href="javascript:alert(1)">quoted</a>',
     "<a hREf=JaVaScRiPt:alert(1)>case</a>",
     '<a href=" java&#09;script:alert(1)">obfuscated</a>',

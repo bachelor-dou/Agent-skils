@@ -1,9 +1,7 @@
-"""GitHub token 池 —— 对外只有一个动作:借一张租约。
+"""GitHub token 池 —— 对外只有一个动作:借一张租约(`async with pool.lease()`)。
 
-拿到租约就意味着这个 token 同时满足三件事:**没被别人借走、不在限流冷却里、距它自己上次
-同类请求已满最小间隔**。退出 `async with` 自动归还,并按抛出的异常类型自动记账。
-
-索引只存在于池内部:异常 → 记账动作的映射只在 `Lease.__aexit__` 一处,调用方伸不进手来。
+拿到租约 = 这个 token 同时满足:没被借走、不在冷却、距上次同类请求已满配速间隔。
+退出自动归还并按异常类型记账;记账映射只在 `Lease.__aexit__` 一处,调用方伸不进手。
 """
 
 from __future__ import annotations
@@ -22,42 +20,30 @@ logger = logging.getLogger("hot_project")
 
 
 class Pace(NamedTuple):
-    """一类请求的配速:同一个 token 连续两次这类请求的最小间隔。
+    """一类请求的配速:同一 token 连续两次这类请求的最小间隔。
 
-    必须按类分开 —— GitHub 的限额本身是分开的,让 GraphQL 去等 Search 的间隔会把批量取 star
-    拖慢一个数量级。
+    按类分开 —— GitHub 限额本就分开,让 GraphQL 等 Search 的间隔会把批量取 star 拖慢一个数量级。
     """
     key: str
     interval: float
 
 
-# Search API 每 token 30 次/分 —— 但这不是我们撞到的墙:实测被拒时 remaining 还剩 21/30。
-# 真正的天花板是二级限流,按**来源 IP** 计,12 张独立账号的 token 共用一个额度,所以全体
-# 在同一秒里一起撞墙(retry-after 60)。总量约 100 次/分(12 token × 9 次)就到顶。
-#
-# **这个旋钮控制不了撞墙,别再拿它调。** 三轮实测:2.1s 撞墙周期 65s、发到 108 次才撞;
-# 8.0s 周期反而拉到 93s、只发到 36 次就撞。放慢它撞得更早,可见墙不是按请求速率算的
-# (真正的成因未知,GitHub 也明说「may encounter a secondary rate limit for undisclosed
-# reasons」)。既然撞是必然,就该在罚站之间尽量多干活 —— 配速小反而吞吐高。
-#
-# 2.5s 是取的保守值:再小虽然更快,但被限流期间继续加压有封号风险,不值得。
-#
-# 间隔必须按 token 跨调用延续,不能只在页与页之间 sleep:多数搜索不到 3 页就结束、尾部
-# 没有 sleep,token 立刻被下一个任务借走并马上发第一页,页间 sleep 再大也拦不住这种突发。
+# Search 真正的墙不是每 token 30 次/分(被拒时 remaining 还剩 21),而是按**来源 IP** 计的
+# 二级限流:12 个独立 token 共用一个额度,会在同一秒一起撞(retry-after 60)。
+# 这个配速控制不了撞墙(三轮实测:放慢反而撞得更早、发得更少),成因未知(GitHub 明说 undisclosed)。
+# 既然撞墙不可避免,就在冷却间隔内尽量多发请求 —— 配速越小吞吐越高;2.5s 为保守值(再小有封号风险)。
+# 间隔必须按 token 跨调用延续:多数搜索不到 3 页就结束、尾部没 sleep,页间 sleep 拦不住突发。
 SEARCH = Pace("search", 2.5)
 
-# GraphQL / REST 走 core 限额 5000 点/小时,批量取 star 是 100 个仓库一次请求,配额是零头,
-# 所以间隔为 0 —— 保留这个 Pace 只是为了让两条路径同形。
+# GraphQL/REST 走 core(5000 点/小时),批量取 star 一次 100 个仓库,配额是零头,故间隔 0(保留只为同形)。
 CORE = Pace("core", 0.0)
 
 
-# 401 的处置:连续这么多次才永久失效,否则按瞬时故障冷却。
-# 任意一次成功归还清零计数 —— 「连续」是这条规则的全部意义所在。
+# 401:连续这么多次才永久失效,否则按瞬时故障冷却;任一次成功归还清零(「连续」是关键)。
 AUTH_FAIL_STRIKES = 3
 AUTH_FAIL_COOLDOWN = 60.0
 
-# 限流恢复后再多等一会儿:reset 时刻和实际放行之间有抖动,掐着点重发会再吃一个 403,
-# 而一个 403 的代价是整轮冷却。
+# 限流恢复后多等一会:reset 与实际放行有抖动,掐点重发会再吃一个 403(代价是整轮冷却)。
 RECOVERY_BUFFER = 3.0
 
 
@@ -79,7 +65,7 @@ class _Token:
 
 
 class Lease:
-    """一次租约。只给请求头,不给 token 字符串 —— 让它没法被日志或异常顺手带出去。"""
+    """一次租约。只给请求头,不给 token 字符串 —— 使其无法被日志或异常意外带出。"""
 
     __slots__ = ("_pool", "_index")
 
@@ -139,10 +125,7 @@ class TokenPool:
 
     @property
     def capacity(self) -> int:
-        """还能同时借出多少张租约(未失效的 token 数)。
-
-        任务侧的并发度读它而不是写死的 `max_concurrency` —— 401 三振或新增 token 后它立刻变。
-        """
+        """还能同时借出多少张租约(未失效 token 数)。并发度读它而非写死值 —— 401 三振或补 token 后立刻变。"""
         return sum(1 for t in self._tokens if not t.invalid)
 
     async def add(self, secrets: list[str]) -> int:
@@ -185,11 +168,10 @@ class TokenPool:
             await self._on_released(index, healthy=True)
 
     def _bind_to_running_loop(self) -> None:
-        """把 `_cond` 绑到当前这个事件循环上,必要时换一把新的。
+        """把 `_cond` 绑到当前事件循环,必要时换新的。
 
-        `asyncio.Condition` 绑死在第一个 await 它的循环上,而 `facade` 每个方法各起一个
-        `asyncio.run` —— 不换锁,第二次调用只要有人真的等锁就会崩,且池从此报废。而换锁安全的
-        前提是同一时刻只有一个存活的循环,两个并存时静默换锁会废掉互斥,所以那时直接报错。
+        `asyncio.Condition` 绑死在第一个 await 它的循环上,而 `client` 每方法各起一个 `asyncio.run`;
+        不换锁则第二次调用只要有人等锁就崩、池报废。两个循环并存时静默换锁会废掉互斥,故直接报错。
         """
         loop = asyncio.get_running_loop()
         if self._cond_loop is loop:

@@ -26,7 +26,7 @@ from .common import logs
 from .common.timeutil import utc_today
 from .infra.store import snapshots, universe
 from .infra.tasks import TaskPool
-from .provider.github import client as gh
+from .provider.github import request as gh
 from .provider.github import tasks as gh_tasks
 from .provider.github import tokens as gh_tokens
 from .provider.github import trending
@@ -292,7 +292,7 @@ async def run(args: argparse.Namespace) -> int:
         return 0
 
     # ── 5-6. 覆盖率闸门 + 写快照 ─────────────────────────
-    # 闸门在 `snapshots.save` 里(覆盖率不足就不产生文件)。这里不再判一次,免得两处阈值分叉。
+    # 闸门在 `snapshots.save` 里(覆盖率不足就不产生文件)。这里不再重复判断,以免两处阈值分叉。
     if snapshots.save(
         today, harvest.stars, not_found=sorted(harvest.missing), expected=len(names),
         throttle={"hits": tokens.stats["rate_limited"],

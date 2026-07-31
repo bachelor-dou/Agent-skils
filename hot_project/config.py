@@ -1,9 +1,9 @@
-"""全局配置 —— 想改行为就来这一个文件。
+"""全局配置 —— 改行为只看这一个文件。
 
-第五节的 `LLM_MODELS` 是**原始声明**(含 enabled=0 的条目),归一化在 `infra/llm` 里做。
-import 期不碰磁盘,建目录推到真要写之前(`ensure_dir`)。
-实测定死的实现细节(批大小、并发上限、容差等)不进这里 —— 当旋钮调错会静默污染基线。
-分层上本文件是最底座:任何层都能 import 它,它**不 import 任何层**(只用标准库)。
+- `LLM_MODELS` 是原始声明,归一化在 `infra/llm`。
+- import 期不碰磁盘(建目录靠 `ensure_dir`)。
+- 实测定死的实现细节(批大小、并发等)不进这里 —— 调错会静默污染基线。
+- 最底座:任何层都能 import 它,它不 import 任何层。
 """
 
 from pathlib import Path
@@ -14,20 +14,18 @@ from .common.env import csv_list, flag, text
 # 一、策略旋钮 —— 用户真会去调的数,每个都注明调大调小会发生什么
 # ══════════════════════════════════════════════════════════════
 
-# ── 观测宽度与出榜闸门:两个独立旋钮,别把它们当成一回事 ──
+# ── 观测宽度与出榜闸门:两个独立参数,勿混为一谈 ──
 
-# 「观测宇宙」的宽度:涨过它就收进 DB 开始记快照,掉到它以下就淘汰。同时是榜单候选池的
-# 下界(候选池就是 DB,必须同值)和 Agent 工具 min_star 的默认值。
-# 调低只是提前给仓库记快照,不放水 —— 谁能出榜由 STAR_GROWTH_THRESHOLD 独立决定。
+# 观测宇宙宽度:涨过它收进 DB 记快照,掉下淘汰。也是榜单候选池下界和 Agent min_star 默认值。
+# 调低只是提前记快照,不影响入选标准 —— 谁出榜由 STAR_GROWTH_THRESHOLD 独立决定。
 MIN_STAR: int = 500
 
 # 出榜的唯一闸门:窗口期涨够这么多 star 才入选。想收紧/放宽榜单只动这个数。
 STAR_GROWTH_THRESHOLD: int = 1000
 
-# 星段扫描的上限,只用于每日发现阶段;榜单侧读快照时不设 star 上限,否则超大仓库出不了榜。
-# 调高几乎不费时间(分段按命中密度二分,96% 的仓库挤在 2 万以下),超出本值的约 91 个仓库
-# 由无上限的关键词搜索兜底。
-MAX_STAR: int = 120000
+# 星段扫描上限,仅每日发现阶段用;榜单读快照不设上限,否则超大仓库出不了榜。
+# 调高几乎不费时(按密度二分,96% 集中在 2 万以下),超出的约 91 个由无上限关键词搜索兜底。
+MAX_STAR: int = 3000
 
 # ── 窗口与数量 ──
 
@@ -38,16 +36,13 @@ HOT_PROJECT_COUNT: int = 100     # 综合/关键词榜默认输出上限(有几�
 HOT_NEW_PROJECT_COUNT: int = 13  # 新项目榜默认输出数量
 SNAPSHOT_KEEP_DAYS: int = 35     # 快照保留天数(按日期截断,够覆盖月度窗口)
 
-# 关键词榜:LLM 动态补充的搜索关键词数量上限,也是 Search API 配额的闸门 ——
-# 每个关键词是一次独立搜索,调大直接线性增加请求数。预设类别不受此限。
+# 关键词榜:LLM 动态补充关键词的数量上限,也是 Search 配额闸门 —— 调大线性增请求。预设类别不受此限。
 MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 
-# ── 最近爆发加成(仅综合/关键词榜打分)──
-#   在「窗口总增长」基础分之上叠加「最近几天爆发强度」的乘法加成,
-#   让最近突然爆火的项目排名更高,而不是只看窗口平均:
+# ── 最近爆发加成(仅综合/关键词榜):窗口总增长基础分之上乘一个「最近爆发强度」加成 ──
 #     acceleration = (recent_growth / RECENT_GROWTH_DAYS) / (window_growth / window_days)
 #     boost        = 1 + BURST_ALPHA * min(max(acceleration - 1, 0), BURST_CAP)
-#   acceleration <= 1 不反向惩罚;缺快照自行跳过(不加成、不报错),所以没有开关。
+#   acceleration <= 1 不惩罚;缺快照自行跳过,故无开关。
 
 RECENT_GROWTH_DAYS: int = 3   # 「最近几天」窗口
 BURST_ALPHA: float = 0.2     # 加成强度,越大则最近爆发对排名影响越大
@@ -62,12 +57,10 @@ FAVORITE_DEFAULT_TAGS: list[str] = ["效率", "工具"]
 # ══════════════════════════════════════════════════════════════
 # 二、路径 —— 纯派生,import 时不碰磁盘
 # ══════════════════════════════════════════════════════════════
-#
-# 数据跟着包走:`hot_project/data/`(DB、快照、收藏)与 `hot_project/report/`(周报 md),
-# 由 CI 产出并提交到 tmp 分支,本地 `git pull` 拿到。
+# 数据跟着包走(data/、report/ 由 CI 产出提交,本地 git pull 拿到)。
 
-# 所有路径都从这里推,且必须是绝对的:相对路径会跟着 CWD 走,而 CI、`python -m hot_project`、
-# agent CLI、pytest 四种入口的 CWD 各不相同,算错了不报错,只是读到空。
+# 必须是绝对路径:相对路径跟着 CWD 走,而 CI/python -m/agent CLI/pytest 四种入口 CWD 各异,
+# 算错不报错、只读到空。
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = PACKAGE_DIR / "data"
@@ -76,7 +69,7 @@ REPORT_DIR = PACKAGE_DIR / "report"
 # 日志不入库,各包写各自的
 LOG_DIR = PACKAGE_DIR / "logs"
 
-# 前端静态资源(html/css/js):跟着包走而不进 data —— 它是代码,不是数据。
+# 前端静态资源(html/css/js):跟着包走不进 data —— 是代码不是数据。
 WEB_DIR = PACKAGE_DIR / "web"
 
 DB_PATH = DATA_DIR / "Github_DB.json"
@@ -91,18 +84,14 @@ def ensure_dir(path: Path) -> Path:
 
 
 # ══════════════════════════════════════════════════════════════
-# 三、机密 —— 只从环境变量读,永不落文件,永不进可序列化的数据结构
+# 三、机密 —— 只从环境变量读,永不落文件、永不进可序列化结构
 # ══════════════════════════════════════════════════════════════
-#
-# 最后一条是这几个函数存在的理由:key 一旦进了数据结构,就会被日志、/api 返回、异常回溯
-# 带出去。模型目录(第五节)只声明「我的 key 在哪个环境变量里」,真值在使用处才取。
+# key 一旦进数据结构就会被日志、/api、异常回溯带出去。模型目录只声明 key 在哪个环境变量,
+# 真值在使用处才取。
 
 
 def github_tokens() -> list[str]:
-    """GitHub token 列表(逗号分隔)。未配置返回 [],由运行入口决定是否退出。
-
-    做成函数而非常量:token 池要能在进程运行期间重读(用户中途补 token)。
-    """
+    """GitHub token 列表(逗号分隔)。未配置返回 []。做成函数是为了运行期能重读(中途补 token)。"""
     return csv_list("GITHUB_TOKENS")
 
 
@@ -119,11 +108,10 @@ def serverchan_sendkey() -> str:
 # ══════════════════════════════════════════════════════════════
 # 四、Web 安全 —— 只有 api_server.py 一个消费者
 # ══════════════════════════════════════════════════════════════
-#
-# 这两项配合安全中间件:IP 黑名单 → 敏感路径 → 速率限制 → 请求日志。
+# 配合安全中间件:IP 黑名单 → 敏感路径 → 速率限制 → 请求日志。
 
-# 【CORS 白名单】允许哪些前端域名跨域调用本 API。只约束浏览器跨域请求,curl / 脚本不受
-#   影响,所以**它不是访问控制**。生产环境务必用环境变量指定明确域名,不要 "*"。
+# 【CORS 白名单】只约束浏览器跨域,curl/脚本不受影响 —— 不是访问控制。生产用环境变量指定
+#   明确域名,别用 "*"。
 _DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost",
     "http://localhost:3000",
@@ -133,8 +121,8 @@ _DEFAULT_ALLOWED_ORIGINS = [
 CORS_ALLOWED_ORIGINS: list[str] = csv_list("CORS_ALLOWED_ORIGINS") or _DEFAULT_ALLOWED_ORIGINS
 CORS_ALLOW_CREDENTIALS: bool = flag("CORS_ALLOW_CREDENTIALS", default=False)
 
-# 【IP 黑名单】名单内的来源 IP 一律 403,默认放行、命中才拒绝,匹配请求方真实 IP
-#   (支持反向代理的 X-Forwarded-For)。环境变量 SECURITY_IP_BLACKLIST 会**覆盖**内置项。
+# 【IP 黑名单】名单内 IP 一律 403,默认放行、命中才拒(取真实 IP,支持 X-Forwarded-For)。
+#   环境变量 SECURITY_IP_BLACKLIST 覆盖内置项。
 _DEFAULT_IP_BLACKLIST = [
     "104.243.32.126",
     "209.222.101.194",
@@ -144,25 +132,12 @@ SECURITY_IP_BLACKLIST: list[str] = csv_list("SECURITY_IP_BLACKLIST") or _DEFAULT
 
 
 # ══════════════════════════════════════════════════════════════
-# 五、LLM 平台目录 —— 纯声明,不含任何 key
+# 五、LLM 平台目录 —— 纯声明,不含 key
 # ══════════════════════════════════════════════════════════════
-#
-# 每条只记 `key_env`(key 在哪个环境变量里),真值由第三节的 `llm_key()` 在使用处取,
-# 所以这个列表可以安全地整体序列化。
-#
-# 归一化(补默认值、剔除 enabled=0、校验 id 唯一、拆 lite_model)在 `infra/llm` 里做 ——
-# 配置反向依赖实现是循环 import 的温床。
-#
-# 字段:
-#   id          唯一标识,前端按它选平台
-#   label       前端展示名
-#   backend     协议分支(azure / openai),决定请求头与 payload 形状
-#   url         完整 endpoint
-#   model       主模型名
-#   lite_model  子模型,逗号分隔可多个;留空则 lite 调用回退用主模型
-#   key_env     key 所在的环境变量名
-#   enabled     1/0,关闭的条目全局不可用(前端不显示、内部回退也跳过)
-#   desc        备注,仅人看
+# 每条只记 key_env,真值由 llm_key() 使用处取,故整表可安全序列化。
+# 归一化(补默认、剔 enabled=0、校验 id 唯一、拆 lite_model)在 infra/llm,免循环 import。
+# 字段:id 唯一标识 / label 展示名 / backend 协议(azure|openai) / url endpoint / model 主模型 /
+#   lite_model 子模型(逗号分隔,空则回退主模型) / key_env 环境变量名 / enabled 1|0 / desc 备注
 
 LLM_MODELS: list[dict] = [
     {
@@ -225,12 +200,10 @@ LLM_MODELS: list[dict] = [
 
 
 # ══════════════════════════════════════════════════════════════
-# 六、搜索关键词词典 —— 放最后,因为它最长且最少改
+# 六、搜索关键词词典 —— 放最后,最长且最少改
 # ══════════════════════════════════════════════════════════════
-#
-# 键 = 类别名,值 = 关键词列表。每个关键词独立搜索一次,`stars:>=MIN_STAR` 由调用方追加。
-#
-# 加一个关键词就是加一次 Search API 搜索,而发现阶段的耗时地板就是总请求数 ÷ 限流速率。
+# 键=类别,值=关键词;每个关键词独立搜一次(`stars:>=MIN_STAR` 由调用方追加)。
+# 加一个关键词=加一次 Search 请求,发现阶段耗时地板 = 总请求数 ÷ 限流速率。
 
 SEARCH_KEYWORDS: dict[str, list[str]] = {
     # ─── AI 重点方向 ───

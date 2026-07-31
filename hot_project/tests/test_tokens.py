@@ -145,7 +145,7 @@ async def test_waiter_wakes_itself_on_real_clock():
 
 
 def test_a_pool_survives_being_used_by_a_second_event_loop():
-    """`facade` 是同步门面,每个方法各起一个 `asyncio.run` —— 池必须扛得住换循环。
+    """`client` 是同步客户端,每个方法各起一个 `asyncio.run` —— 池必须扛得住换循环。
 
     `asyncio.Condition` 绑死在第一个 await 它的循环上,于是第二次调用只要有人**真的**
     等锁就 `RuntimeError: bound to a different event loop`,而且池从此报废。所以这里
@@ -394,7 +394,7 @@ def test_empty_pool_is_rejected(clock):
 
 
 async def test_lease_never_exposes_the_secret_itself(clock):
-    """租约只给请求头。token 字符串拿不到,就不会被日志或异常顺手带出去。"""
+    """租约只给请求头。token 字符串拿不到,就不会被日志或异常意外带出。"""
     pool = TokenPool(["s3cret"], time_fn=clock)
 
     async with pool.lease() as lease:

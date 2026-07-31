@@ -82,7 +82,7 @@ def score(item: dict, mode: str, w: Weights) -> float:
 
 
 def rank(candidates: dict[str, dict], mode: str, w: Weights) -> list[tuple[str, dict]]:
-    """按分数降序排全部候选,顺手把 `_score` 写回每个候选(日志和调试要看)。
+    """按分数降序排全部候选,同时把 `_score` 写回每个候选(日志和调试要看)。
 
     不截断 Top N:同一份排序结果常要按不同 top_n 复用。
     """

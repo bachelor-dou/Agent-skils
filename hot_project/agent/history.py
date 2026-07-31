@@ -127,7 +127,7 @@ class Session:
         store = self.tool_state.get("offloaded") or {}
         if not store:
             return 0
-        # 带引号比对,免得 tr1 被 tr10 蹭上
+        # 带引号比对,以免 tr1 被 tr10 误匹配
         alive = "".join(m.get("content") or "" for m in self.messages)
         orphans = [ref for ref in store if f'"{ref}"' not in alive]
         for ref in orphans:

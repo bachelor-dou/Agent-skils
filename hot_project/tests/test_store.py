@@ -105,7 +105,7 @@ def test_discover_rejects_foreign_fields(sandbox, field):
 def test_discover_does_not_touch_top_level_date(sandbox):
     """顶层 date 是旧包报告推断窗口的依据,每日任务改一次就会让它恒为 0。
 
-    新设计里没有任何函数能写它 —— 这条测试钉住「插入不会顺手改它」。
+    新设计里没有任何函数能写它 —— 这条测试钉住「插入不会附带修改它」。
     """
     sandbox({"date": "2026-07-01", "projects": {}})
     universe.insert_discovered({"a/b": {"star": 600, "created_at": "2026-01-01T00:00:00Z"}})
@@ -353,7 +353,7 @@ def test_prune_keeps_recent_and_drops_old(sandbox):
 
 
 def test_prune_only_deletes_snapshots(sandbox):
-    """目录里除了快照还可能有 .lock、.tmp 之类的东西,清理不该顺手带走它们。"""
+    """目录里除了快照还可能有 .lock、.tmp 之类的文件,清理不应一并删除它们。"""
     stale = snapshots.utc_today() - timedelta(days=400)
     with gzip.open(snapshots.path_of(stale), "wt", encoding="utf-8") as f:
         json.dump({"stars": {"a/b": 1}}, f)

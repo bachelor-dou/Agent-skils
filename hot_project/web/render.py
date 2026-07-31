@@ -129,7 +129,7 @@ def _sanitize_urls(html_text: str) -> str:
         if _is_safe_url(value):
             return match.group(0)
         # href 换成锚点(点了什么也不发生),src 只能清空 —— 给 src 塞 "#" 会让浏览器
-        # 重新请求当前页面。重写时一律补上引号,免得裸值里的空格把后面的内容拆成新属性。
+        # 重新请求当前页面。重写时一律补上引号,以免裸值中的空格把后续内容拆成新属性。
         fallback = "#" if match.group("attr").lower() == "href" else ""
         return f'{match.group("attr")}="{fallback}"'
 

@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from ...infra.exceptions import RateLimitError, RetryableError, TokenInvalidError
-from . import client as gh
+from . import request as gh
 from .tokens import CORE, SEARCH, TokenPool
 
 logger = logging.getLogger("hot_project")

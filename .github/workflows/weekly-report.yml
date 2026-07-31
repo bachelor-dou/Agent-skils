@@ -1,20 +1,13 @@
-name: weekly hot projects report
+name: weekly report
 
-# 每周榜单：读 DB 拿名单 → 实时取全库当前 star → 和快照基线相减排名 → LLM 补描述 →
-# 写报告，提交回 main。本地不再跑 cron，只需 git pull 看结果。
-#
-# 出榜不自己搜 GitHub 找新仓库（那是每日任务的活儿），但会实时取一遍全库 star：
-# 增长 =「此刻的 star − 窗口内最早那份快照」，被减数绝不用当天快照。
-#
-# 触发时间对齐原本的本机 crontab（周三 13:40 北京时间），上期实测耗时 64 分钟。
-# 分钟取 :43 避开 :00/:15/:30 的全平台定时任务高峰，排队更短。
-#
-# 与每日快照**没有时序耦合**：当前 star 现取，基线用的是几天前的历史快照，所以当天那次
-# 采集跑没跑成、几点跑的，都不影响本 job 的正确性。
+# 每周榜单:读 DB 拿名单 → 实时取全库当前 star → 减快照基线排名 → LLM 补描述 → 写报告提交回 main。
+# 增长 = 此刻 star − 窗口内最早那份快照,被减数绝不用当天快照。
+# 与每日快照无时序耦合:基线是几天前的历史快照,当天采集跑没跑成都不影响本 job。
+# 触发对齐原本机 crontab(周三 13:40 北京),分钟取 :43 避开 :00/:15/:30 高峰;上期实测 64 分钟。
 
 on:
   schedule:
-    - cron: "43 5 * * 3"
+    - cron: "43 5 * * 4"
   workflow_dispatch:
     inputs:
       top_n:
@@ -29,8 +22,7 @@ on:
 permissions:
   contents: write
 
-# 不用 pull_request_target 之类会把 secrets 暴露给 fork 的触发方式——
-# 这是公开仓库敢存 PAT 和 LLM key 的前提。
+# 绝不用 pull_request_target:公开仓库存 PAT 和 LLM key 的前提是 fork 拿不到 secrets。
 concurrency:
   group: weekly-report
   cancel-in-progress: false
@@ -39,15 +31,15 @@ jobs:
   report:
     if: github.repository == 'bachelor-dou/Agent-skils'
     runs-on: ubuntu-latest
-    # 上期 64 分钟；留足余量应对限流退避，但仍远低于 GitHub 的 6 小时上限
+    # 上期 64 分钟;留足余量应对限流退避,仍远低于 GitHub 6 小时上限
     timeout-minutes: 240
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # 检出 main：每日快照就攒在 main 上，它是增长基线的唯一来源，拿不到就出不了榜。
+          # 检出 main:每日快照攒在 main 上,是增长基线的唯一来源,拿不到就出不了榜。
           ref: main
-        # 默认浅克隆：29MB 的 Github_DB.json 只下最新一版，不拉历史
+        # 默认浅克隆:29MB 的 Github_DB.json 只下最新一版
 
       - uses: actions/setup-python@v5
         with:
@@ -59,12 +51,10 @@ jobs:
       - name: 出榜
         env:
           GITHUB_TOKENS: ${{ secrets.GH_STAR_TOKENS }}
-          # 只给 A 和 C 两个平台。
-          # 内部调用是顺序回退，两个平台=两层韧性；config 里其余平台因为 key 为空，
-          # 会被 llm_client.usable() 自动跳过，不必改 config。
+          # 只给 A、C 两个平台 = 两层顺序回退;其余平台 key 为空会被自动跳过,不必改 config。
           LLM_A_KEY: ${{ secrets.LLM_A_KEY }}
           LLM_C_KEY: ${{ secrets.LLM_C_KEY }}
-          # 没配就是空字符串，代码会跳过推送，不影响出榜
+          # 没配就是空串,代码跳过推送,不影响出榜
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
         run: |
           python -m hot_project.cron_weekly_report \
@@ -79,7 +69,7 @@ jobs:
             hot_project/report
 
       - name: 上传运行日志
-        # logs/ 不入库，失败时靠这个 artifact 排查（控制台输出只留 90 天）
+        # logs/ 不入库,失败时靠这个 artifact 排查(控制台输出只留 90 天)
         if: always()
         uses: actions/upload-artifact@v4
         with:

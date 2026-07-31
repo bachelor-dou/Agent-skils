@@ -130,7 +130,7 @@ class TaskPool:
 
         except (RetryableError, TokenInvalidError) as e:
             # 401 也归这里:租约已按 strikes 处置过了,换个 token 多半就好。但**计入**次数,
-            # 免得 token 真的集体坏掉时无限自旋。
+            # 以免 token 集体失效时无限自旋。
             if task.attempts > task.max_retries:
                 self._finish(task, err=e)
             else:

@@ -4,7 +4,7 @@
 
     步数护栏      到上限就撤掉工具,逼模型用手上的观察收口
     确认短路      昂贵工具的参数由服务端原样回显,不经模型转述 —— 用户确认的是屏幕上那份
-    流式的分轮    每轮一个独立的增量回调,本轮第一片带 reset,免得过渡话粘上最终回答
+    流式的分轮    每轮一个独立的增量回调,本轮第一片带 reset,以免过渡文本粘连到最终回答
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 import logging
 
 from ..infra import llm
-from ..provider.github import facade
+from ..provider.github import client as github
 from ..tools import Ctx, Registry, registry as default_registry
 from .history import Session
 from .prompts import SUMMARIZE_PROMPT
@@ -32,7 +32,7 @@ class Agent:
         self.llm = client or llm.get()
         self.tools = tools or default_registry()
         self.session = Session()
-        self.ctx = Ctx(gh=gh if gh is not None else facade.get(), state=self.session)
+        self.ctx = Ctx(gh=gh if gh is not None else github.shared(), state=self.session)
         self._model_id = ""
         self._lite_id = ""
         self._on_delta = None
