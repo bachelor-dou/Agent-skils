@@ -261,3 +261,38 @@ def test_without_tokens_the_tool_says_so_instead_of_crashing():
         usable = False
     name, payload = repo_tools.resolve(Ctx(gh=_NoTokens()), "a/b")
     assert name is None and "token" in payload["error"]
+
+
+# ── 收藏卡片上那句概要 ──────────────────────────────────────────────
+
+class _ReadmeGH(_FakeGH):
+    def profile(self, name, want=()):
+        return {"readme": {"text": "This project streams logs from edge devices."}}
+
+
+@pytest.fixture
+def _echo_condense(monkeypatch):
+    """把浓缩换成回声,好看清到底喂了哪一档素材进去。"""
+    monkeypatch.setattr(repo_tools.describe, "condense",
+                        lambda repos, max_chars=70: [r["description"] for r in repos])
+
+
+@pytest.mark.parametrize("saved, gh, expected", [
+    ({"gh_desc": "官方简介", "desc": "四段介绍"}, None, "官方简介"),
+    ({"desc": "四段介绍"}, None, "四段介绍"),
+    ({}, _ReadmeGH(), "This project streams logs from edge devices."),
+    ({}, None, ""),
+])
+def test_the_summary_falls_back_until_it_finds_something_to_say(
+        saved, gh, expected, _echo_condense):
+    """作者没填简介的仓库占了全库六成半,只认 gh_desc 的话收藏卡片就是一片空白。
+
+    退让顺序也是有讲究的:库里那份四段介绍不用联网、还是现成的中文,所以排在 README 前面。
+    """
+    assert repo_tools.short_desc("a/b", saved, gh) == expected
+
+
+def test_no_token_means_no_readme_lookup_rather_than_a_crash(_echo_condense):
+    class _NoTokens(_ReadmeGH):
+        usable = False
+    assert repo_tools.short_desc("a/b", {}, _NoTokens()) == ""

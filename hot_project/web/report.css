@@ -807,7 +807,8 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
 /* ── 复制 / 收藏按钮（report.js 动态挂载） ── */
 
 .content .repo-copy-btn,
-.content .repo-favorite-btn {
+.content .repo-favorite-btn,
+.content .repo-refresh-btn {
   appearance: none;
   position: relative;
   display: inline-flex;
@@ -824,7 +825,52 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   font-size: 15px;
   cursor: pointer;
   vertical-align: middle;
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease, opacity 140ms ease;
+}
+
+/* 刷新按钮默认隐身，鼠标移到该项目卡片上才淡入 —— 和侧栏收藏 ★ 一个套路，避免常驻打扰。 */
+.content .repo-refresh-btn {
+  opacity: 0;
+}
+
+.repo-detail:hover .repo-refresh-btn,
+.content .repo-refresh-btn:focus-visible {
+  opacity: 0.75;
+}
+
+.content .repo-refresh-btn:hover {
+  opacity: 1;
+  background: var(--panel-strong);
+  border-color: rgba(34, 211, 238, 0.4);
+  color: var(--ink);
+}
+
+.content .repo-refresh-btn:disabled {
+  cursor: default;
+}
+
+.content .repo-refresh-btn.is-error {
+  border-color: rgba(248, 113, 113, 0.5);
+  color: var(--danger);
+  opacity: 1;
+}
+
+.content .repo-refresh-btn.is-spinning {
+  opacity: 1;
+  color: var(--accent-a, #22d3ee);
+}
+
+.content .repo-refresh-btn.is-spinning svg {
+  animation: repo-refresh-spin 700ms linear infinite;
+}
+
+@keyframes repo-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 触摸设备无 hover：淡显常驻，保证点得到 */
+@media (hover: none) {
+  .content .repo-refresh-btn { opacity: 0.5; }
 }
 
 .content .repo-copy-btn { font-size: 0; }
@@ -1210,5 +1256,5 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   .app { display: block; padding: 0; }
   body.js-master .repo-detail { display: block !important; }
   .repo-detail { break-inside: avoid; box-shadow: none; border: 1px solid #ddd; background: #fff; }
-  .content .repo-copy-btn, .content .repo-favorite-btn { display: none; }
+  .content .repo-copy-btn, .content .repo-favorite-btn, .content .repo-refresh-btn { display: none; }
 }

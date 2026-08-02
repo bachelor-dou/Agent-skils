@@ -130,9 +130,8 @@ class Tool:
 class Ctx:
     """一次工具调用能看到的全部外部世界。
 
-    **刻意没有 `db` 字段**:DB 挂在 ctx 上供人就地改,「谁改了什么、什么时候落盘」就没人
-    说得清了。要读的工具自己 `universe.load()`,要写的走 `universe.write_*` —— 每次写都是
-    一个事务,范围写在函数名里。
+    **刻意没有 `db` 字段**:挂上去供人就地改,「谁改了什么」就没人说得清了。要读的自己
+    `universe.load()`,要写的走 `universe.write_*`,每次写都是一个事务。
     """
 
     gh: Any = None                      # provider.github 的同步客户端;None = 不联网的场景

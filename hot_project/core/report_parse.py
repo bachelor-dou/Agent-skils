@@ -47,8 +47,7 @@ class Report(NamedTuple):
 def growth_of(metadata: dict[str, str]) -> str:
     """取增长字段的值。
 
-    字段名带着窗口天数(「近7天增长」),所以只能按「含『增长』」找 —— 写死键名会在
-    窗口一改时静默返回空。
+    字段名带着窗口天数(「近7天增长」),只能按「含『增长』」找;写死键名会在窗口一改时静默返回空。
     """
     label = next((k for k in metadata if "增长" in k), "")
     return metadata.get(label, "") if label else ""

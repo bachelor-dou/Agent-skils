@@ -83,8 +83,7 @@ def _commits_line(items: list[dict]) -> str:
 def build_prompt(name: str, facts: dict, level: str = STANDARD) -> str:
     """把手上的素材拼成提示词。
 
-    `facts` 可以来自 DB(gh_desc / topics)、也可以来自实时抓取
-    (readme / releases / commits),两边字段名一致,所以调用方想混就混。
+    `facts` 可来自 DB(gh_desc / topics)或实时抓取(readme / releases / commits),字段名一致,可混。
     """
     lines = [f"项目名称: {name}", f"项目地址: https://github.com/{name}"]
     # gh_desc 是 GitHub 原文简介;short_desc 是旧数据的字段名,读时兼容。
@@ -144,8 +143,7 @@ CONDENSE_MIN_PARSED = 0.5       # 解析出的条数低于这个比例就整批�
 def condense(repos: list[dict], max_chars: int = 70) -> list[str]:
     """把一批项目的英文简介批量浓缩成中文短句。返回和输入等长。
 
-    整批一次请求(Trending 一次 75 个,逐个调是 75 次往返),代价是解析要靠序号对齐。
-    解析不出一半以上就整批回退截断原文 —— 半份结果是「一部分中文一部分英文」,更糟。
+    整批一次请求,代价是解析靠序号对齐;解析不出一半以上就整批回退截断原文。
     """
     if not repos:
         return []

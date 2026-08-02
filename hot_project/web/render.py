@@ -99,8 +99,8 @@ _URL_ATTR = re.compile(
 def _is_safe_url(url: str) -> bool:
     """只放行 http / https / mailto 与站内相对链接,`javascript:` `data:` 一律拦掉。
 
-    判之前要先 unescape 再抹掉控制字符:`java&#09;script:alert(1)` 这类写法浏览器照样当
-    javascript 协议执行,只看原串会漏(抹掉只为判断,输出仍是原串)。取不出协议的一律放行。
+    判之前先 unescape 再抹控制字符:`java&#09;script:alert(1)` 浏览器照样执行,只看原串会漏
+    (抹掉只为判断,输出仍是原串)。取不出协议的一律放行。
     """
     normalized = unescape(url or "").strip()
     if not normalized:
@@ -119,8 +119,7 @@ def _safe_href(url: str) -> str:
 def _sanitize_urls(html_text: str) -> str:
     """给渲染完的 HTML 再过一遍链接白名单。
 
-    必须放在渲染**之后**:`[x](javascript:alert(1))` 在 Markdown 原文里长得像普通链接,
-    要等 markdown 库把它变成 href 才认得出来。
+    必须放在渲染**之后**:`[x](javascript:alert(1))` 在原文里长得像普通链接,变成 href 才认得出来。
     """
 
     def replace(match: re.Match[str]) -> str:
@@ -188,8 +187,8 @@ class _Diff(NamedTuple):
 def _load_cached(name: str, mtime: float) -> report_parse.Report | None:
     """解析上一期报告,按 (文件名, mtime) 缓存。
 
-    mtime 必须进 key:同一天的报告会被重跑覆盖,只按文件名缓存就会一直拿着旧一期的排名,
-    页面上的 ↑↓ 和「上新」全是过期数据。mtime 只能当参数传进来 —— lru_cache 只认参数。
+    mtime 必须进 key(还只能当参数传,lru_cache 只认参数):同一天的报告会被重跑覆盖,
+    只按文件名缓存会一直拿着旧一期的排名。
     """
     return reports.load(name)
 
@@ -211,8 +210,7 @@ def _prev_report(
 ) -> tuple[str, report_parse.Report] | None:
     """同尾缀(同类榜)且日期更早的最近一份报告。
 
-    尾缀相同还不够,得再比一次标题前缀:重命名规则之前生成的旧文件里关键词榜和综合榜的
-    尾缀会混叠,拿它当上一期会算出一整页假的「上新」。
+    还要再比一次标题前缀:旧命名规则下关键词榜和综合榜的尾缀会混叠,拿错会算出一整页假「上新」。
     """
     m = _NAME.match(name)
     if not m:
@@ -281,8 +279,7 @@ _desc_cache: tuple[float, dict[str, str]] | None = None
 def _desc_index() -> dict[str, str]:
     """{仓库: desc},只含非空的。
 
-    DB 读不出来时退回上一份索引(没有就空):描述只是覆盖层,拿不到就让报告显示 .md 里的
-    原文,不该让整页渲染失败。
+    DB 读不出来时退回上一份索引:描述只是覆盖层,不该让整页渲染失败。
     """
     global _desc_cache
     try:
@@ -311,8 +308,7 @@ def _desc_index() -> dict[str, str]:
 def _desc_sections(desc: str) -> dict[str, str]:
     """DB 里「标题:内容」分段的 desc → {标题: 内容}。
 
-    标题限定为已知小节名,不认任何「X:」都当标题:描述正文里本来就有冒号
-    (「支持 Python:3.10 以上」),放开就会把正文切碎。
+    标题限定为已知小节名:正文里本来就有冒号(「支持 Python:3.10 以上」),放开会把正文切碎。
     """
     sections: dict[str, str] = {}
     current = ""
@@ -326,6 +322,16 @@ def _desc_sections(desc: str) -> dict[str, str]:
         elif current:
             sections[current] = f"{sections[current]} {line}".strip()
     return sections
+
+
+def section_payload(desc: str) -> list[dict]:
+    """一份 desc → 报告页那四段的 JSON,给「刷新介绍」按钮就地替换用。
+
+    切分必须和整页渲染同一套,否则刷新前后排版会不一致。
+    """
+    sections = _desc_sections(desc)
+    return [{"title": title, "paragraphs": _paragraphs(body)}
+            for title in SECTIONS if (body := sections.get(title, "").strip())]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -348,8 +354,8 @@ def _structured_html(
 ) -> tuple[str, str]:
     """返回 (详情面板集合, 侧栏项目列表)。
 
-    两块 HTML 共用同一轮计算(排名差、语言、增长、上新),所以写在一个循环里而不是两个
-    函数 —— 拆开就要把十个中间值来回传,而且两边算出不一样的结论时没人会发现。
+    两块 HTML 共用同一轮计算(排名差、语言、增长、上新),拆开就要来回传十个中间值,
+    而且两边算出不一样的结论时没人会发现。
     """
     article_parts: list[str] = []
     nav_items: list[str] = []
@@ -399,7 +405,7 @@ def _structured_html(
             content = overrides.get(title) or section["content"]
             paragraphs = _paragraphs(content) or ["暂无补充信息，可进入仓库查看 README。"]
             section_items.append(
-                '<section class="repo-panel">'
+                f'<section class="repo-panel" data-section="{escape(title)}">'
                 f'<h3 id="{anchor}-{_slug(title)}">{escape(title)}</h3>'
                 + "".join(f"<p>{escape(p)}</p>" for p in paragraphs)
                 + '</section>'
@@ -485,9 +491,8 @@ def _structured_html(
 def _summary_chips(summary: str, extra_chips: list[str] | None = None) -> str:
     """把「共 N 个项目 | 窗口: 7 天 | …」形式的摘要拆成头部信息条。
 
-    只有一段又没有附加 chip 时按整句排版:单个 chip 在页面上看着像被截断的碎片。
-
-    `extra_chips` 是已经渲染好的 HTML(上期对比统计),不再过 escape。
+    只有一段又没附加 chip 时按整句排版(单个 chip 看着像被截断的碎片)。
+    `extra_chips` 是已渲染好的 HTML,不再过 escape。
     """
     text = (summary or "").strip()
     extra = "".join(extra_chips or [])
@@ -590,8 +595,8 @@ def _structured_page(name: str, report: report_parse.Report) -> str:
 def report_html(name: str, markdown: str) -> str:
     """一份报告的完整 HTML 页面。
 
-    `name` 只用于展示和找上一期,不用来读文件 —— 原文由调用方读好传进来
-    (它已经过 `reports.resolve_name`,那才是挡路径穿越的地方)。
+    `name` 只用于展示和找上一期,不用来读文件 —— 原文由调用方读好传进来(路径穿越挡在
+    `reports.resolve_name`)。
     """
     report = report_parse.parse(markdown)
     return _structured_page(name, report) if report else _plain_page(name, markdown)

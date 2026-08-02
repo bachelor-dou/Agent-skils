@@ -55,8 +55,7 @@ def confirmation(mode: str, params: dict) -> str:
 def _keyword_pool(ctx, params: dict) -> dict[str, dict] | None:
     """关键词榜的候选名单:搜一遍,只留名字和创建时间。
 
-    不带 star —— 那是 `ranking.run` 现取的活儿,搜索结果里那个值到出榜时已经旧了。
-    `created_at` 优先用搜索结果的,DB 里那份兜底(Trending 来的条目没有它)。
+    不带 star —— 那是 `ranking.run` 现取的活儿。`created_at` 优先用搜索结果的,DB 那份兜底。
     """
     words = params.get("keywords") or []
     if not words:

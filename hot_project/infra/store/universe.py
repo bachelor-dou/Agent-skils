@@ -86,9 +86,8 @@ def _commit(tx: Tx, changed: int, what: str) -> int:
 def insert_discovered(records: dict[str, dict]) -> list[str]:
     """每日发现:把还不在 DB 里的仓库插进来,**已有条目一律不碰**。返回真正插进去的名字。
 
-    「不碰已有」不是优化而是正确性:发现阶段拿到的是搜索结果里的粗字段,一并覆盖已有条目
-    会用粗数据盖掉后来补的完整数据。想更新 star 请走 `refresh_stars`。
-    返回名字而不只是条数,是因为判重发生在事务内,「哪些是新的」只有这里知道。
+    「不碰已有」是正确性:发现阶段拿的是搜索粗字段,覆盖会盖掉后来补的完整数据。
+    更新 star 走 `refresh_stars`。判重在事务内,所以「哪些是新的」只有这里知道。
     """
     if not records:
         return []
@@ -109,9 +108,8 @@ def insert_discovered(records: dict[str, dict]) -> list[str]:
 def refresh_stars(stars: dict[str, int]) -> int:
     """覆写已有仓库的 star。不认识的仓库跳过(要入库请走 `insert_discovered`)。
 
-    **目前没有生产调用方** —— 当前 star 由快照负责,DB 里那个值是入库当天的,没人读。
-    和 `insert_discovered` 分成两个函数是因为语义正好相反(一个只准新增、一个只准更新),
-    合成一个「upsert」就等于把那条「不碰已有」的保护取消掉了。
+    **目前没有生产调用方** —— 当前 star 由快照负责。和 `insert_discovered` 分开是因为语义
+    相反,合成 upsert 就等于取消了那条「不碰已有」的保护。
     """
     if not stars:
         return 0
@@ -131,8 +129,7 @@ def refresh_stars(stars: dict[str, int]) -> int:
 def refresh_display(items: dict[str, dict]) -> int:
     """出榜前补展示字段,**仅补空**:已有值一概不动。
 
-    传进来的每条只需给你手上有的字段,缺的不用占位 —— 缺 = 这次没查到,空字符串 = 明确
-    是空的,两者都保持原值。「拿缺失当 0 写下去」造成过一次 fork 数全库清零。
+    缺的字段不用占位 —— 缺 = 这次没查到,空串 = 明确是空的。「拿缺失当 0 写」曾把全库 fork 数清零。
     """
     if not items:
         return 0
@@ -178,8 +175,7 @@ def write_descriptions(descs: dict[str, dict]) -> int:
 def evict(names: set[str] | frozenset[str]) -> list[str]:
     """删除仓库,返回真正删掉的名字(已排序)。
 
-    该删谁由 `core/evict.py` 判定,这里只执行。没有宽限期、没有保护名单:仓库重新涨过
-    门槛时下一次发现会照常把它收回来,描述也会重新生成。
+    该删谁由 `core/evict.py` 判定,这里只执行。没有宽限期和保护名单:重新涨过门槛会被再收回来。
     """
     if not names:
         return []

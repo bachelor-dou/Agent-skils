@@ -887,7 +887,7 @@
       body.innerHTML =
         '<div class="agent-progress" data-state="indeterminate">' +
           '<div class="agent-progress__head">' +
-            '<span class="agent-progress__label">模型思考中…</span>' +
+            '<span class="agent-progress__label">思考中…</span>' +
             '<span class="agent-progress__pct"></span>' +
           '</div>' +
           '<div class="agent-progress__track"><div class="agent-progress__fill"></div></div>' +

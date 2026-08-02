@@ -36,8 +36,8 @@ def resolve(
 ) -> Growth | None:
     """算一个仓库的窗口增长。算不出来返回 None —— 是「不参与」,不是零增长。
 
-    `anchor_star=None` 表示窗口内没有任何快照测到过它,`age_days=None` 表示不知道创建时间。
-    增长可以是负的,不夹到零:抹平会让「掉了 300 星」和「一点没涨」在数据上再也分不开。
+    `anchor_star=None` = 窗口内没快照测到过它,`age_days=None` = 不知道创建时间。
+    增长可以是负的,不夹到零:抹平会让「掉了 300 星」和「一点没涨」再也分不开。
     """
     if anchor_star is not None:
         return Growth(current_star - anchor_star, ANCHOR, anchor_days or window_days)

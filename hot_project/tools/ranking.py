@@ -50,8 +50,7 @@ def _emit(progress, percent: int, label: str) -> None:
 def current_stars(gh, names: list[str]) -> dict[str, int]:
     """实时取这批仓库此刻的 star。批量走任务池 + token 池,和每日采集同一条路。
 
-    只取 `stars`:「GitHub 查不到」和「这次没问到」在这里都只意味着它这轮排不了名,
-    而两者的区别只对淘汰判定有意义(见 `cron_daily_snapshot`),那不是榜单的事。
+    只取 `stars`:「查不到」和「没问到」在这里都只意味着它这轮排不了名,两者的区别只对淘汰判定有意义。
     """
     if gh is None or not getattr(gh, "usable", False):
         logger.error("没有可用的 GitHub token,取不到当前 star,本轮无从算起。")
@@ -66,8 +65,7 @@ def qualify(stars: dict[str, int], meta: dict[str, dict], base: snapshots.Baseli
             *, min_star: int, threshold: int) -> tuple[dict[str, dict], int]:
     """边算边筛:算一个增长,达标才留。返回 `(候选池, 缺基线算不出的个数)`。
 
-    低于阈值的当场丢,而不是先建一张全量表再过滤 —— 那张表 7.8 万条、几十 MB,建出来只为
-    下一行被整批扔掉。
+    低于阈值的当场丢 —— 先建全量表再过滤的话,那张表七万多条、几十 MB,建出来只为下一行扔掉。
     """
     pool: dict[str, dict] = {}
     unresolved = 0
@@ -121,8 +119,7 @@ def run(*, mode: str = "comprehensive", min_star: int = config.MIN_STAR,
         gh=None, progress=None, pool: dict[str, dict] | None = None) -> dict:
     """跑一轮榜单。返回排名结果 + 漏斗。
 
-    `pool` 给了就只在那批里排(关键词榜的搜索结果),否则排 DB 全库。它只提供名单和
-    `created_at` —— star 一律现取,不接受调用方递进来的旧值。
+    `pool` 给了就只在那批里排,否则排 DB 全库。它只提供名单和 `created_at`,star 一律现取。
     """
     _emit(progress, 5, "读取候选名单…")
     meta = universe.load() if pool is None else pool

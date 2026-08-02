@@ -46,12 +46,8 @@ def save(day: date, stars: dict[str, int], *, not_found: list[str],
          expected: int, throttle: dict | None = None) -> Path | None:
     """写当天快照。覆盖率不足则**不产生文件**并返回 None。
 
-    Args:
-        stars:    实际测到的 {full_name: star}
-        not_found: GitHub 明确查不到的名字(改名/删库/转私有),供淘汰判定用
-        expected: 本次应测的仓库总数,用来算覆盖率
-        throttle: 这一轮撞了多少次限流、等了多久。用来事后把「那天限流很重」和
-                  「代码有 bug」分开
+    `not_found` 是 GitHub 明确查不到的名字(改名/删库/转私有),供淘汰判定;`expected` 是
+    本次应测总数,用来算覆盖率;`throttle` 记这轮限流次数与等待,事后好和代码 bug 区分。
     """
     if not stars:
         logger.error("拒绝写入空快照:它会被当成「全仓库掉到 0」,污染整个窗口的增长。")
@@ -159,9 +155,8 @@ def available_dates() -> list[date]:
 class Baseline(NamedTuple):
     """窗口内每个仓库**最早**被测到的 star,以及那天到今天的实际天数。
 
-    `days` 必须逐仓给而不是给一个全局值:一个仓库可能窗口第一天就在库里(7 天),另一个
-    三天前才被发现(3 天)。拿同一个天数去除,后者的日均速率会虚高一倍多。
-    `span` 是最早那份快照的跨度,用作全轮的名义窗口(报告标题、判「窗口内新建」)。
+    `days` 必须逐仓给:拿全局天数去除会让晚进库的仓库日均速率虚高一倍多。
+    `span` 是最早那份快照的跨度,用作全轮名义窗口(报告标题、判「窗口内新建」)。
     """
 
     stars: dict[str, int]
@@ -173,11 +168,8 @@ class Baseline(NamedTuple):
 def earliest_in_window(days: int, today: date | None = None) -> Baseline:
     """一趟扫出窗口内每个仓库最早被测到的 star。
 
-    取「最早的一份」而不是「正好 T−N 那天」:三天前才进库的仓库在 T−7 的快照里没有,但
-    T−3 的有,按它算出来的是**实测下界**,比整个丢掉强。这同时顶掉了旧的锚点顺延 ——
-    漏采几天时最早那份自然往后挪,`span` 如实说明实际跨度。
-
-    今天那份不作基线:拿它当基线窗口是 0 天,增长恒为 0。
+    取「最早的一份」而不是「正好 T−N 那天」:晚进库的仓库按它算出的是**实测下界**,比整个
+    丢掉强,漏采几天时 `span` 也会如实说明实际跨度。今天那份不作基线(窗口 0 天,增长恒为 0)。
     """
     now = today or utc_today()
     floor = shift_days(now, -days)
@@ -206,10 +198,8 @@ def earliest_in_window(days: int, today: date | None = None) -> Baseline:
 def prune(keep_days: int, today: date | None = None) -> list[date]:
     """删掉早于 today − keep_days 的快照,返回被删日期。
 
-    按日期截断而非「保留最近 N 份」:漏跑几天时「最近 N 份」会一路留到 N+ 天前。
-    只认 `*.json.gz` 且日期能解析的文件 —— 同目录下的锁文件、半成品不应被一并删除。
-    `keep_days < 1` 直接拒绝:0 会把**包括今天在内**的全部快照一次删光,而快照重算不回来
-    (star 时间戳已被 GitHub 限权)。
+    按日期截断而非「保留最近 N 份」:漏跑几天时后者会一路留到 N+ 天前。只认 `*.json.gz`,
+    锁文件和半成品不动。`keep_days < 1` 拒绝:0 会把今天在内的快照删光,而快照重算不回来。
     """
     if keep_days < 1:
         raise ValueError(f"keep_days 至少为 1,收到 {keep_days} —— 这会删光全部快照")

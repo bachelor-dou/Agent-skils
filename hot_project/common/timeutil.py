@@ -60,8 +60,8 @@ def parse_day(text: str) -> date | None:
 def parse_moment(text: str) -> datetime | None:
     """把**任意一种**时间串解析成时刻。都不认返回 None。
 
-    两种形状在同一个字段位置上混着出现(`created_at` 是完整时间戳,`desc_updated_at` 是
-    日期串),所以都得认。日期串按当天 00:00 UTC 算,年龄最多虚增不到一天。
+    完整时间戳(`created_at`)和日期串(`desc_updated_at`)会混在同一个字段位置上,都得认。
+    日期串按当天 00:00 UTC 算。
     """
     return parse_stamp(text) or (
         datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)

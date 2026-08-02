@@ -31,7 +31,7 @@ from . import config
 from .common import logs
 from .infra import llm
 from .infra.store import favorites, reports, universe
-from .tools import describe
+from .tools import repo_tools
 from .web import render, security, sessions
 
 logger = logging.getLogger("hot_project")
@@ -41,7 +41,6 @@ NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache", "Expires": "0"}
 
 REPO_NAME = re.compile(r"^[\w.-]+/[\w.-]+$")
-SHORT_DESC_MAX = 60
 
 # WebSocket 空闲时的心跳间隔:反代会掐掉长时间没数据的连接,而出榜要跑几分钟。
 WS_HEARTBEAT = 15
@@ -236,6 +235,35 @@ def star_trend(repo: str):
     return trend(Ctx(), {"repo": repo})
 
 
+class DescribeIn(BaseModel):
+    repo: str
+
+
+@app.post("/api/repo-describe")
+def repo_describe(body: DescribeIn):
+    """报告卡片「刷新介绍」:重跑描述生成,落库并回传给前端就地替换。
+
+    和对话共用同一把执行锁,不让并发刷新和出榜互相抢 token。同步 `def`,理由见文件头。
+    """
+    if not REPO_NAME.match(body.repo or ""):
+        raise HTTPException(status_code=400, detail="无效的仓库名")
+    from .provider.github import client as github
+    from .tools import report
+    if not (gh := github.shared()).usable:
+        raise HTTPException(status_code=503, detail="没有可用的 GitHub token,无法刷新介绍。")
+    if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
+        logger.warning("刷新介绍等执行锁超时:%s", body.repo)
+        raise HTTPException(status_code=503, detail="系统繁忙,请稍后重试。")
+    try:
+        desc = report.regenerate(body.repo, gh)
+    finally:
+        sessions.tool_lock.release()
+    if not desc:
+        raise HTTPException(status_code=502,
+                            detail=f"生成 {body.repo} 的介绍失败(LLM 未配置或全部平台不可用)。")
+    return {"repo": body.repo, "sections": render.section_payload(desc)}
+
+
 # ── 收藏 ────────────────────────────────────────────────────────
 
 @app.get("/api/favorite-tags")
@@ -254,25 +282,18 @@ def favorite_list(user_id: str):
                           for item in favorites.get(user_id)]}
 
 
-def _short_desc(repo: str) -> str:
-    """收藏卡片上那句中文概要。和 `add_favorite` 工具同一条路径。
-
-    收藏时才生成,不在出报告时给几百个项目预生成。
-    """
-    gh_desc = (universe.load().get(repo, {}).get("gh_desc") or "").strip()
-    if not gh_desc:
-        return ""
-    return describe.condense([{"full_name": repo, "description": gh_desc}],
-                             max_chars=SHORT_DESC_MAX)[0]
-
-
 @app.post("/api/favorites")
 def favorite_update(body: FavoriteIn):
+    """概要收藏时才生成,不在出报告时给几百个项目预生成。"""
     short = None
     if body.action == "add":
-        # 用户手填的(含清空)直接用,不再花一次 LLM
-        short = (body.short_desc.strip()[:SHORT_DESC_MAX] if body.short_desc is not None
-                 else _short_desc(body.repo) or None)
+        if body.short_desc is not None:
+            # 用户手填的(含清空)直接用,不再花一次 LLM
+            short = body.short_desc.strip()[:repo_tools.FAVORITE_DESC_MAX]
+        else:
+            from .provider.github import client as github
+            saved = universe.load().get(body.repo, {})
+            short = repo_tools.short_desc(body.repo, saved, github.shared()) or None
     try:
         items = favorites.set_favorite(body.user_id, body.repo, body.action,
                                        source_report=body.source_report,
@@ -336,8 +357,8 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 async def _pump(websocket, session_id: str, message: str, run) -> str | None:
     """在线程里跑一轮对话,同时把进度和正文增量实时推出去。
 
-    连接断开**不中断 agent**:它可能正处于出榜计算的第三分钟,中断等于浪费本次运行;让它跑完,
-    回复存进待发缓冲。返回最终回复;连接已断、回复已缓存时返回 None。
+    连接断开**不中断 agent**(它可能正跑到出榜第三分钟),回复存进待发缓冲。
+    返回最终回复;连接已断、回复已缓存时返回 None。
     """
     events: queue.Queue = queue.Queue()
     DONE = object()

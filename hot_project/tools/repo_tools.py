@@ -18,6 +18,7 @@ logger = logging.getLogger("hot_project")
 
 PROFILE_README_MAX = 5000
 FAVORITE_DESC_MAX = 60
+README_FOR_SHORT_DESC = 1200     # 兜底出概要时喂给模型的 README 截断长度
 SEARCH_DEFAULT_N = 5
 SEARCH_MAX_N = 20
 DISAMBIGUATION_CANDIDATES = 5
@@ -28,8 +29,7 @@ DISAMBIGUATION_CANDIDATES = 5
 def resolve(ctx, raw: str) -> tuple[str | None, dict | None]:
     """返回 `(仓库全名, None)` 表示定位成功;`(None, 回给模型的话)` 表示要消歧或没找到。
 
-    用户可能给全名、只给项目名、拼错、或一句描述。能唯一定位就直接用,真有歧义才交回候选
-    让模型问 —— 猜错一个仓库比多问一句代价大得多。
+    能唯一定位就直接用,真有歧义才交回候选让模型问 —— 猜错一个仓库比多问一句代价大得多。
     """
     raw = (raw or "").strip()
     if not raw:
@@ -185,6 +185,21 @@ def search_repos(ctx, args: dict) -> dict:
 
 # ── add_favorite ────────────────────────────────────────────────────
 
+def short_desc(name: str, saved: dict, gh=None) -> str:
+    """收藏卡片上那句中文概要。网页 ☆ 和 add_favorite 共用这一份。
+
+    素材三档退让:GitHub 原文简介 → 库里的四段介绍 → README(多一次请求,`gh=None` 则没有)。
+    """
+    source = (saved.get("gh_desc") or "").strip() or (saved.get("desc") or "").strip()
+    if not source and gh is not None and gh.usable:
+        readme = (gh.profile(name, want=("readme",)).get("readme") or {}).get("text", "")
+        source = readme[:README_FOR_SHORT_DESC].strip()
+    if not source:
+        return ""
+    return describe.condense([{"full_name": name, "description": source}],
+                             max_chars=FAVORITE_DESC_MAX)[0]
+
+
 def add_favorite(ctx, args: dict) -> dict:
     if not favorites.valid_user_id(ctx.user_id):
         return {"error": "当前会话未登录,无法收藏。请在网页右上角登录后重试。"}
@@ -205,10 +220,7 @@ def add_favorite(ctx, args: dict) -> dict:
             "topics": info.get("topics") or [], "gh_desc": info.get("description") or ""}})
         saved = universe.load().get(name, {})
 
-    short = ""
-    if gh_desc := (saved.get("gh_desc") or "").strip():
-        short = describe.condense([{"full_name": name, "description": gh_desc}],
-                                  max_chars=FAVORITE_DESC_MAX)[0]
+    short = short_desc(name, saved, ctx.gh)
     try:
         favorites.set_favorite(ctx.user_id, name, "add", short_desc=short or None)
     except ValueError as e:

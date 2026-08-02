@@ -2,6 +2,34 @@
   "users": {
     "dou": [
       {
+        "repo": "pingdotgg/t3code",
+        "favorited_at": "2026-08-02T17:24:38Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "本地代理控制面，支持手机、Web和桌面统一操控Claude Code、Codex等智能代理。",
+        "category": "工具"
+      },
+      {
+        "repo": "lyogavin/airllm",
+        "favorited_at": "2026-08-02T15:55:48Z",
+        "source_report": "",
+        "short_desc": "支持70B大模型在单张4GB GPU上推理",
+        "category": ""
+      },
+      {
+        "repo": "tonhowtf/omniget",
+        "favorited_at": "2026-08-02T15:37:32Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "下载视频、课程及种子，支持多平台资源抓取与设备间P2P传文件。",
+        "category": "娱乐"
+      },
+      {
+        "repo": "Leonxlnx/taste-skill",
+        "favorited_at": "2026-08-02T15:18:05Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "提升 AI 前端审美，减少生成平庸通用内容",
+        "category": "前端设计"
+      },
+      {
         "repo": "JustVugg/colibri",
         "favorited_at": "2026-07-31T14:43:57Z",
         "source_report": "2026-07-29.md",

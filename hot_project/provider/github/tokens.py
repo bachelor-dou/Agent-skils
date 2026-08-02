@@ -147,8 +147,8 @@ class TokenPool:
     async def lease(self, pace: Pace = CORE) -> AsyncIterator[Lease]:
         """借一张租约:`async with pool.lease(SEARCH) as lease:`。
 
-        没有可用 token 时**等待**而不是报错 —— 限流是常态。只有全部 token 永久失效才抛
-        `AllTokensInvalid`。下面这段 try 是全代码库唯一决定「一次失败怎么记账」的地方。
+        没有可用 token 时**等待**而不是报错;全部永久失效才抛 `AllTokensInvalid`。
+        下面那段 try 是全代码库唯一决定「一次失败怎么记账」的地方。
         """
         lease = await self._acquire(pace)
         index = lease._index
@@ -170,8 +170,8 @@ class TokenPool:
     def _bind_to_running_loop(self) -> None:
         """把 `_cond` 绑到当前事件循环,必要时换新的。
 
-        `asyncio.Condition` 绑死在第一个 await 它的循环上,而 `client` 每方法各起一个 `asyncio.run`;
-        不换锁则第二次调用只要有人等锁就崩、池报废。两个循环并存时静默换锁会废掉互斥,故直接报错。
+        `asyncio.Condition` 绑死在第一个 await 它的循环上,而 client 每方法各起一个 `asyncio.run`,
+        不换锁则第二次调用有人等锁就崩。两个循环并存时静默换锁会废掉互斥,故直接报错。
         """
         loop = asyncio.get_running_loop()
         if self._cond_loop is loop:
@@ -222,8 +222,7 @@ class TokenPool:
     def _pick(self, now: float, pace: Pace) -> int | None:
         """挑一个此刻就能用的 token:在够格的里面选**最久没用过**的那个。
 
-        不能按 `ready_at` 排序 —— 限流过的 token 的 `available_at` 很大,冷却结束后仍会永远
-        排在后面;也不能取第一个够格的 —— 0 号会一直被选中、卡在自己的配速上,后面的闲着。
+        不能按 `ready_at` 排(限流过的冷却完仍永远排后面),也不能取第一个够格的(0 号会一直被选中)。
         """
         best: int | None = None
         for index, token in enumerate(self._tokens):

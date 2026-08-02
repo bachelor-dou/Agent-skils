@@ -138,8 +138,7 @@ class Session:
 def split_at_safe_boundary(messages: list[dict], keep: int) -> tuple[list[dict], list[dict]]:
     """在不产生孤儿 tool 消息的位置切开。返回 `(丢弃的, 保留的)`。
 
-    线从 `keep` 处往后推:优先推到保留段最早的 user 消息;保留段里没有 user 时只剥掉开头
-    连续的 tool 消息 —— 不漂亮但合法。
+    线优先推到保留段最早的 user 消息;没有 user 就只剥掉开头连续的 tool 消息。
     """
     old, recent = messages[:-keep], messages[-keep:]
     boundary = next((i for i, m in enumerate(recent) if m.get("role") == "user"), None)

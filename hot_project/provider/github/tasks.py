@@ -54,8 +54,8 @@ TRENDING_SOURCE = "trending"
 class Discovered:
     """三个阶段共用的收集箱。按 full_name 去重,先到先得。
 
-    `sources` 的去重口径和 `repos` **不同**:一个仓库被十个关键词搜到,`repos` 里只有一条,
-    但十个来源的集合里都有它 —— 否则「某关键词抢到几个」只反映并发下谁先跑完,量不出东西。
+    `sources` 刻意不与 `repos` 同口径:一个仓库被十个关键词搜到,十个来源里都得有它,
+    否则「某关键词抢到几个」只反映并发下谁先跑完。
     """
 
     repos: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -155,8 +155,7 @@ class SegmentPage(_SearchTask):
 class SegmentProbe(Task):
     """探一个 star 区间有多少条:装得下就直接翻页,装不下就对半劈开再探。
 
-    「装得下」= 命中数 ≤ 1000,即 Search API 一个查询能翻到的极限;超过就只能把区间切细,
-    再怎么翻页也拿不到后面的。
+    「装得下」= 命中数 ≤ 1000,即 Search API 一个查询能翻到的极限,超过就只能把区间切细。
     """
 
     lane = SEARCH_LANE

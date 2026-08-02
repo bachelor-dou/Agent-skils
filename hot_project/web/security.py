@@ -43,8 +43,8 @@ _SWEEP_THRESHOLD = 256
 def client_ip(request) -> str:
     """取真实 IP。走了反代所以要认 X-Forwarded-For 的第一段。
 
-    这个头是客户端给的,可伪造 —— 限速和黑名单都能被换头绕过。这是有意的取舍:只认
-    socket 地址的话,架了反代后全站流量会算在网关一个 IP 上。要收紧就加可信代理白名单。
+    这个头可伪造,限速和黑名单都能被换头绕过 —— 有意的取舍(只认 socket 地址的话,架了
+    反代后全站流量会算在网关一个 IP 上)。要收紧就加可信代理白名单。
     """
     if forwarded := request.headers.get("x-forwarded-for"):
         return forwarded.split(",")[0].strip()
@@ -54,8 +54,7 @@ def client_ip(request) -> str:
 def rate_limited(ip: str) -> bool:
     """这个 IP 该不该被挡。挡住返回 True,同时**不**计入本次(挡下的请求不续命窗口)。
 
-    键必须按过期删:`X-Forwarded-For` 可伪造,每换一个值就是一个新键,不回收的话一个
-    扫描器就能把这张表撑到几百万条。
+    键必须按过期删:`X-Forwarded-For` 可伪造,每换一个值就是一个新键,不回收会被撑到几百万条。
     """
     now = time.time()
     with _lock:
@@ -85,9 +84,8 @@ class Verdict(NamedTuple):
 def check(ip: str, path: str) -> Verdict | None:
     """三条规则:黑名单 → 敏感路径 → 限速。放行返回 None。
 
-    单独成函数是因为**中间件管不到 WebSocket**:starlette 的 `BaseHTTPMiddleware` 见到非
-    http 的 scope 就直接转交下一层。`/ws/chat/{id}` 是唯一能驱动 agent、真会花钱的入口,
-    必须自己调一次 check,两处共用同一份规则。
+    单独成函数是因为**中间件管不到 WebSocket**(starlette 见到非 http scope 直接转交下一层),
+    而 `/ws/chat/{id}` 是唯一能驱动 agent、真会花钱的入口,必须自己调一次。
     """
     if ip in config.SECURITY_IP_BLACKLIST:
         return Verdict(403, "Forbidden", "黑名单")
@@ -117,8 +115,8 @@ class Guard(BaseHTTPMiddleware):
 def cors_options() -> dict:
     """CORS 参数,同时拦截一个高危组合。
 
-    `allow_origins=["*"]` 配上 `allow_credentials=True` 意味着任何网站都能带着用户的
-    cookie 调这里的接口。中间件不会报错,所以这里明确降级并留一行警告。
+    `allow_origins=["*"]` 配 `allow_credentials=True` = 任何网站都能带用户 cookie 调接口;
+    中间件不报错,所以这里明确降级并留一行警告。
     """
     credentials = config.CORS_ALLOW_CREDENTIALS
     if credentials and "*" in config.CORS_ALLOWED_ORIGINS:

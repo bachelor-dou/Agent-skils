@@ -77,8 +77,8 @@ class GitHub:
     def stars(self, names: list[str]) -> gh_tasks.Harvest:
         """批量取**当前** star。榜单的被减数走这里,和每日采集是同一条路。
 
-        `Harvest` 把三种结果分开(取到 / GitHub 确认查不到 / 这次没问到),调用方不能把后两者
-        混为一谈 —— 「没问到」当成「查不到」,一次限流高峰就能让上万个活仓库集体从榜上消失。
+        `Harvest` 把「取到 / 确认查不到 / 这次没问到」分开,后两者不能混:一次限流高峰就能
+        让上万个活仓库集体从榜上消失。
         """
         if not names:
             return gh_tasks.Harvest()

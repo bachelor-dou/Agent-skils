@@ -313,6 +313,70 @@
   const setButtonState = window.HotCommon.applyRepoCopyState;
   const copyText = window.HotCommon.copyText;
 
+  // 经典「圆环带箭头」刷新图标（Feather rotate-cw），描边跟随文字色。
+  const REFRESH_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M23 4v6h-6"></path>' +
+    '<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
+
+  // 段落已由后端按整页渲染的规则切好。只用 textContent 写入：内容是 LLM 生成的外部文本，
+  // 走 innerHTML 就是开一个 XSS 口子。段名对不上的面板跳过。
+  function applySections(detail, sections) {
+    const panels = Array.prototype.slice.call(detail.querySelectorAll(".repo-panel"));
+    (sections || []).forEach(function (item) {
+      if (!item || !item.title || !(item.paragraphs || []).length) {
+        return;
+      }
+      const target = panels.filter(function (panel) {
+        return panel.getAttribute("data-section") === item.title;
+      })[0];
+      if (!target) {
+        return;
+      }
+      target.querySelectorAll("p").forEach(function (p) {
+        p.remove();
+      });
+      item.paragraphs.forEach(function (text) {
+        const p = document.createElement("p");
+        p.textContent = String(text);
+        target.appendChild(p);
+      });
+    });
+  }
+
+  async function refreshDescription(button) {
+    const repo = button.getAttribute("data-repo") || "";
+    const detail = button.closest(".repo-detail");
+    // 转圈期间再点无效：LLM 一轮要几秒到几十秒，连点只会排队重复消耗 token。
+    if (!repo || !detail || button.classList.contains("is-spinning")) {
+      return;
+    }
+    button.classList.remove("is-error");
+    button.classList.add("is-spinning");
+    button.disabled = true;
+    try {
+      const resp = await fetch("/api/repo-describe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: repo }),
+      });
+      if (!resp.ok) {
+        throw new Error("describe failed");
+      }
+      const data = await resp.json();
+      applySections(detail, data && data.sections);
+    } catch (_e) {
+      button.classList.add("is-error");
+      window.setTimeout(function () {
+        button.classList.remove("is-error");
+      }, 1600);
+    } finally {
+      button.classList.remove("is-spinning");
+      button.disabled = false;
+    }
+  }
+
   function setFavoriteButtonState(button, repo) {
     const favorited = favoritesApi && favoritesApi.isFavorite(repo);
     const idleMessage = favorited ? "取消收藏 " + repo : "收藏 " + repo;
@@ -347,6 +411,18 @@
       setFavoriteButtonState(favBtn, repo);
       heading.appendChild(document.createTextNode(" "));
       heading.appendChild(favBtn);
+    }
+
+    if (!heading.querySelector(".repo-refresh-btn")) {
+      const refreshBtn = document.createElement("button");
+      refreshBtn.type = "button";
+      refreshBtn.className = "repo-refresh-btn";
+      refreshBtn.setAttribute("data-repo", repo);
+      refreshBtn.setAttribute("title", "刷新四段介绍");
+      refreshBtn.setAttribute("aria-label", "刷新 " + repo + " 的介绍");
+      refreshBtn.innerHTML = REFRESH_SVG;
+      heading.appendChild(document.createTextNode(" "));
+      heading.appendChild(refreshBtn);
     }
   });
 
@@ -424,6 +500,12 @@
       if (repo && favoritesApi) {
         favoritesApi.toggle(repo, button);
       }
+    });
+  });
+
+  container.querySelectorAll(".repo-refresh-btn").forEach(function (button) {
+    button.addEventListener("click", function () {
+      refreshDescription(button);
     });
   });
 })();

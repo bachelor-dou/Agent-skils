@@ -114,8 +114,7 @@ class LLMClient:
     def text(self, prompt: str, **kwargs) -> str:
         """单轮问答,只要正文。失败或空回复返回空串。
 
-        内部调用(描述生成、批量浓缩)都是这个形状,取值链只在这里写一次 —— 抄错一处
-        就是静默返回空描述。
+        取值链只在这里写一次 —— 抄错一处就是静默返回空描述。
         """
         data = self.chat([{"role": "user", "content": prompt}], **kwargs)
         if not data:
@@ -126,8 +125,7 @@ class LLMClient:
              timeout: int = 20) -> bool:
         """预检:给选中的模型发一次极小请求,确认链路真的通。
 
-        `max_tokens` 留足余量 —— reasoning 模型思考也吃输出配额,给太小会回一段空正文,
-        看起来就像「这个模型不可用」。
+        `max_tokens` 留足余量 —— reasoning 模型思考也吃输出配额,给太小会回空正文。
         """
         return self.chat(
             [{"role": "user", "content": "ping"}],

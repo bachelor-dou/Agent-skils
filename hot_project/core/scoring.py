@@ -45,9 +45,8 @@ def burst_boost(growth: int, recent_growth: int | None, w: Weights, *,
                 window_days: int | None = None, recent_days: int | None = None) -> float:
     """最近爆发加成:加速比 = 最近速率 / 整窗平均速率,大于 1 给加成,小于 1 不扣分。
 
-    `recent_growth` 缺失时返回 1.0 —— 探针失效时榜单该退化成纯基础分,而不是全场一起挨罚。
-    **两个分母必须都是各自基线的实际天数**(逐仓给,缺了才退回 `w` 里的全局值),否则速率
-    虚高,凭空造出一场「爆发」:晚进库的仓库基线只有 3 天,按 7 天摊就是 2.3 倍的假加速。
+    `recent_growth` 缺失返回 1.0(探针失效该退化成纯基础分)。**两个分母必须是各自基线的
+    实际天数**,否则速率虚高造出假爆发:基线只有 3 天的仓库按 7 天摊就是 2.3 倍假加速。
     """
     if recent_growth is None or recent_growth < 0 or growth <= 0:
         return 1.0

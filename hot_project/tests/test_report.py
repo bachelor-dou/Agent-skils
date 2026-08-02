@@ -5,13 +5,17 @@
 只是报告"不是结构化榜单"。单看任何一边的测试都发现不了。
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from hot_project import config
 from hot_project import cron_weekly_report as weekly
+from hot_project.common.timeutil import format_day, utc_today
 from hot_project.core import report_parse
 from hot_project.infra.store import reports
 from hot_project.tools import report
+from hot_project.web import render
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +106,35 @@ def test_both_kinds_of_colon_are_accepted():
     """模型中英文冒号混着写,只认一种会让一半的字段解析不出来。"""
     assert report._extract("项目定位与用途: 半角冒号\n")["项目定位与用途"] == "半角冒号"
     assert report._extract("项目定位与用途：全角冒号\n")["项目定位与用途"] == "全角冒号"
+
+
+def test_the_refresh_button_regenerates_even_when_the_cache_is_not_stale(monkeypatch):
+    """报告页那个刷新按钮走的就是这条路,靠 `force` 越过缓存。
+
+    `force` 要是不起作用,表现是按钮转一圈、内容一字没变 —— 看着像模型又写了个差不多的,
+    没人会当成 bug 报上来。
+    """
+    fresh = {"openai/whisper": {"desc": "旧介绍", "desc_updated_at": format_day(utc_today())}}
+    monkeypatch.setattr(report.describe, "describe", lambda *a, **k: "新介绍")
+    gh = SimpleNamespace(profiles=lambda names, want=(): {n: {} for n in names})
+
+    ready, writeback = report.descriptions([("openai/whisper", {})], fresh, gh=gh)
+    assert ready["openai/whisper"] == "旧介绍" and not writeback
+
+    ready, writeback = report.descriptions([("openai/whisper", {})], fresh, gh=gh, force=True)
+    assert ready["openai/whisper"] == "新介绍"
+    assert writeback["openai/whisper"]["desc"] == "新介绍"
+
+
+def test_the_refreshed_sections_are_split_the_same_way_the_page_renders_them():
+    """刷新按钮回传的分段必须和整页渲染逐字一致,否则点完刷新与刷新页面看到的排版不同。"""
+    desc = ("项目定位与用途:一个语音识别模型。\n续行不能丢。\n"
+            "解决的问题:多语言转写。\n"
+            "核心依赖与生态:模型多写的字段,报告页不展示它。\n")
+    payload = render.section_payload(desc)
+
+    assert [s["title"] for s in payload] == ["项目定位与用途", "解决的问题"]
+    assert payload[0]["paragraphs"] == ["一个语音识别模型。 续行不能丢。"]
 
 
 def test_a_missing_description_falls_back_to_metadata_not_a_blank_section():

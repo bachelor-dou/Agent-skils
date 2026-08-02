@@ -14,8 +14,7 @@ from typing import Any, Callable, ClassVar, NamedTuple
 class Ctx(NamedTuple):
     """worker 递给任务的执行上下文。
 
-    `submit` 显式传进来而不是让任务持有池引用:任务只能**提交**,不能启停池子、
-    不能读队列长度、不能改并发度。
+    `submit` 显式传进来而不是让任务持有池引用:任务只能**提交**,不能启停池子或改并发度。
     """
 
     token: Any                      # 租约对象;`needs_token = False` 的任务拿到 None

@@ -21,8 +21,7 @@ def csv_list(name: str) -> list[str]:
 def truthy(value: object) -> bool:
     """字符串或其它值 → 布尔,口径与环境变量一致。
 
-    裸 `bool()` 会把字符串 `"0"` 判成真,于是手写配置里 `"enabled": "0"` 的平台照样被调用,
-    还不报错,只是账单上多一笔。
+    裸 `bool()` 会把字符串 `"0"` 判成真,于是 `"enabled": "0"` 的平台照样被调用,还不报错。
     """
     if isinstance(value, str):
         return value.strip().lower() in _TRUE_VALUES

@@ -83,8 +83,7 @@ def set_favorite(user_id: str, repo: str, action: str, *,
                  category: str | None = None) -> list[dict]:
     """add / remove 单个收藏,返回更新后的清单。非法输入抛 `ValueError`。
 
-    `short_desc` 与 `category` 同语义:`None` = 不改动(新增时存空串),
-    字符串(含 `""`)= 覆盖,其中 `""` 表示清空 / 归到未分类。
+    `short_desc` 与 `category` 同语义:`None` = 不改动(新增时存空串),字符串(含 `""`)= 覆盖。
     """
     if not valid_user_id(user_id):
         raise ValueError("invalid user_id")

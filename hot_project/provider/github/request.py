@@ -41,10 +41,8 @@ def build_client(timeout: float = 90.0) -> httpx.AsyncClient:
 def _reset_at(headers) -> float:
     """从响应头推算限流何时解除。
 
-    `Retry-After` 优先:二级限流时两个头会同时在,且给的时间不同 —— 实测 retry-after=60
-    而 X-RateLimit-Reset 只有 38 秒后(那是**主**限额那一分钟的窗口,与这次被拒无关)。
-    先读 reset 就会早 22 秒重试,撞进还没结束的罚时里。GitHub 明说被限流期间继续发请求
-    「may result in the banning of your integration」,所以这里宁可多等。
+    `Retry-After` 优先:二级限流时两个头同时在且不一致(实测 60s vs 38s,后者是**主**限额
+    那一分钟的窗口),先读 reset 会提前重试、撞进没结束的罚时,GitHub 明说这可能导致封号。
     """
     for key, absolute in (("Retry-After", False), ("X-RateLimit-Reset", True)):
         raw = headers.get(key)
@@ -63,8 +61,7 @@ def _reset_at(headers) -> float:
 def _limit_reason(resp: httpx.Response) -> str:
     """403/429 是主限额耗尽还是二级限流 —— 两者处置不同,先把证据记进日志。
 
-    主限额:`x-ratelimit-remaining: 0`,只是这个 token 这一分钟用完了。
-    二级限流:GitHub 在正文里明说,按认证身份计,且不保证 reset 头适用。
+    主限额看 `x-ratelimit-remaining: 0`;二级限流 GitHub 在正文里明说,且不保证 reset 头适用。
     """
     kind = ("二级限流" if "secondary rate limit" in resp.text[:500].lower()
             else "主限额耗尽" if resp.headers.get("x-ratelimit-remaining") == "0"
@@ -77,8 +74,7 @@ def _limit_reason(resp: httpx.Response) -> str:
 def _classify(resp: httpx.Response) -> None:
     """HTTP 状态 → 异常。**全项目只有这一处做这个翻译。**
 
-    分类决定任务池怎么处置(见 `infra/tasks/pool.py`):401 记 strike、403/429 冷却 token、
-    5xx 退避重试、4xx 当场失败不重排。
+    分类决定任务池怎么处置:401 记 strike、403/429 冷却 token、5xx 退避重试、4xx 当场失败。
     """
     code = resp.status_code
     if code == 200:
@@ -142,8 +138,8 @@ async def search_count(client: httpx.AsyncClient, lease: Lease, query: str) -> i
 def _body(resp: httpx.Response) -> dict:
     """解响应体。解不开算**可重试**,不是永久失败。
 
-    截断的响应体或网关的 HTML 错误页会让 `resp.json()` 抛 ValueError,不包住就会落进任务池的
-    兜底 `except Exception` 被当成代码 bug 而不重试 —— 一次瞬时故障就永久少一段或少 100 个仓库。
+    截断的响应或网关 HTML 错误页会让 `resp.json()` 抛 ValueError,不包住会落进任务池的兜底
+    `except Exception` 被当成代码 bug 而不重试。
     """
     try:
         return resp.json()
@@ -154,8 +150,7 @@ def _body(resp: httpx.Response) -> dict:
 def _star_query(names: list[str]) -> str:
     """把一批 owner/repo 拼成别名查询。
 
-    owner 与 name 必须 `json.dumps` 转义(仓库名里的引号会把查询拼坏);别名用序号而不是
-    仓库名 —— GraphQL 别名不允许出现 `-`、`.` 这些字符。
+    owner 与 name 必须 `json.dumps` 转义(引号会把查询拼坏);别名用序号 —— GraphQL 别名不许有 `-`、`.`。
     """
     parts = []
     for i, full_name in enumerate(names):
@@ -172,9 +167,8 @@ async def fetch_stars(
 ) -> dict[str, int] | None:
     """批量取 star。
 
-    返回 dict —— **键缺失意味着 GitHub 确认查不到那个仓库**(已删除/改名/转私有),这是淘汰
-    判定的依据,不能把「我们没问到」混进来。
-    返回 None —— 整批全 null 的退化响应,调用方应对半拆开重来,**绝不可当成「都没了」**。
+    键缺失 = **GitHub 确认查不到**(已删/改名/转私有),是淘汰判定的依据,不能混进「没问到」。
+    返回 None = 整批全 null 的退化响应,应对半拆开重来,**绝不可当成「都没了」**。
     """
     resp = await _send(client.post(
         GRAPHQL_URL, headers=lease.graphql_headers, json={"query": _star_query(names)},

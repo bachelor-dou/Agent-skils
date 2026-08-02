@@ -78,8 +78,7 @@ def _blocks(text: str) -> list[str]:
 def _extract(text: str) -> dict[str, str]:
     """从 LLM 输出里按字段名切出四段。中英文冒号都认,两种它都会写。
 
-    遇到没要求的字段名(模型爱加「核心依赖与生态」)要**停止**往上一段追加,否则多出来
-    的几百字会全部粘在最后一段尾巴上。
+    遇到没要求的字段名(模型爱加「核心依赖与生态」)要**停止**追加,否则几百字会粘在最后一段尾巴上。
     """
     found: dict[str, str] = {}
     current = ""
@@ -149,8 +148,7 @@ def _sections(name: str, saved: dict, prose: str, new_window: int) -> list[tuple
 def _needs_llm(saved: dict) -> bool:
     """没描述、或描述过期了就要重生成。
 
-    没有时间戳的旧数据**不**算过期 —— 否则全库描述会一次性判定失效,一轮重刷几百个。
-    调用方给它盖上今天的日期,之后按正常周期轮转。
+    没有时间戳的旧数据**不**算过期,否则全库描述会一次性失效、一轮重刷几百个。
     """
     if not saved.get("desc"):
         return True
@@ -160,11 +158,12 @@ def _needs_llm(saved: dict) -> bool:
 
 
 def descriptions(ranked: list[tuple[str, dict]], saved_by_name: dict[str, dict],
-                 gh=None, progress=None) -> tuple[dict[str, str], dict[str, dict]]:
+                 gh=None, progress=None,
+                 force: bool = False) -> tuple[dict[str, str], dict[str, dict]]:
     """给每个项目备好描述。返回 `(名字 → 描述, 要写回 DB 的条目)`。
 
-    这个模块自己不碰库,写回与否交给调用方。素材先一次性批量抓完再逐个调 LLM —— 抓取
-    能并发、LLM 只能串行,混在一个循环里会让每个项目白等一次网络往返。
+    不碰库,写回交给调用方。素材先批量抓完再逐个调 LLM(抓取能并发、LLM 只能串行)。
+    `force` 连没过期的也重生成。
     """
     today = format_day(utc_today())
     ready: dict[str, str] = {}
@@ -173,7 +172,7 @@ def descriptions(ranked: list[tuple[str, dict]], saved_by_name: dict[str, dict],
 
     for name, _ in ranked:
         saved = saved_by_name.get(name, {})
-        if _needs_llm(saved):
+        if force or _needs_llm(saved):
             todo.append(name)
             continue
         ready[name] = saved["desc"]
@@ -198,6 +197,17 @@ def descriptions(ranked: list[tuple[str, dict]], saved_by_name: dict[str, dict],
             ready.setdefault(name, "")
     logger.info("描述生成完成:%d/%d 成功。", sum(1 for n in todo if ready.get(n)), len(todo))
     return ready, writeback
+
+
+def regenerate(name: str, gh) -> str:
+    """重写一个仓库的介绍并落库,返回新正文;失败返回空串,库里那份不动。
+
+    报告页手动刷新按钮用。走 `descriptions` 同一条路,只是强制越过缓存。
+    """
+    ready, writeback = descriptions([(name, {})], universe.load(), gh=gh, force=True)
+    if writeback:
+        universe.write_descriptions(writeback)
+    return (ready.get(name) or "").strip()
 
 
 # ── 组装 ────────────────────────────────────────────────────────────

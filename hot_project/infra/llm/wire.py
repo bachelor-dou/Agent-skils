@@ -67,8 +67,8 @@ _LEAK_KEYS = ('"tool_uses"', '"recipient_name"', '"tool_calls"', '"parameters"')
 def strip_leaked_toolcall(text: str) -> str | None:
     """剥掉正文开头那段疑似工具调用泄漏的 JSON。
 
-    三态返回,流式那边靠它决定要不要继续缓冲:剥完的余文 / 原文(不含泄漏特征,答案本来
-    就以 JSON 开头,不能动)/ None(花括号还没闭合,判不了)。
+    三态,流式靠它决定要不要继续缓冲:剥完的余文 / 原文(不含泄漏特征,不能动)/
+    None(花括号未闭合,判不了)。
     """
     s = text.lstrip()
     if not s.startswith("{"):
@@ -103,8 +103,8 @@ def strip_leaked_toolcall(text: str) -> str | None:
 def merge_toolcall_fragment(acc: dict, frag: dict) -> None:
     """把一个流式 tool_call 增量片段按 index 合并进累加器。
 
-    首片带 id/type/name,后续片只带 arguments 的一截,要按 index 拼。同一 chunk 里出现
-    重复 index(vLLM 推测解码会这么发)必须落进同一槽位,不能各成一项。
+    首片带 id/type/name,后续片只带 arguments 的一截。同一 chunk 里重复的 index
+    (vLLM 推测解码会这么发)必须落进同一槽位,不能各成一项。
     """
     slot = acc.setdefault(frag.get("index", 0),
                           {"id": "", "type": "function",
@@ -123,8 +123,7 @@ def merge_toolcall_fragment(acc: dict, frag: dict) -> None:
 class _HeadGate:
     """正文开头的闸门:只拦「以 `{` 起头、疑似工具泄漏」的那一段。
 
-    散文和 Markdown 零延迟放行 —— 一律缓冲到能判定为止的话,每个回答的首字延迟都要为
-    这个罕见情况买单。
+    散文和 Markdown 零延迟放行,否则每个回答的首字延迟都要为这个罕见情况买单。
     """
 
     def __init__(self, emit) -> None:

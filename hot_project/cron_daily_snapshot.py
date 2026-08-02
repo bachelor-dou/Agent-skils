@@ -100,8 +100,7 @@ TOP_SOURCES_LOGGED = 15
 def phase_yield(sources: dict[str, set[str]], fresh: set[str]) -> tuple[int, int, int]:
     """三个发现阶段(关键词 / 星段 / Trending)各命中多少个新仓库。
 
-    一个仓库可被多个阶段同时搜到,计数会重叠、相加可大于去重总数 —— 这里要的是「每个阶段
-    单独能捞到多少新货」,不是把新增瓜分到某一个阶段,所以不去重。
+    一个仓库可被多阶段搜到,计数刻意重叠、相加可大于去重总数:要的是「每个阶段单独能捞到多少」。
     """
     def hit(match) -> int:
         seen: set[str] = set()
@@ -194,9 +193,8 @@ def decide(
 ) -> Eviction:
     """算出这一轮该淘汰谁。纯函数,不碰盘。
 
-    「GitHub 确认查不到」和「我们这次没问到」在快照里长得一样,把后者当前者,一次限流高峰
-    就能删掉成千上万个活仓库 —— 所以 `confirmed_missing` 必须由调用方从成功的响应里显式
-    传入,既不在 `stars` 也不在它里面的一律不动。
+    `confirmed_missing` 必须由调用方从成功响应里显式传入,既不在 `stars` 也不在它里面的
+    一律不动 —— 把「没问到」当「查不到」,一次限流高峰就能删掉上万个活仓库。
     """
     return Eviction(
         missing=sorted(confirmed_missing & tracked),

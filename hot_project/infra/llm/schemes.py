@@ -61,8 +61,7 @@ def _lite_names(raw: object) -> list[str]:
 def build(catalog: list[dict], resolve_key) -> list[Scheme]:
     """模型目录 → 方案表。`resolve_key(env_name) -> str` 负责把机密取进来。
 
-    `enabled=0` 和缺 id 的条目直接不出现。id 撞车**报错**而不是后来居上 —— 它是整条
-    选择链路的键,重复会让「选 A 却调到 B」静默发生。
+    `enabled=0` 和缺 id 的条目不出现。id 撞车**报错**:它是选择链路的键,重复会让「选 A 调到 B」静默发生。
     """
     out: list[Scheme] = []
     seen: set[str] = set()

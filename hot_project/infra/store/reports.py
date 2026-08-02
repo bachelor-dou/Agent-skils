@@ -117,8 +117,7 @@ def load(name: str) -> report_parse.Report | None:
 def load_all() -> list[tuple[Listed, report_parse.Report]]:
     """全部能解析的报告,按日期升序。`star_trend` 用它拼时间序列。
 
-    同一天有多份时只留第一份 —— 时间序列一天只能有一个点,混进来会让同一周出现两个
-    互相矛盾的 star 值。
+    同一天有多份时只留第一份:时间序列一天只能有一个点。
     """
     out: list[tuple[Listed, report_parse.Report]] = []
     seen: set[date] = set()
@@ -134,9 +133,8 @@ def load_all() -> list[tuple[Listed, report_parse.Report]]:
 def appearance_counts() -> tuple[dict[str, int], int]:
     """每个项目上过多少期**定时周报**,以及周报总期数。
 
-    只数没有后缀的 `{日期}.md`,那是 cron 每周产出的标准综合榜:带后缀的都是有人临时跑
-    出来的,计进去会让「上榜 3/5 期」随临时查询虚高,而分母不跟着涨。
-    分子分母走同一次遍历,保证口径一致。
+    只数没有后缀的 `{日期}.md`(cron 每周产出的标准综合榜):带后缀的是临时跑的,计进去
+    会让分子虚高而分母不涨。分子分母走同一次遍历。
     """
     counts: dict[str, int] = {}
     total = 0
