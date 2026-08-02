@@ -2,6 +2,27 @@
   "users": {
     "dou": [
       {
+        "repo": "JustVugg/colibri",
+        "favorited_at": "2026-07-31T14:43:57Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "在25GB内存的消费级机器上运行GLM-5.2 744B MoE模型，纯C实现，专家从磁盘流式加载。",
+        "category": ""
+      },
+      {
+        "repo": "virgiliojr94/book-to-skill",
+        "favorited_at": "2026-07-31T14:43:09Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "将技术书PDF转为Claude Code技能，便于学习、查阅和工作中使用",
+        "category": "工具"
+      },
+      {
+        "repo": "bradautomates/claude-video",
+        "favorited_at": "2026-07-31T14:37:45Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "让 Claude 观看视频并自动下载、抽帧、转写后分析。",
+        "category": "工具"
+      },
+      {
         "repo": "alibaba/open-code-review",
         "favorited_at": "2026-07-30T13:15:21Z",
         "source_report": "2026-07-29.md",
@@ -96,12 +117,6 @@
         "favorited_at": "2026-07-19T12:43:13Z",
         "source_report": "2026-07-15.md",
         "short_desc": "供 AI 读写并自动化处理 Word、Excel、PPT"
-      },
-      {
-        "repo": "JustVugg/colibri",
-        "favorited_at": "2026-07-17T01:47:03Z",
-        "source_report": "2026-07-15.md",
-        "short_desc": "低依赖C语言大模型推理引擎，支持超大模型本地运行"
       },
       {
         "repo": "multica-ai/multica",
