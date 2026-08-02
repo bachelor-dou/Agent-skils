@@ -22,7 +22,7 @@ MIN_STAR: int = 400
 STAR_GROWTH_THRESHOLD: int = 1100
 
 # 星段扫描上限,仅每日发现阶段用;
-MAX_STAR: int = 4000
+MAX_STAR: int = 12000
 
 # ── 窗口与数量 ──
 
