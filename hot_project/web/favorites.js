@@ -292,7 +292,8 @@
     if (!it) {
       return "";
     }
-    const tag = await chooseTag(anchorEl, it.category || "");
+    const cur = it.category || "";
+    const tag = await chooseTag(anchorEl, cur, cur !== "");
     if (tag === null) {
       return it.category || "";
     }
@@ -367,7 +368,9 @@
     pop.style.top = Math.max(8, top) + "px";
   }
 
-  function chooseTag(anchorEl, current) {
+  // allowNone:是否给"未分类"这颗。新收藏时它是"先收着不分类"的确认键；
+  // 改分类时只有本来带分类的才需要它来清空,已经在未分类里的点它等于没点。
+  function chooseTag(anchorEl, current, allowNone) {
     return new Promise(function (resolve) {
       closePicker();
       const cur = cleanTag(current);
@@ -378,11 +381,12 @@
         return '<button type="button" class="tag-picker__chip' + on +
           '" data-tag="' + escHtml(t) + '">' + escHtml(t) + "</button>";
       }).join("");
+      const noneChip = allowNone === false ? "" :
+        '<button type="button" class="tag-picker__chip tag-picker__chip--none' +
+        (cur === "" ? " is-active" : "") + '" data-tag="">未分类</button>';
       pop.innerHTML =
         '<div class="tag-picker__title">选择分类</div>' +
-        '<div class="tag-picker__chips">' + chips +
-          '<button type="button" class="tag-picker__chip tag-picker__chip--none' +
-          (cur === "" ? " is-active" : "") + '" data-tag="">未分类</button>' +
+        '<div class="tag-picker__chips">' + chips + noneChip +
         "</div>" +
         '<form class="tag-picker__custom">' +
           '<input type="text" class="tag-picker__input" placeholder="自定义标签…" maxlength="' +
