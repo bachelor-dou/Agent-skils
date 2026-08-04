@@ -73,30 +73,45 @@ def _resolved(ctx, args: dict):
 
 # ── repo_growth ─────────────────────────────────────────────────────
 
+def live_growth(name: str, gh, days: int) -> dict:
+    """实时 star 减窗口内最早那份快照。agent 的 repo_growth 和报告页刷新按钮共用这一份。
+
+    `star=None` 是取不到当前 star,`growth=None` 是缺基线**算不出**(不是涨了 0);
+    `growth_calc_days` 是实际跨度,可能小于请求的 `days`。
+    """
+    info = gh.info(name) or {}
+    star = info.get("stargazers_count")
+    out = {"star": star, "growth": None, "growth_basis": "", "growth_calc_days": days}
+    if star is None:
+        return out
+
+    base = snapshots.earliest_in_window(days)
+    result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
+                                 age_days(info.get("created_at", "")), base.span)
+    if result is not None:
+        out.update(growth=result.value, growth_basis=result.basis,
+                   growth_calc_days=result.window_days)
+    return out
+
+
 def repo_growth(ctx, args: dict) -> dict:
     name, payload = _resolved(ctx, args)
     if payload is not None:
         return payload
 
     days = args.get("growth_calc_days", config.GROWTH_CALC_DAYS)
-    info = ctx.gh.info(name) or {}
-    star = info.get("stargazers_count")
-    if star is None:
+    got = live_growth(name, ctx.gh, days)
+    if got["star"] is None:
         return {"error": f"拿不到 {name} 的当前 star。"}
-
-    base = snapshots.earliest_in_window(days)
-    result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
-                                 age_days(info.get("created_at", "")), base.span)
-    if result is None:
-        return {"repo": name, "star": star, "growth": None,
+    if got["growth"] is None:
+        return {"repo": name, "star": got["star"], "growth": None,
                 "message": f"最近 {days} 天的快照里一次都没测到过 {name}(多半是它刚进库),"
                            "这个窗口算不出增长 —— 不要当成零增长,过一天有了基线就能算。"}
 
-    out = {"repo": name, "star": star, "growth": result.value,
-           "growth_basis": result.basis, "growth_calc_days": result.window_days}
-    if result.window_days != days:
-        out["note"] = (f"它最早的基线只到 {result.window_days} 天前,"
-                       f"所以这是 {result.window_days} 天的增长(请求的是 {days} 天)。")
+    out = {"repo": name, **got}
+    if got["growth_calc_days"] != days:
+        out["note"] = (f"它最早的基线只到 {got['growth_calc_days']} 天前,"
+                       f"所以这是 {got['growth_calc_days']} 天的增长(请求的是 {days} 天)。")
     return out
 
 

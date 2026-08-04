@@ -2,6 +2,13 @@
   "users": {
     "dou": [
       {
+        "repo": "mattpocock/skills",
+        "favorited_at": "2026-08-04T12:22:02Z",
+        "source_report": "2026-07-29.md",
+        "short_desc": "为真实工程师提供的技能集合，来自 .agents 目录",
+        "category": "SKILL"
+      },
+      {
         "repo": "block/buzz",
         "favorited_at": "2026-08-04T10:18:59Z",
         "source_report": "2026-07-29.md",

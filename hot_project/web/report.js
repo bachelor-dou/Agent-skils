@@ -336,6 +336,44 @@
     });
   }
 
+  function thousands(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  // 报告里的数字是出榜那天的；刷新后换成此刻的实时值，标签上注明跨度和刷新时间
+  function applyStats(detail, data) {
+    if (!data || typeof data.star !== "number") {
+      return;
+    }
+    const stamp = new Date().toLocaleTimeString("zh-CN", {
+      hour: "2-digit", minute: "2-digit",
+    });
+    const starVal = detail.querySelector(".repo-stat--star .repo-stat__value");
+    if (starVal) {
+      starVal.textContent = thousands(data.star);
+      starVal.setAttribute("title", "刷新于 " + stamp);
+    }
+    const growth = detail.querySelector(".repo-stat--growth");
+    if (!growth || typeof data.growth !== "number") {
+      return;
+    }
+    const days = data.growth_calc_days;
+    const label = growth.querySelector(".repo-stat__label");
+    const value = growth.querySelector(".repo-stat__value");
+    if (label && days) {
+      label.textContent = "近" + days + "天增长";
+    }
+    if (value) {
+      value.textContent = (data.growth >= 0 ? "+" : "-") + thousands(Math.abs(data.growth));
+      value.setAttribute("title", "刷新于 " + stamp + "：当前 star 减 " + days + " 天前的快照");
+    }
+    const chip = document.querySelector(
+      '.repo-nav__item[data-repo="' + (data.repo || "").replace(/"/g, "") + '"] .repo-nav__growth');
+    if (chip) {
+      chip.textContent = value ? value.textContent : chip.textContent;
+    }
+  }
+
   async function refreshDescription(button) {
     const repo = button.getAttribute("data-repo") || "";
     const detail = button.closest(".repo-detail");
@@ -356,6 +394,7 @@
       }
       const data = await resp.json();
       applySections(detail, data && data.sections);
+      applyStats(detail, data);
     } catch (_e) {
       button.classList.add("is-error");
       window.setTimeout(function () {

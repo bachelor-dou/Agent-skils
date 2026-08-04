@@ -145,6 +145,35 @@ def test_changing_the_category_neither_costs_an_llm_call_nor_eats_the_summary(
     assert generated == []
 
 
+def test_refreshing_a_card_also_refreshes_its_star_and_growth(client, monkeypatch):
+    """报告里的数字是出榜那天的。只换介绍不换数字,刷完卡片上仍是一份过期数据。
+
+    顺带钉住「和 agent 同一份算法」:走的是 `live_growth`,所以报的是实际跨度(6 天),
+    不是请求的 7 天。
+    """
+    from hot_project.infra.data_access import snapshots
+    from hot_project.provider.github import client as github
+    from hot_project.service import report
+
+    class _GH:
+        usable = True
+
+        def info(self, name):
+            return {"stargazers_count": 5200, "created_at": "2020-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(github, "shared", lambda: _GH())
+    monkeypatch.setattr(report, "regenerate", lambda name, gh: "项目定位与用途: 干活的。")
+    monkeypatch.setattr(snapshots, "earliest_in_window",
+                        lambda days, today=None: snapshots.Baseline(
+                            {"owner/name": 4000}, {"owner/name": 6}, date(2026, 7, 29), 6))
+
+    body = client.post("/api/repo-describe", json={"repo": "owner/name"}).json()
+    assert body["sections"], "介绍照旧要回来"
+    assert body["star"] == 5200
+    assert body["growth"] == 1200                                  # 实时 star 减最早那份快照
+    assert body["growth_calc_days"] == 6                           # 实际跨度,不是请求的 7
+
+
 def test_deleting_a_session_that_never_existed_is_a_404(client):
     assert client.delete("/api/sessions/nope").status_code == 404
 

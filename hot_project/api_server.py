@@ -234,7 +234,10 @@ class DescribeIn(BaseModel):
 
 @app.post("/api/repo-describe")
 def repo_describe(body: DescribeIn):
-    """报告卡片「刷新介绍」:重跑描述生成,落库并回传给前端就地替换。
+    """报告卡片「刷新介绍」:重跑描述生成并落库,顺带回传当下的 star 与窗口增长。
+
+    star/增长走 `live_growth`(实时 star 减最早快照),和 agent 的 repo_growth 同一份算法,
+    所以两边永远说同一个数。它拿不到就只回介绍,不能因此让刷新整个失败。
 
     和对话共用同一把执行锁,不让并发刷新和出榜互相抢 token。同步 `def`,理由见文件头。
     """
@@ -254,7 +257,12 @@ def repo_describe(body: DescribeIn):
     if not desc:
         raise HTTPException(status_code=502,
                             detail=f"生成 {body.repo} 的介绍失败(LLM 未配置或全部平台不可用)。")
-    return {"repo": body.repo, "sections": render.section_payload(desc)}
+    try:
+        stats = repo_tools.live_growth(body.repo, gh, config.GROWTH_CALC_DAYS)
+    except Exception:                       # noqa: BLE001
+        logger.warning("刷新 %s 的 star/增长失败,只回介绍。", body.repo, exc_info=True)
+        stats = {}
+    return {"repo": body.repo, "sections": render.section_payload(desc), **stats}
 
 
 # ── 收藏 ────────────────────────────────────────────────────────
