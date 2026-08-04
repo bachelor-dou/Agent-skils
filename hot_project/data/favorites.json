@@ -13,21 +13,21 @@
         "favorited_at": "2026-08-04T02:48:16Z",
         "source_report": "",
         "short_desc": "基于Python和OpenCV的场景切分与转场检测程序/库",
-        "category": "工具"
+        "category": "娱乐"
       },
       {
         "repo": "pingdotgg/t3code",
         "favorited_at": "2026-08-02T17:24:38Z",
         "source_report": "2026-07-29.md",
         "short_desc": "本地代理控制面，支持手机、Web和桌面统一操控Claude Code、Codex等智能代理。",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "lyogavin/airllm",
         "favorited_at": "2026-08-02T15:55:48Z",
         "source_report": "",
         "short_desc": "支持70B大模型在单张4GB GPU上推理",
-        "category": ""
+        "category": "推理框架"
       },
       {
         "repo": "tonhowtf/omniget",
@@ -48,42 +48,42 @@
         "favorited_at": "2026-07-31T14:43:57Z",
         "source_report": "2026-07-29.md",
         "short_desc": "在25GB内存的消费级机器上运行GLM-5.2 744B MoE模型，纯C实现，专家从磁盘流式加载。",
-        "category": ""
+        "category": "推理框架"
       },
       {
         "repo": "virgiliojr94/book-to-skill",
         "favorited_at": "2026-07-31T14:43:09Z",
         "source_report": "2026-07-29.md",
         "short_desc": "将技术书PDF转为Claude Code skill，便于学习、查阅和工作中使用",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "bradautomates/claude-video",
         "favorited_at": "2026-07-31T14:37:45Z",
         "source_report": "2026-07-29.md",
         "short_desc": "让 Claude 观看视频并自动下载、抽帧、转写后分析。",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "alibaba/open-code-review",
         "favorited_at": "2026-07-30T13:15:21Z",
         "source_report": "2026-07-29.md",
         "short_desc": "混合架构代码审查工具，支持精准行级评论，内置NPE、线程安全、XSS、SQL注入规则，并兼容OpenAI和Anthrop",
-        "category": "效率"
+        "category": "效率工具"
       },
       {
         "repo": "headroomlabs-ai/headroom",
         "favorited_at": "2026-07-28T05:13:01Z",
         "source_report": "2026-07-22.md",
         "short_desc": "压缩工具输出、日志、文件和RAG分块，减少LLM输入token，提供库、代理和MCP服务。",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "tt-a1i/archify",
         "favorited_at": "2026-07-26T00:07:02Z",
         "source_report": "2026-07-22.md",
         "short_desc": "生成架构图，支持暗亮主题切换及PNG/JPEG/WebP/SVG导出",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "msitarzewski/agency-agents",
@@ -97,21 +97,21 @@
         "favorited_at": "2026-07-25T14:33:20Z",
         "source_report": "2026-07-22.md",
         "short_desc": "电脑间安全便捷传输文件与数据",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "moonshine-ai/moonshine",
         "favorited_at": "2026-07-25T14:26:18Z",
         "source_report": "2026-07-22.md",
         "short_desc": "超低延迟语音识别、意图识别和语音合成框架。",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "emilkowalski/skills",
         "favorited_at": "2026-07-23T14:44:09Z",
         "source_report": "2026-07-22.md",
         "short_desc": "面向设计工程师的技能集合。",
-        "category": "效率"
+        "category": "SKILL"
       },
       {
         "repo": "stupside/castor",
@@ -125,21 +125,21 @@
         "favorited_at": "2026-07-23T14:31:58Z",
         "source_report": "2026-07-22.md",
         "short_desc": "自托管部署平台。",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "diegosouzapw/OmniRoute",
         "favorited_at": "2026-07-23T14:23:05Z",
         "source_report": "2026-07-22.md",
         "short_desc": "多模型LLM网关，支持路由、负载均衡、重试、回退、限流、缓存与监控。",
-        "category": "工具"
+        "category": "效率工具"
       },
       {
         "repo": "obra/superpowers",
         "favorited_at": "2026-07-21T09:06:26Z",
         "source_report": "2026-07-15.md",
         "short_desc": "Agent 技能框架与软件开发方法",
-        "category": "效率"
+        "category": "SKILL"
       },
       {
         "repo": "laoma2053/awesome-zhuiju-free",
@@ -173,7 +173,6 @@
         "source_report": "2026-07-01.md",
         "short_desc": "单次处理长文档的 OCR 解析引擎。"
       }
-    ],
-    "demoUser": []
+    ]
   }
 }

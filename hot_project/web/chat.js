@@ -1410,10 +1410,11 @@
         }
       }
 
+      // 整块条目都是拖拽把手；按钮/输入框除外，点击（位移 < SLOP）不受影响
       favList.addEventListener("pointerdown", function (e) {
-        const handle = e.target.closest(".fav-item__tag");
-        const item = handle && handle.closest(".fav-item");
-        if (!item || (e.pointerType === "mouse" && e.button !== 0)) {
+        const item = e.target.closest(".fav-item");
+        if (!item || e.target.closest("button, input") ||
+            (e.pointerType === "mouse" && e.button !== 0)) {
           return;
         }
         drag = {
@@ -1421,7 +1422,26 @@
           pointerId: e.pointerId, x: e.clientX, y: e.clientY,
           moved: false, ghost: null,
         };
-        handle.setPointerCapture(e.pointerId);
+        // 捕获推迟到真的拖起来那一刻：按下就捕获会让 click 派发到 .fav-item 上，
+        // 概要那种"点子元素进编辑"的分支就永远匹配不到了。
+      });
+
+      favList.addEventListener("dragstart", function (e) {
+        e.preventDefault();
+      });
+
+      // 建新分类的入口：右键（触屏长按）条目弹标签浮层；已有分类之间只用拖
+      favList.addEventListener("contextmenu", function (e) {
+        const item = e.target.closest(".fav-item");
+        if (!item || e.target.closest("a")) {
+          return;  // 链接上保留浏览器原生菜单
+        }
+        e.preventDefault();
+        finishDrag(false);
+        const api = window.GitHubHotFavorites;
+        if (api) {
+          api.retag(item.getAttribute("data-repo"), item);
+        }
       });
 
       favList.addEventListener("pointermove", function (e) {
@@ -1433,6 +1453,7 @@
             return;
           }
           drag.moved = true;
+          drag.item.setPointerCapture(e.pointerId);  // 拖出列表也能收到后续事件
           drag.ghost = drag.item.cloneNode(true);
           drag.ghost.className = "fav-item fav-ghost";
           drag.ghost.style.width = drag.item.offsetWidth + "px";
@@ -1453,6 +1474,13 @@
       favList.addEventListener("click", function (e) {
         const api = window.GitHubHotFavorites;
         if (!api || Date.now() - dragEndedAt < 400) {
+          e.preventDefault();  // 拖完松手浏览器会补 click，别让链接跳走
+          return;
+        }
+        const renameBtn = e.target.closest(".fav-group__rename");
+        if (renameBtn) {
+          e.preventDefault();  // 在 <summary> 里，默认会连带折叠分组
+          startRenameGroup(renameBtn);
           return;
         }
         const copyBtn = e.target.closest(".fav-item__copy");
@@ -1535,6 +1563,55 @@
         });
       }
 
+      function startRenameGroup(btn) {
+        const nameEl = btn.parentNode.querySelector(".fav-group__name");
+        if (!nameEl) {
+          return;
+        }
+        const old = nameEl.textContent.trim();
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "fav-group__rename-input";
+        input.value = old;
+        input.maxLength = 20;
+        nameEl.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        function finish(save) {
+          if (done) {
+            return;
+          }
+          done = true;
+          const api = window.GitHubHotFavorites;
+          const next = input.value.trim();
+          if (save && api && next && next !== old) {
+            expanded.delete(old);
+            expanded.add(next);          // 改完保持展开；重名即合并到那一组
+            api.renameCategory(old, next);
+          } else {
+            render(api ? api.getAll() : []);
+          }
+        }
+        // 输入框长在 <summary> 里，点击和回车都会被 details 抢去折叠
+        input.addEventListener("click", function (ev) {
+          ev.preventDefault();
+        });
+        input.addEventListener("keydown", function (ev) {
+          ev.stopPropagation();
+          if (ev.key === "Enter") {
+            ev.preventDefault();
+            finish(true);
+          } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            finish(false);
+          }
+        });
+        input.addEventListener("blur", function () {
+          finish(true);
+        });
+      }
+
       const UNCATEGORIZED = "未分类";
 
       function renderItem(item) {
@@ -1549,11 +1626,11 @@
         const seenBadge = total
           ? `<span class="fav-item__seen" title="共 ${total} 期定时周报，上榜 ${seen} 期">${seen}/${total}</span>`
           : "";
-        const tagBtn = cat
-          ? `<button type="button" class="fav-item__tag fav-item__tag--handle" data-repo="${repo}" title="拖到别的分类，或点击选分类" aria-label="更改 ${repo} 的分类">⠿</button>`
-          : `<button type="button" class="fav-item__tag" data-repo="${repo}" title="拖到别的分类，或点击选分类">＋ 标签</button>`;
+        // 已有分类的靠拖；未分类的多一颗按钮，用来起一个新标签
+        const tagBtn = cat ? "" :
+          `<button type="button" class="fav-item__tag" data-repo="${repo}" title="添加自定义标签">＋ 标签</button>`;
         return `
-            <div class="fav-item" data-repo="${repo}">
+            <div class="fav-item" data-repo="${repo}" title="按住拖到分组上改分类；右键换新标签">
               <div class="fav-item__main">
                 <div class="fav-item__name">
                   <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
@@ -1593,8 +1670,10 @@
         });
         favList.innerHTML = keys.map(function (key) {
           const groupItems = groups.get(key);
+          const renameBtn = key === UNCATEGORIZED ? "" :
+            `<button type="button" class="fav-group__rename" title="重命名分类" aria-label="重命名分类 ${escapeHtml(key)}">✎</button>`;
           return `<details class="fav-group" data-group="${escapeHtml(key)}"${expanded.has(key) ? " open" : ""}>
-              <summary class="fav-group__head">${escapeHtml(key)} <span class="fav-group__count">${groupItems.length}</span></summary>
+              <summary class="fav-group__head"><span class="fav-group__name">${escapeHtml(key)}</span>${renameBtn}<span class="fav-group__count">${groupItems.length}</span></summary>
               <div class="fav-group__items">${groupItems.map(renderItem).join("")}</div>
             </details>`;
         }).join("");

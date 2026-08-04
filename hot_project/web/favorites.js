@@ -256,6 +256,36 @@
     return it.category || "";
   }
 
+  // 分类改名 = 把该分类下每一项改写成新名字；改成已有名字就是合并
+  async function renameCategory(oldName, newName) {
+    const from = cleanTag(oldName);
+    const to = cleanTag(newName);
+    if (!from || !to || from === to) {
+      return from;
+    }
+    const moved = getAll().filter(function (x) {
+      return (x.category || "") === from;
+    });
+    moved.forEach(function (x) {
+      x.category = to;
+    });
+    notify();
+    const uid = userId();
+    let failed = false;
+    for (const it of moved) {
+      try {
+        await apiSet(uid, it.repo, "add", to);
+      } catch (_e) {
+        failed = true;
+      }
+    }
+    broadcastChange();
+    if (failed) {
+      await refresh();  // 有失败的就以服务端为准，别留下半真半假的分组
+    }
+    return to;
+  }
+
   async function retag(repo, anchorEl) {
     const name = String(repo || "").trim();
     const it = items.get(name);
@@ -449,6 +479,7 @@
     toggle: toggle,
     retag: retag,
     setCategory: setCategory,
+    renameCategory: renameCategory,
     setDesc: setDesc,
     subscribe: subscribe,
     migrateTo: migrateTo,

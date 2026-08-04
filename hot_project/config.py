@@ -35,8 +35,8 @@ MAX_DYNAMIC_SEARCH_KEYWORDS: int = 30
 #     acceleration = (recent_growth / RECENT_GROWTH_DAYS) / (window_growth / window_days)
 #     boost        = 1 + BURST_ALPHA * min(max(acceleration - 1, 0), BURST_CAP)
 
-RECENT_GROWTH_DAYS: int = 3   # 「最近几天」窗口
-BURST_ALPHA: float = 0.2     # 加成强度,越大则最近爆发对排名影响越大
+RECENT_GROWTH_DAYS: int = 4   # 「最近几天」窗口
+BURST_ALPHA: float = 0.15     # 加成强度,越大则最近爆发对排名影响越大
 BURST_CAP: float = 2.0        # acceleration-1 的封顶(boost 最高 1 + ALPHA*CAP)
 
 
@@ -133,32 +133,53 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "ai agent", "agent framework", "multi-agent", "agent sdk",
         "coding agent", "browser-use", "computer-use", "web agent",
         "autonomous agent", "agent orchestration", "ai assistant",
-        "tool calling", "function calling llm", "deep research agent",
-        "voice agent",
+        "tool calling", "deep research agent", "voice agent",
+        "agent memory", "context engineering", "a2a protocol",
     ],
     "AI-MCP": [
         "mcp server", "mcp client", "model context protocol", "mcp sdk",
         "mcp tools", "mcp bridge", "mcp registry", "mcp integration",
     ],
     "AI-Skill-Prompt-Workflow": [
-        "ai skill", "agent skill", "ai plugin", "prompt engineering",
-        "prompt library", "prompt tool", "ai workflow",
-        "workflow automation", "langgraph", "llm chain",
+        "ai skill", "agent skill", "claude skills", "ai plugin",
+        "prompt engineering", "prompt library", "ai workflow",
+        "workflow automation", "langgraph", "spec driven development",
     ],
     "AI-CLI-DevTool": [
         "ai cli", "ai terminal", "ai devtool", "coding assistant",
         "code review ai", "code generation", "ai ide", "ai copilot",
-        "ai coding", "code completion ai",
+        "ai coding", "claude code", "codex cli", "gemini cli",
+    ],
+    # 用嘴造应用:整块生成一个能跑的东西,是当前增长最快的品类
+    "AI-Builder-VibeCoding": [
+        "vibe coding", "ai app builder", "text to app", "prompt to app",
+        "ai website builder", "no-code ai", "ai site generator",
+        "ai generated app", "built with ai", "app generator",
+        "text to website", "text to ui", "ui generator ai",
+        "screenshot to code", "design to code", "figma to code",
+        "text to game", "ai fullstack",
+    ],
+    # AI 写出来的成品:能直接用的产品/模板,而不是造它们的框架
+    "AI-Product-App": [
+        "ai saas", "saas boilerplate", "ai starter kit", "ai template",
+        "ai chrome extension", "ai vscode extension", "ai bot",
+        "ai note taking", "ai search engine", "ai presentation",
+        "ai resume", "ai translator", "ai browser",
+    ],
+    # 喂给 AI 编码工具的规则/配置本身也在成仓库,而且涨得极快
+    "AI-Coding-Config": [
+        "cursorrules", "awesome cursor rules", "agents.md", "claude.md",
+        "system prompt collection", "ai coding rules", "subagents",
     ],
     "AI-LLM-Core": [
         "large language model", "llm framework", "llm sdk",
-        "transformer model", "open source llm", "llm api",
-        "foundation model",
+        "open source llm", "llm api", "foundation model",
+        "reasoning model", "small language model", "mixture of experts",
     ],
     "AI-RAG": [
         "rag", "retrieval augmented", "vector database",
         "embedding model", "semantic search", "document retrieval",
-        "knowledge base", "chunking embedding",
+        "knowledge base", "graphrag", "agentic rag",
     ],
     "AI-Inference-Serving": [
         "llm inference", "llm serving", "vllm", "sglang",
@@ -166,9 +187,9 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "model serving", "inference engine", "tensor parallel",
     ],
     "AI-Training-Finetune": [
-        "fine-tuning", "instruction tuning", "lora", "qlora", "peft",
-        "rlhf", "dpo", "sft", "reward model", "distillation",
-        "alignment", "pretraining framework",
+        "fine-tuning", "instruction tuning", "lora", "peft",
+        "rlhf", "dpo", "grpo", "reward model", "distillation",
+        "agentic rl", "rl environment", "pretraining framework",
     ],
     "AI-Infra": [
         "triton kernel", "cuda kernel", "ml compiler",
@@ -179,6 +200,7 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "multimodal llm", "vision language model", "text to image",
         "text to video", "text to speech", "speech to text",
         "image generation", "video generation", "diffusion model",
+        "world model", "image editing ai", "voice cloning", "music generation",
     ],
     "AI-Observability": [
         "llm observability", "ai guardrails", "llm evaluation",
@@ -189,8 +211,8 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
         "llm data", "rlhf data", "instruction tuning data",
     ],
     "AI-Edge-OnDevice": [
-        "on-device llm", "edge ai", "mobile llm", "llm.js",
-        "webgpu llm", "tinyml",
+        "on-device llm", "edge ai", "mobile llm", "ollama",
+        "llama.cpp", "mlx", "webgpu llm",
     ],
     # ─── 通用类别(保证覆盖面)───
     "Database": [
@@ -206,13 +228,13 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     ],
     "Frontend": [
         "react", "vue", "svelte", "ui component", "nextjs", "tailwindcss",
-        "angular", "nuxt", "vite", "webpack", "electron app",
+        "nuxt", "vite", "astro", "shadcn", "electron app",
         "flutter", "react native", "typescript", "webgl",
     ],
     "Backend": [
         "web framework", "api framework", "microservice", "graphql server", "rpc framework",
         "fastapi", "django", "spring boot", "golang http", "nodejs framework",
-        "gin", "express", "nestjs", "flask", "koa",
+        "gin", "express", "nestjs", "bun",
     ],
     "DevOps": [
         "ci cd pipeline", "monitoring", "infrastructure as code", "gitops",
@@ -221,8 +243,9 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     ],
     "Security": [
         "security tool", "authentication", "vulnerability scanner",
-        "waf", "ids ips", "penetration testing", "security scanner",
-        "cve scanner", "secret scanner", "sast dast", "dependency check",
+        "waf", "penetration testing", "security scanner",
+        "cve scanner", "secret scanner", "supply chain security",
+        "prompt injection", "ai red teaming",
     ],
     "Data-Engineering": [
         "data pipeline", "etl", "stream processing", "feature store",
@@ -237,14 +260,13 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     ],
     "Programming-Language": [
         "programming language", "compiler", "language server",
-        "rust", "golang", "zig", "lua", "julia",
-        "python tooling", "typescript compiler", "lisp",
+        "rust", "golang", "zig", "lua",
+        "python tooling", "typescript compiler",
     ],
     # ─── 新兴领域补充 ───
     "Web3-Blockchain": [
         "blockchain", "ethereum", "smart contract", "defi",
-        "web3", "nft", "crypto", "solidity", "layer2",
-        "bitcoin", "solana", "arbitrum", "optimism",
+        "web3", "solidity", "bitcoin", "solana",
     ],
     "Game-Engine": [
         "game engine", "unity", "unreal engine", "godot",
@@ -257,12 +279,12 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     ],
     # ─── AI 应用层补充 ───
     "AI-App-Chatbot": [
-        "chatbot", "chatgpt", "ai chat", "llm app", "ai webui",
-        "openai compatible", "ai gateway", "llm proxy",
+        "chatbot", "ai chat", "llm app", "ai webui",
+        "openai compatible", "ai gateway", "llm proxy", "ai companion",
     ],
     # ─── 经典 ML / 深度学习(非 LLM)───
     "ML-DeepLearning": [
-        "pytorch", "tensorflow", "jax", "scikit-learn", "keras",
+        "pytorch", "jax", "scikit-learn",
         "deep learning", "machine learning framework", "onnx",
         "reinforcement learning",
     ],
@@ -301,7 +323,8 @@ SEARCH_KEYWORDS: dict[str, list[str]] = {
     ],
     # ─── 机器人 / IoT / 嵌入式 ───
     "Robotics-IoT": [
-        "ros", "esp32", "arduino", "raspberry pi", "embedded", "firmware",
+        "ros", "esp32", "raspberry pi", "embedded", "firmware",
+        "embodied ai", "humanoid robot", "vla model",
     ],
 }
 
