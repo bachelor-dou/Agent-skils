@@ -29,7 +29,6 @@ RELEASES = 5
 COMMITS = 10
 COMMIT_MESSAGE_MAX = 140
 
-# 单仓库抓取是交互路径(用户在等),所以重试预算比任务池小。
 ATTEMPTS = 3
 
 ALL = ("info", "readme", "releases", "commits")
@@ -59,8 +58,6 @@ async def _get(client: httpx.AsyncClient, pool: TokenPool, path: str,
                 if resp.status_code in (403, 429):
                     raise RateLimitError(gh._reset_at(resp.headers))
                 raise RetryableError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        # TokenInvalidError 必须在里面:GitHub 会对好 token 偶发 401,漏掉它就是
-        # 一次瞬时 401 打断整个交互请求,而另外 11 张健康 token 正闲着。
         except (TokenInvalidError, RateLimitError, RetryableError, httpx.RequestError) as e:
             logger.debug("仓库端点第 %d/%d 次失败:%s(%s)", attempt + 1, ATTEMPTS, url, e)
             if attempt == ATTEMPTS - 1:

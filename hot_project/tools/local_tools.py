@@ -10,9 +10,9 @@ import json
 import logging
 
 from .. import config
-from ..infra.store import snapshots, universe
+from ..infra.data_access import snapshots, universe
 from ..provider.github import trending as trending_api
-from . import describe
+from ..service import describe
 from .spec import Param, Tool
 
 logger = logging.getLogger("hot_project")

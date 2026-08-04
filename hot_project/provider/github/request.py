@@ -22,11 +22,8 @@ logger = logging.getLogger("hot_project")
 SEARCH_URL = "https://api.github.com/search/repositories"
 GRAPHQL_URL = "https://api.github.com/graphql"
 
-# 一次 GraphQL 查询塞多少个仓库别名。**勿上调。** 200 别名会 HTTP 200 + 无 errors +
-# 全字段 null:看起来成功,拿回来的却是一批空值,当成「这批仓库都没了」就抹掉整批基线。
 BATCH_SIZE = 100
 
-# 限流响应没给 reset 时刻时,默认冷却多久。
 DEFAULT_COOLDOWN = 60.0
 
 
@@ -117,7 +114,6 @@ async def search_page(
                 "per_page": per_page, "page": page},
     ))
     if resp.status_code == 422:
-        # 分页越界(Search 只给前 1000 条)或查询语法不合法。两者都不该重试。
         logger.debug("搜索 422,当作没有更多:q=%r page=%d", query, page)
         return []
     _classify(resp)
@@ -178,7 +174,6 @@ async def fetch_stars(
     payload = _body(resp)
     data = payload.get("data")
     if not isinstance(data, dict):
-        # GraphQL 的限流不走 HTTP 403,而是 200 + errors 里写 RATE_LIMITED。
         errors = str(payload.get("errors", ""))[:200]
         if "RATE_LIMITED" in errors:
             raise RateLimitError(time.time() + DEFAULT_COOLDOWN)
@@ -190,17 +185,9 @@ async def fetch_stars(
         if isinstance(node, dict) and isinstance(node.get("stargazerCount"), int):
             stars[full_name] = node["stargazerCount"]
 
-    # errors 和 data 可以并存:个别仓库 NOT_FOUND 是常态,不能因此丢掉整批。
     if not stars:
         if len(names) > 1:
             return None
-        # 单名批不能无条件当成「确认查不到」:`StarBatch` 会把整批 null 一路拆到单名,于是
-        # GitHub 一次「200 + data 全 null」的事故最终全以单名批落地、每个都记成「这仓库没了」,
-        # 再交给淘汰步骤 —— 那是清库那条路的入口。只有 errors 带 NOT_FOUND 才算真删了。
-        #
-        # 这里**抛**而不是返回 None:单名批返回 None 会让 `StarBatch` 拿 `1 // 2 == 0` 拆出
-        # 一个空批加一个原样的批、无限拆下去;抛出去则落进 `on_error`,记为 `failed`(没问到)
-        # 而不是 `missing`(没了)。
         types = {e.get("type") for e in payload.get("errors") or [] if isinstance(e, dict)}
         if types != {"NOT_FOUND"}:
             raise RetryableError(

@@ -1,7 +1,7 @@
 """网页端:HTTP 路由、会话池、安全中间件、报告渲染。
 
 真起一个 app 打真实的 HTTP 请求(`TestClient` 不开端口,直接走 ASGI)。这一层出问题
-不像业务逻辑那样有堆栈:404、CORS 配错、路径穿越放行,都是「看起来正常运行」的故障。
+不像业务逻辑那样有堆栈:404、路径穿越放行,都是「看起来正常运行」的故障。
 """
 
 import time
@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hot_project import api_server, config
+from hot_project.tools import repo_tools
 from hot_project.web import render, security, sessions
 
 REPORT = """# GitHub 热门项目 — 2026-07-30
@@ -41,7 +42,6 @@ def report_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(monkeypatch):
-    # 限速是全局状态,测试之间会互相污染 —— 每个用例一张干净的表
     monkeypatch.setattr(security, "_hits", {})
     return TestClient(api_server.app)
 
@@ -115,8 +115,34 @@ def test_favorites_reject_a_malformed_user_id(client):
     assert client.get("/api/favorites", params={"user_id": "!!"}).status_code == 400
 
 
-def test_the_preset_favorite_tags_are_served(client):
-    assert client.get("/api/favorite-tags").json()["tags"] == list(config.FAVORITE_DEFAULT_TAGS)
+def test_changing_the_category_neither_costs_an_llm_call_nor_eats_the_summary(
+    client, monkeypatch, tmp_path,
+):
+    """只改分类时概要必须原样留着。
+
+    重算一次要一次 LLM 调用(收藏栏拖一下就来一次),而且会把用户手写的概要冲掉 ——
+    概要是可以手工编辑的,冲掉就没了。
+    """
+    monkeypatch.setattr(config, "FAVORITES_PATH", tmp_path / "favorites.json")
+    generated = []
+    monkeypatch.setattr(repo_tools, "short_desc",
+                        lambda *a, **k: generated.append(a) or "机器写的")
+
+    add = {"user_id": "tester", "repo": "owner/name", "action": "add"}
+    client.post("/api/favorites", json=dict(add, short_desc="我手写的概要"))
+    client.post("/api/favorites", json=dict(add, category="娱乐"))
+
+    item = client.get("/api/favorites", params={"user_id": "tester"}).json()["favorites"][0]
+    assert item["category"] == "娱乐"
+    assert item["short_desc"] == "我手写的概要"
+    assert generated == [], "改个分类而已,不该重新生成概要"
+
+    client.post("/api/favorites", json=dict(add, short_desc=""))
+    client.post("/api/favorites", json=dict(add, category="效率"))
+    item = client.get("/api/favorites", params={"user_id": "tester"}).json()["favorites"][0]
+    assert item["category"] == "效率"
+    assert item["short_desc"] == ""
+    assert generated == []
 
 
 def test_deleting_a_session_that_never_existed_is_a_404(client):
@@ -164,21 +190,14 @@ def test_the_real_ip_is_taken_from_the_proxy_header():
     assert security.client_ip(_Req()) == "203.0.113.9"
 
 
-def test_the_websocket_is_guarded_too_not_just_the_http_routes(client, monkeypatch):
-    """安全中间件对 WebSocket **不生效** —— starlette 的 BaseHTTPMiddleware 见到非 http
-    的 scope 就直接放行。于是 /ws/chat 曾是唯一没有黑名单、没有限速的入口,而它恰好是
-    唯一真会驱动 agent 花钱的入口。36 个 HTTP 测试一条都抓不到这个,因为对 HTTP 它是好的。
-    """
-    monkeypatch.setattr(config, "SECURITY_IP_BLACKLIST", {"testclient"})
-    with pytest.raises(Exception):          # 被 close(1008) 掉,连不上
-        with client.websocket_connect("/ws/chat/s1"):
-            pass
-
-
 def test_a_rate_limited_client_cannot_open_a_websocket_either(client, monkeypatch):
+    """安全中间件对 WebSocket **不生效** —— starlette 的 BaseHTTPMiddleware 见到非 http
+    的 scope 就直接放行。于是 /ws/chat 曾是唯一没有限速的入口,而它恰好是唯一真会驱动
+    agent 花钱的入口。HTTP 那几十条测试一条都抓不到这个,因为对 HTTP 它是好的。
+    """
     monkeypatch.setattr(security, "RATE_LIMIT", 0)
     monkeypatch.setattr(security, "_hits", {})
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):          # 被 close(1008) 掉,连不上
         with client.websocket_connect("/ws/chat/s1"):
             pass
 
@@ -196,19 +215,6 @@ def test_spoofed_forwarded_headers_do_not_grow_the_table_forever(monkeypatch):
     time.sleep(0.02)                        # 让所有窗口过期
     security.rate_limited("10.0.0.99")      # 这一次顺带触发清扫
     assert len(security._hits) < 10, f"表里还剩 {len(security._hits)} 条"
-
-
-def test_wildcard_origins_and_credentials_cannot_both_be_on(monkeypatch):
-    """浏览器会拒绝这个组合,但中间件不报错 —— 配错的人不会发现。"""
-    monkeypatch.setattr(config, "CORS_ALLOWED_ORIGINS", ["*"])
-    monkeypatch.setattr(config, "CORS_ALLOW_CREDENTIALS", True)
-    assert security.cors_options()["allow_credentials"] is False
-
-
-def test_a_named_origin_may_keep_credentials(monkeypatch):
-    monkeypatch.setattr(config, "CORS_ALLOWED_ORIGINS", ["https://example.com"])
-    monkeypatch.setattr(config, "CORS_ALLOW_CREDENTIALS", True)
-    assert security.cors_options()["allow_credentials"] is True
 
 
 # ── 会话池 ────────────────────────────────────────────────────────
@@ -282,16 +288,11 @@ def test_raw_script_tags_in_a_report_never_reach_the_page(report_dir):
     assert "<script>alert(1)</script>" not in html
 
 
-# 报告不是全都出自我们之手:agent 的保存工具是聊天驱动的,提示词里让它写什么它就写什么。
-# 下面每一条都实测穿过过旧版清洗,不是想象出来的向量。
 @pytest.mark.parametrize("payload", [
-    # 单次替换会被拼接绕过:删掉内层 <script> 后,<scr 和 ipt src=...> 重新拼成活标签
     "<scr<script>ipt src=http://evil.example/x.js>",
     "<scr<scr<script>ipt>ipt src=http://evil.example/x.js>",
-    # 白名单只认带引号的属性值,裸写的直接穿过去
     "<a href=javascript:alert(1)>click</a>",
     "<img SRC=javascript:alert(1)>",
-    # 这几条旧版就挡得住,一并钉住,以免修改清洗逻辑时遗漏它们
     '<a href="javascript:alert(1)">quoted</a>',
     "<a hREf=JaVaScRiPt:alert(1)>case</a>",
     '<a href=" java&#09;script:alert(1)">obfuscated</a>',

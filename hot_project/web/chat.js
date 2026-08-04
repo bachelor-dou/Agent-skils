@@ -6,21 +6,15 @@
     const inputEl = document.getElementById("composer-input");
     const sendButton = document.getElementById("send-button");
 
-    // 自动滚到底（追加消息 / 流式重渲时用）。打个短时间窗，让阅读态的滚动收起逻辑
-    // 忽略这类"程序滚动"，否则流式输出频繁触底会反复收起/展开顶栏底栏导致页面一跳一跳。
     let programmaticScrollUntil = 0;
     function scrollMessagesToBottom() {
       programmaticScrollUntil = performance.now() + 150;
-      // 强制瞬时滚动：.messages 设了 scroll-behavior:smooth，流式每 40ms 触底会各起一次
-      // 平滑动画、目标又在增长，动画不断被打断，表现为页面一跳一跳。这里临时改回 auto。
       const prev = messagesEl.style.scrollBehavior;
       messagesEl.style.scrollBehavior = "auto";
       messagesEl.scrollTop = messagesEl.scrollHeight;
       messagesEl.style.scrollBehavior = prev;
     }
 
-    // 距底阈值：在此范围内视为「正在追看最新」，流式重渲才自动跟随；
-    // 用户上翻回看时不再把他顶回底部，滚回底部附近即自动恢复跟随。
     const FOLLOW_BOTTOM_PX = 64;
     function isNearBottom() {
       return messagesEl.scrollHeight - (messagesEl.scrollTop + messagesEl.clientHeight) <= FOLLOW_BOTTOM_PX;
@@ -47,7 +41,6 @@
     const LITE_KEY = "gh-hot-lite-id";
     const MAX_CHAT_HISTORY = 100; // 聊天历史最多保留的消息数，防止 localStorage 撑爆
 
-    // 共享工具（来自 common.js）
     const escapeHtml = window.HotCommon.escapeHtml;
 
   let initialSessionExpired = false;
@@ -178,14 +171,12 @@
     }
 
     function saveChatHistory() {
-      // 截断历史，仅保留最近 MAX_CHAT_HISTORY 条，避免 localStorage 无限增长
       if (chatHistory.length > MAX_CHAT_HISTORY) {
         chatHistory = chatHistory.slice(-MAX_CHAT_HISTORY);
       }
       try {
         localStorage.setItem(CHAT_HISTORY_KEY + "-" + sessionId, JSON.stringify(chatHistory));
       } catch (e) {
-        // localStorage 满时静默失败，不调用 addMessage 避免无限递归
         console.warn("localStorage 已满，聊天历史无法保存", e);
       }
     }
@@ -232,9 +223,7 @@
           }
         }
       } catch (e) {
-        // 解析失败时忽略
       }
-      // 无历史记录，显示欢迎消息
       renderSessionIntro(false);
     }
 
@@ -278,15 +267,11 @@
         storedLite = localStorage.getItem(LITE_KEY) || "";
       } catch (_e) {}
       selectedModelId = availableModels.some((m) => m.id === stored) ? stored : availableModels[0].id;
-      // 子模型：空 = 自动（跟随主模型平台）；失效的历史选择静默回落自动
       selectedLiteId = availableLiteModels.some((m) => m.id === storedLite) ? storedLite : "";
       updateButtonLabel();
-      // 初始 WS 在模型列表加载前已连接（model 为空）；此处重连使默认模型即刻生效
       closeSocket(false);
       connectWebSocket();
 
-      // 菜单移到 body 下：composer 有 overflow:hidden + transform/will-change，会裁切并成为
-      // fixed 定位容器，弹出菜单会被切掉。移出后用 fixed 按坐标定位，脱离一切裁切。
       document.body.appendChild(modelMenu);
       if (liteMenu) document.body.appendChild(liteMenu);
 
@@ -308,7 +293,6 @@
       pendingMainId = "";
     }
 
-    // 按钮标题显示当前"主 · 子"组合（无子模型池时只显示主）
     function updateButtonLabel() {
       const cur = availableModels.find((m) => m.id === selectedModelId);
       const sub = availableLiteModels.find((m) => m.id === selectedLiteId);
@@ -318,7 +302,6 @@
         : mainLabel;
     }
 
-    // 一级：主模型列表。有子模型池时每行带 › 展开子菜单；无池则点行直接选主+自动。
     function openMainMenu() {
       const hasPool = availableLiteModels.length > 0;
       modelMenu.innerHTML = availableModels
@@ -347,10 +330,8 @@
       positionUp(modelMenu, modelButton);
     }
 
-    // 二级：某主模型右侧的共享子模型池。首项"自动（跟随）"= 只定主模型。
     function openSubMenu(mainId, anchorRow) {
       pendingMainId = mainId;
-      // 首项"自动"= 只定主模型，轻量子任务跟随主模型所在平台的默认子模型
       const options = [{ id: "", label: "自动" }].concat(availableLiteModels);
       liteMenu.innerHTML = options
         .map((m) => {
@@ -373,7 +354,6 @@
       positionRight(liteMenu, anchorRow);
     }
 
-    // 向上弹出：菜单底边贴锚点上沿（主菜单用）
     function positionUp(menu, anchor) {
       const r = anchor.getBoundingClientRect();
       const mw = menu.offsetWidth;
@@ -382,7 +362,6 @@
       menu.style.bottom = (window.innerHeight - r.top + 6) + "px";
     }
 
-    // 向右弹出：贴主行右边，右侧放不下则翻到左侧；顶部对齐主行并夹在视口内（子菜单用）
     function positionRight(menu, anchorRow) {
       const r = anchorRow.getBoundingClientRect();
       const mw = menu.offsetWidth;
@@ -396,7 +375,6 @@
       menu.style.bottom = "auto";
     }
 
-    // 预检选中的模型：发一次极小的真实调用；不可用返回该模型的名称，可用返回 ""
     async function preflightTest(params) {
       try {
         const resp = await fetch("/api/models/test", {
@@ -414,8 +392,6 @@
       }
     }
 
-    // 一次确定主+子：预检两者（主变了才测主、子非"自动"才测子，合并为一次请求），
-    // 不可用则整体回滚并提示；可用则落库、更新按钮、重连 WS 使新组合生效。
     async function selectCombo(mainId, liteId) {
       liteId = liteId || "";
       if (mainId === selectedModelId && liteId === selectedLiteId) {
@@ -429,7 +405,6 @@
       if (Object.keys(params).length) {
         const prevLabel = modelCurrentEl.textContent;
         modelCurrentEl.textContent = "测试中…";
-        // 预检期间禁用发送，避免"切换悬而未决"时用旧模型误发；测完还原原有发送态
         const wasSending = sendButton.disabled;
         setSending(true);
         let failed;
@@ -454,12 +429,10 @@
       } catch (_e) {}
       updateButtonLabel();
       closeMenus();
-      // 模型经 WS 连接的 query 传入，切换后重连使新组合生效（HTTP 路径每条消息即时带上）
       closeSocket(false);
       connectWebSocket();
     }
 
-    // 轻量瞬时提示（非聊天气泡、不入历史，几秒后自动消失）：用于模型不可用这类一次性告知
     let toastTimer = null;
     function showToast(text) {
       let el = document.getElementById("app-toast");
@@ -535,8 +508,6 @@
       let chromeHidden = false;
       let isTouchHolding = false;
       let lastScrollTop = messagesEl.scrollTop;
-      // 刚显示顶栏后的"禁收起"冷却窗：显示会改变布局高度，触底时会连带触发滚动事件，
-      // 若立刻又允许收起就会 显/隐 反复横跳（用户看到的闪烁连跳）。冷却期内只更新基准不收起。
       let noHideUntil = 0;
 
       function syncHeights() {
@@ -591,7 +562,6 @@
 
       function handleReadingScroll() {
         if (performance.now() < programmaticScrollUntil) {
-          // 程序自动触底（追加/流式），不当作用户阅读滚动，避免收起顶/底栏引发跳动
           lastScrollTop = messagesEl.scrollTop;
           return;
         }
@@ -600,8 +570,6 @@
           return;
         }
 
-        // 滚动过程中收起头部/输入框（腾出阅读空间），滚到顶部或底部时自动重新显示
-        // （底部必须显示，否则用户到底后无法继续输入）。不做"停下定时重现"以免闪烁。
         const currentScrollTop = messagesEl.scrollTop;
         const delta = currentScrollTop - lastScrollTop;
         lastScrollTop = currentScrollTop;
@@ -636,7 +604,6 @@
         if (document.activeElement === inputEl || !isMessagesScrollable()) {
           showChatChrome();
         }
-        // 其余情况保持当前显隐，由后续上/下滚动的方向决定，不做停顿重现
       }
 
       messagesEl.addEventListener("scroll", handleReadingScroll, { passive: true });
@@ -850,7 +817,6 @@
       }
       item.appendChild(body);
 
-      // 用户消息：加「重发」按钮，可再次发送（失败的消息也能重发）
       if (role === "user") {
         const resend = document.createElement("button");
         resend.type = "button";
@@ -865,7 +831,6 @@
       messagesEl.appendChild(item);
       scrollMessagesToBottom();
 
-      // 持久化（跳过 typing 指示器）
       if (!options.typing) {
         chatHistory.push({ role, content: text, isHtml: !!options.asHtml });
         saveChatHistory();
@@ -878,8 +843,6 @@
       return addMessage("agent", "正在处理", { asHtml: false, typing: true });
     }
 
-    // 带进度条的"正在处理"气泡：默认流动动画（indeterminate）；收到真实百分比后切为确定态。
-    // 返回 { item, onProgress }
     function addPendingProgress() {
       const item = addMessage("agent", "", { asHtml: true, typing: true });
       const body = item.lastElementChild;
@@ -897,8 +860,6 @@
       const labelEl = body.querySelector(".agent-progress__label");
       const pctEl = body.querySelector(".agent-progress__pct");
 
-      // 等待计时：推理期没有正文可流、进度条只是转圈，显示已用秒数让等待有进展感。
-      // 仅在「不确定态」（没有真实百分比）时占用 pct 位；收到真实进度或开始流正文即让位/停表。
       const startedAt = Date.now();
       let elapsedTimer = window.setInterval(function () {
         if (wrap.getAttribute("data-state") === "indeterminate") {
@@ -924,22 +885,17 @@
         }
       }
 
-      // 正文流式：首个 delta 到达时把进度条换成正文容器，之后累积、节流重渲染 Markdown。
-      // reply 到达时由 updateTypingIndicator 用权威全文做最终渲染（内容与流式累积一致）。
       let streaming = false;
       let acc = "";
       let renderTimer = null;
       function flush() {
         renderTimer = null;
-        // 贴底判定必须在改 DOM 之前：渲染后内容变高，距底距离会失真而误判成"已上翻"。
         const follow = isNearBottom();
         body.innerHTML = enhanceReply(acc);
         if (follow) {
           scrollMessagesToBottom();
         }
       }
-      // 供收尾复用：流式已渲染出与最终回复一致的全文时，跳过整篇 Markdown 重解析。
-      // 先把挂起的节流渲染补齐，保证 body 反映的是最新 acc，再返回 acc 供比对。
       function streamedText() {
         if (!streaming) {
           return null;
@@ -953,7 +909,6 @@
       function onDelta(text, reset) {
         stopTimer();  // 正文开始流出：进度条即将被替换，停掉计时
         if (reset) {
-          // 新一轮正文开始：丢弃上一轮（调工具那轮）流出的过渡正文，从头重渲染。
           acc = "";
           streaming = true;
           body.innerHTML = "";
@@ -974,7 +929,6 @@
       return { item, onProgress, onDelta, stop: stopTimer, streamedText };
     }
 
-    // 渲染一条非应答（重连推送 / 服务端主动消息）的 Agent 回复
     function renderUnsolicited(displayText) {
       addMessage("agent", "", { asHtml: true, typing: false });
       const msg = messagesEl.lastElementChild;
@@ -990,7 +944,6 @@
       body.className = "md-body";
       let html;
       if (streamedText != null && streamedText === finalText && body.innerHTML) {
-        // 流式已把与权威全文一致的内容渲染进 DOM：直接复用，省掉一次整篇 Markdown 重解析
         html = body.innerHTML;
       } else {
         html = enhanceReply(finalText);
@@ -998,7 +951,6 @@
       }
       body.classList.remove("typing");
 
-      // 持久化最终回复
       chatHistory.push({ role: "agent", content: html, isHtml: true });
       saveChatHistory();
     }
@@ -1013,7 +965,6 @@
       await submitMessage(message);
     }
 
-    // 发送一条消息（供输入框发送与「重发」复用）
     async function submitMessage(message) {
       if (!message) {
         return;
@@ -1035,7 +986,6 @@
         const streamed = typeof pendingObj.streamedText === "function" ? pendingObj.streamedText() : null;
         updateTypingIndicator(pending, reply, streamed);
         await loadReports();
-        // agent 可能在本轮通过 add_favorite 新增收藏 → 同步收藏栏
         if (window.GitHubHotFavorites) {
           window.GitHubHotFavorites.refresh();
         }
@@ -1131,7 +1081,6 @@
         return;
       }
 
-      // 连接超时：30 秒内未 open 则放弃
       const connectTimeout = setTimeout(() => {
         if (socket && socket.readyState === WebSocket.CONNECTING) {
           socket.close();
@@ -1151,7 +1100,6 @@
         updateConnectionStatus("已连接", "connected");
       });
 
-      // 消息分发：progress/heartbeat/reply 信封 + 兼容纯文本回复（重连推送）
       socket.addEventListener("message", (event) => {
         if (currentSessionId !== sessionId) return;
         markSessionActive(currentSessionId);
@@ -1193,7 +1141,6 @@
           }
         }
 
-        // 非信封消息（重连后推送的纯文本回复）：当作最终回复
         const normalizedText = normalizeAgentReplyText(event.data);
         if (resolveActiveRequest(normalizedText)) return;
         renderUnsolicited(normalizedText);
@@ -1206,7 +1153,6 @@
         }
         socketReady = false;
         updateConnectionStatus("普通模式", "disconnected");
-        // 非主动关闭时自动重连
         if (event.code !== 1000) {
           scheduleReconnect();
         }
@@ -1270,7 +1216,6 @@
       return normalizeAgentReplyText(payload.reply || "");
     }
 
-    // 报告列表刷新后的回调（取代旧的 loadReports 猴补丁）
     const reportsRenderedListeners = [];
     function onReportsRendered(callback) {
       if (typeof callback === "function") {
@@ -1327,7 +1272,6 @@
         `;
       }).join("");
 
-      // 绑定删除按钮事件
       reportListEl.querySelectorAll(".report-delete-btn").forEach(function(btn) {
         btn.addEventListener("click", async function(e) {
           e.stopPropagation();
@@ -1345,7 +1289,6 @@
               const data = await resp.json().catch(() => ({}));
               throw new Error(data.detail || "删除失败");
             }
-            // 刷新报告列表
             loadReports();
           } catch(err) {
             window.alert("删除失败: " + err.message);
@@ -1355,8 +1298,6 @@
       });
     }
 
-    // 顶部 Tab：点某个标签，激活对应内容面板（报告 / 收藏），其余隐藏。
-    // 当前所选 Tab 记到 localStorage，刷新后恢复，不再跳回默认「报告」。
     function setupPanelTabs() {
       const tabs = Array.prototype.slice.call(document.querySelectorAll(".panel-tab"));
       if (!tabs.length) {
@@ -1405,10 +1346,113 @@
         return;
       }
 
-      // 事件委托：改分类标签 / 移除收藏
+      const expanded = new Set();
+      favList.addEventListener("toggle", function (e) {
+        const key = e.target.getAttribute ? e.target.getAttribute("data-group") : null;
+        if (key === null) {
+          return;
+        }
+        if (e.target.open) {
+          expanded.add(key);
+        } else {
+          expanded.delete(key);
+        }
+      }, true);
+
+      // ponytail: 拖到边缘不自动滚动 —— 分组默认收起，标题行都挤在一屏内够得着；
+      // 哪天分类多到一屏放不下，再补边缘自动滚。
+      const DRAG_SLOP = 6;        // 位移不到这个数就算点击，交给标签浮层
+      let drag = null;
+      let dropTarget = null;
+      let dragEndedAt = 0;
+
+      function markDropTarget(group) {
+        if (dropTarget === group) {
+          return;
+        }
+        if (dropTarget) {
+          dropTarget.classList.remove("is-drop-target");
+        }
+        dropTarget = group;
+        if (dropTarget) {
+          dropTarget.classList.add("is-drop-target");
+        }
+      }
+
+      function groupUnder(x, y) {
+        const el = document.elementFromPoint(x, y);
+        return el && el.closest ? el.closest(".fav-group") : null;
+      }
+
+      function moveGhost(ghost, x, y) {
+        ghost.style.transform =
+          `translate(${x - ghost.offsetWidth / 2}px, ${y - ghost.offsetHeight / 2}px)`;
+      }
+
+      function finishDrag(commit) {
+        if (!drag) {
+          return;
+        }
+        const d = drag;
+        const group = dropTarget;
+        drag = null;
+        markDropTarget(null);
+        if (!d.moved) {
+          return;                     // 只是点了一下 → 让 click 去开浮层
+        }
+        d.ghost.remove();
+        d.item.classList.remove("is-dragging");
+        dragEndedAt = Date.now();     // 松手后浏览器还会补一个 click，得挡掉
+        const key = group ? group.getAttribute("data-group") : null;
+        const api = window.GitHubHotFavorites;
+        if (commit && api && key !== null) {
+          api.setCategory(d.repo, key === UNCATEGORIZED ? "" : key);
+        }
+      }
+
+      favList.addEventListener("pointerdown", function (e) {
+        const handle = e.target.closest(".fav-item__tag");
+        const item = handle && handle.closest(".fav-item");
+        if (!item || (e.pointerType === "mouse" && e.button !== 0)) {
+          return;
+        }
+        drag = {
+          repo: item.getAttribute("data-repo"), item: item,
+          pointerId: e.pointerId, x: e.clientX, y: e.clientY,
+          moved: false, ghost: null,
+        };
+        handle.setPointerCapture(e.pointerId);
+      });
+
+      favList.addEventListener("pointermove", function (e) {
+        if (!drag || e.pointerId !== drag.pointerId) {
+          return;
+        }
+        if (!drag.moved) {
+          if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) < DRAG_SLOP) {
+            return;
+          }
+          drag.moved = true;
+          drag.ghost = drag.item.cloneNode(true);
+          drag.ghost.className = "fav-item fav-ghost";
+          drag.ghost.style.width = drag.item.offsetWidth + "px";
+          document.body.appendChild(drag.ghost);
+          drag.item.classList.add("is-dragging");
+        }
+        moveGhost(drag.ghost, e.clientX, e.clientY);
+        markDropTarget(groupUnder(e.clientX, e.clientY));
+      });
+
+      favList.addEventListener("pointerup", function () {
+        finishDrag(true);
+      });
+      favList.addEventListener("pointercancel", function () {
+        finishDrag(false);
+      });
+
       favList.addEventListener("click", function (e) {
         const api = window.GitHubHotFavorites;
-        if (!api) {
+        if (!api || Date.now() - dragEndedAt < 400) {
           return;
         }
         const copyBtn = e.target.closest(".fav-item__copy");
@@ -1448,7 +1492,6 @@
         }
       });
 
-      // 点击概要就地编辑：Enter/失焦保存，Esc 取消；保存/取消后都由 render 重建 DOM
       function startEditDesc(descEl) {
         const repo = descEl.getAttribute("data-repo");
         if (!repo || descEl.dataset.editing === "1") {
@@ -1498,22 +1541,19 @@
         const repo = escapeHtml(item.repo);
         const desc = escapeHtml(item.short_desc || "");
         const cat = (item.category || "").trim();
-        // 概要一行截断，完整内容靠 title 悬浮展示（编辑提示附在后面，别把原文挤掉）
         const descRow = desc
           ? `<span class="fav-item__desc" data-repo="${repo}" title="${desc}&#10;（点击编辑）">${desc}</span>`
           : `<span class="fav-item__desc fav-item__desc--empty" data-repo="${repo}" title="点击添加概要">暂无描述</span>`;
-        // 分母是定时周报总期数：单看「上过 3 期」不知道算多算少，配上总数才有参照
         const seen = Number(item.report_count) || 0;
         const total = Number(item.report_total) || 0;
         const seenBadge = total
           ? `<span class="fav-item__seen" title="共 ${total} 期定时周报，上榜 ${seen} 期">${seen}/${total}</span>`
           : "";
-        // 已分类项的分类名已在分组标题展示，行内标签冗余；仅未分类项保留「＋ 标签」入口便于后续归类
         const tagBtn = cat
-          ? ""
-          : `<button type="button" class="fav-item__tag" data-repo="${repo}" title="设置分类">＋ 标签</button>`;
+          ? `<button type="button" class="fav-item__tag fav-item__tag--handle" data-repo="${repo}" title="拖到别的分类，或点击选分类" aria-label="更改 ${repo} 的分类">⠿</button>`
+          : `<button type="button" class="fav-item__tag" data-repo="${repo}" title="拖到别的分类，或点击选分类">＋ 标签</button>`;
         return `
-            <div class="fav-item">
+            <div class="fav-item" data-repo="${repo}">
               <div class="fav-item__main">
                 <div class="fav-item__name">
                   <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
@@ -1534,7 +1574,6 @@
           favList.innerHTML = '<div class="fav-empty">还没有收藏。在对话里让我分析后说“收藏它”，或在报告页点⭐。</div>';
           return;
         }
-        // 按分类分组，组内保持原有（收藏时间倒序）顺序；「未分类」始终排最后
         const groups = new Map();
         list.forEach(function (item) {
           const key = (item.category || "").trim() || UNCATEGORIZED;
@@ -1554,10 +1593,10 @@
         });
         favList.innerHTML = keys.map(function (key) {
           const groupItems = groups.get(key);
-          return `<div class="fav-group">
-              <div class="fav-group__head">${escapeHtml(key)} <span class="fav-group__count">${groupItems.length}</span></div>
-              ${groupItems.map(renderItem).join("")}
-            </div>`;
+          return `<details class="fav-group" data-group="${escapeHtml(key)}"${expanded.has(key) ? " open" : ""}>
+              <summary class="fav-group__head">${escapeHtml(key)} <span class="fav-group__count">${groupItems.length}</span></summary>
+              <div class="fav-group__items">${groupItems.map(renderItem).join("")}</div>
+            </details>`;
         }).join("");
       }
 
@@ -1567,13 +1606,6 @@
       }
     }
 
-    // 仅把"真实存在的报告名（latestReports 里有的 *.md）"转成链接，
-    // 避免正文里随便出现的 README.md 之类被链成死链。
-    //
-    // 走文本节点而不是在 HTML 串上正则替换：字符串替换分不清匹配到的是正文还是属性值，
-    // 回复里出现 `<a href="https://x/2026-07-30.md">` 时会把一整个 <a> 标签塞进属性里，
-    // 把 DOM 撑坏。顺带跳过 a/code/pre —— 链接里套链接是非法 HTML，代码块里的文件名
-    // 也不该变成链接。
     const REPORT_NAME_RE = /[\w.-]+\.md/g;
 
     function linkKnownReports(html) {
@@ -1620,7 +1652,6 @@
     }
 
     function enhanceReply(text) {
-      // 使用 marked 渲染 Markdown，DOMPurify 防 XSS
       if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
         const rawHtml = marked.parse(text);
         const safeHtml = DOMPurify.sanitize(rawHtml, {
@@ -1628,10 +1659,6 @@
             "target", "class", "type", "data-repo", "title", "aria-label", "aria-hidden",
             "viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "xmlns",
           ],
-          // 选项名是 ALLOWED_TAGS。写成 ALLOW_TAGS 时 DOMPurify 当未知键静默忽略，
-          // 于是这份白名单一行都没生效，用的是库自带那份宽得多的默认表（<style>
-          // <form> 都在里面）。补上 input/b/i/s 等是因为白名单一旦真生效就是**全量替换**
-          // 默认表，漏写的标签会被剥掉 —— 任务列表的复选框就是这么丢的。
           ALLOWED_TAGS: [
             "h1","h2","h3","h4","h5","h6","p","br","hr","ul","ol","li",
             "strong","em","del","code","pre","blockquote","a","img",
@@ -1642,7 +1669,6 @@
         });
         return linkKnownReports(safeHtml);
       }
-      // Fallback：无 marked/DOMPurify 时简单渲染
       const escaped = escapeHtml(text);
       return linkKnownReports(escaped).replace(/\n/g, "<br>");
     }
@@ -1831,7 +1857,6 @@
       syncTabLayout();
       mobileQuery.addEventListener("change", syncTabLayout);
 
-      // 生成报告后自动闪烁报告 Tab 提示用户（通过回调，而非重写 loadReports）
       onReportsRendered((prevCount, count) => {
         if (count > prevCount && reportPanel.hidden) {
           const reportTab = tabsBar.querySelector('[data-tab="report"]');
@@ -1905,7 +1930,6 @@
       if (headerBtn) headerBtn.addEventListener("click", toggle);
 
       document.addEventListener("keydown", (event) => {
-        // Ctrl/⌘ + B：编辑器通用的侧栏开关，双向切换
         if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
             && (event.key === "b" || event.key === "B")) {
           if (!desktopQuery.matches) return;
@@ -1913,7 +1937,6 @@
           toggle();
           return;
         }
-        // Esc：桌面端、侧栏已折叠且无弹层时，一键展开（退出"放大"态）
         if (event.key !== "Escape" || !desktopQuery.matches || !isCollapsed()) {
           return;
         }
@@ -1972,7 +1995,6 @@
           }
         });
 
-        // 键盘可达：聚焦分隔条后方向键微调（Shift 加大步长），Home 复位
         sash.addEventListener("keydown", (event) => {
           const step = event.shiftKey ? 5 : 2;
           if (event.key === "ArrowLeft") {
@@ -1988,7 +2010,6 @@
         });
       }
 
-      // 收起态角标：提示"侧栏里还有 N 条收藏"，避免收起后信息完全失联
       if (badge && window.GitHubHotFavorites) {
         window.GitHubHotFavorites.subscribe((list) => {
           const n = list.length;

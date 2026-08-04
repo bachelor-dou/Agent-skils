@@ -9,9 +9,9 @@ import logging
 
 from .. import config
 from ..common.timeutil import age_days, utc_today
-from ..core import growth as growth_calc
-from ..infra.store import favorites, snapshots, universe
-from . import describe
+from ..service import growth as growth_calc
+from ..infra.data_access import favorites, snapshots, universe
+from ..service import describe
 from .spec import Param, Tool
 
 logger = logging.getLogger("hot_project")
@@ -50,7 +50,6 @@ def resolve(ctx, raw: str) -> tuple[str | None, dict | None]:
     if len(found) == 1:
         return found[0]["full_name"], None
 
-    # 恰好有一个「仓库名完全相同」的强匹配 → 就是它,不用问
     exact = [r for r in found
              if r["full_name"].rsplit("/", 1)[-1].lower() == query.lower()]
     if len(exact) == 1:
@@ -89,7 +88,6 @@ def repo_growth(ctx, args: dict) -> dict:
     result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
                                  age_days(info.get("created_at", "")), base.span)
     if result is None:
-        # 单仓库查询和榜单不同:这里「算不出来」本身就是用户要的答案,得说清原因。
         return {"repo": name, "star": star, "growth": None,
                 "message": f"最近 {days} 天的快照里一次都没测到过 {name}(多半是它刚进库),"
                            "这个窗口算不出增长 —— 不要当成零增长,过一天有了基线就能算。"}
@@ -162,7 +160,6 @@ def search_repos(ctx, args: dict) -> dict:
     if not query:
         return {"error": "缺少查询词 query。请把用户需求转成简洁的英文关键词。"}
     if "in:" not in query.lower():
-        # 默认把匹配范围扩到 README:按描述找项目时,关键词往往只出现在正文里
         query = f"{query} in:name,description,readme"
     if (min_star := args.get("min_star", 0)) > 0:
         query = f"{query} stars:>={min_star}"

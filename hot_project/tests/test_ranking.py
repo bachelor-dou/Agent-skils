@@ -9,26 +9,25 @@ import pytest
 
 from hot_project import config
 from hot_project.common.timeutil import utc_today
-from hot_project.core import scoring
-from hot_project.infra.store import snapshots
-from hot_project.provider.github import tasks as gh_tasks
-from hot_project.tools import ranking
+from hot_project.infra.data_access import snapshots
+from hot_project.provider.github import collect
+from hot_project.service import ranking
 
-W = scoring.Weights(window_days=7, recent_days=3, alpha=0.5, cap=2.0)
+W = ranking.Weights(window_days=7, recent_days=3, alpha=0.5, cap=2.0)
 
 
 # ── 打分公式 ───────────────────────────────────────────────────────
 
 def test_more_growth_scores_higher():
-    small = scoring.score({"growth": 100, "star": 10000}, scoring.COMPREHENSIVE, W)
-    big = scoring.score({"growth": 5000, "star": 10000}, scoring.COMPREHENSIVE, W)
+    small = ranking.score({"growth": 100, "star": 10000}, ranking.COMPREHENSIVE, W)
+    big = ranking.score({"growth": 5000, "star": 10000}, ranking.COMPREHENSIVE, W)
     assert big > small
 
 
 def test_a_small_project_growing_fast_can_beat_a_giant_growing_slowly():
     """增长率那一项存在的全部理由。没有它,榜单永远是那几个巨无霸。"""
-    nimble = scoring.score({"growth": 900, "star": 1200}, scoring.COMPREHENSIVE, W)
-    giant = scoring.score({"growth": 1000, "star": 200000}, scoring.COMPREHENSIVE, W)
+    nimble = ranking.score({"growth": 900, "star": 1200}, ranking.COMPREHENSIVE, W)
+    giant = ranking.score({"growth": 1000, "star": 200000}, ranking.COMPREHENSIVE, W)
     assert nimble > giant
 
 
@@ -36,46 +35,43 @@ def test_an_absurd_growth_rate_buys_much_less_than_it_looks():
     """100 星涨到 300 的「三倍」和 10000 星涨 2 万不是一回事,两处 log 负责压平。"""
     plain = {"growth": 400, "star": 800}          # 率 0.5
     absurd = {"growth": 1200, "star": 800}        # 率 1.5
-    ratio = (scoring.score(absurd, scoring.COMPREHENSIVE, W)
-             / scoring.score(plain, scoring.COMPREHENSIVE, W))
-    # 涨三倍的量只换来 1.30 倍的分。这个数要卡死:它同时锁住两项系数的配比
-    # (热度 : 增长率 ≈ 6.5:3.5),松成「小于 2」的话把 1200 调到 3600 也照样通过。
+    ratio = (ranking.score(absurd, ranking.COMPREHENSIVE, W)
+             / ranking.score(plain, ranking.COMPREHENSIVE, W))
     assert ratio == pytest.approx(1.30, rel=0.02)
 
 
 def test_hot_new_ranks_purely_by_growth():
     """新项目榜比的就是谁涨得多。叠增长率会让三天涨 200 压过三十天涨 3000。"""
-    assert scoring.score({"growth": 3000, "star": 50000}, scoring.HOT_NEW, W) == 3000.0
-    assert scoring.score({"growth": 200, "star": 210}, scoring.HOT_NEW, W) == 200.0
+    assert ranking.score({"growth": 3000, "star": 50000}, ranking.HOT_NEW, W) == 3000.0
+    assert ranking.score({"growth": 200, "star": 210}, ranking.HOT_NEW, W) == 200.0
 
 
 # ── 爆发加成 ───────────────────────────────────────────────────────
 
 def test_speeding_up_earns_a_boost():
-    #  7 天涨 700(每天 100),最近 3 天涨 600(每天 200)→ 加速比 2
-    assert scoring.burst_boost(700, 600, W) == pytest.approx(1.5)
+    assert ranking.burst_boost(700, 600, W) == pytest.approx(1.5)
 
 
 def test_slowing_down_is_not_punished():
     """「前期猛、最近平」本来就该靠基础分排;再罚一次是对同一件事收两遍税。"""
-    assert scoring.burst_boost(700, 30, W) == 1.0
+    assert ranking.burst_boost(700, 30, W) == 1.0
 
 
 def test_one_freak_number_cannot_flip_the_board():
-    huge = scoring.burst_boost(7, 100000, W)
+    huge = ranking.burst_boost(7, 100000, W)
     assert huge == pytest.approx(1.0 + W.alpha * W.cap)
 
 
 def test_no_probe_data_means_no_boost_not_a_penalty():
     """缺快照的日子探针整个失效。全场一起挨罚的话顺序其实没变,
     只是分数集体缩水,看日志的人会以为打分坏了。"""
-    assert scoring.burst_boost(700, None, W) == 1.0
+    assert ranking.burst_boost(700, None, W) == 1.0
 
 
 def test_the_boost_uses_the_real_span_on_both_sides():
     """主窗口修正了、探针没修正的话,5 天的增量除以名义的 3 天,凭空造出一场爆发。"""
-    honest = scoring.burst_boost(700, 500, W._replace(recent_days=5))
-    inflated = scoring.burst_boost(700, 500, W._replace(recent_days=3))
+    honest = ranking.burst_boost(700, 500, W._replace(recent_days=5))
+    inflated = ranking.burst_boost(700, 500, W._replace(recent_days=3))
     assert inflated > honest
 
 
@@ -84,13 +80,13 @@ def test_each_repo_uses_its_own_baseline_span_not_the_global_one():
     加速比虚高,凭空多拿一档加成 —— 逐仓天数就是为了堵这个。"""
     item = {"growth": 700, "star": 9000, "recent_growth": 600,
             "window_days": 3, "recent_days": 3}
-    honest = scoring.score(item, scoring.COMPREHENSIVE, W)
-    inflated = scoring.score({**item, "window_days": 7}, scoring.COMPREHENSIVE, W)
+    honest = ranking.score(item, ranking.COMPREHENSIVE, W)
+    inflated = ranking.score({**item, "window_days": 7}, ranking.COMPREHENSIVE, W)
     assert inflated > honest
 
 
 def test_ranking_writes_the_score_back_for_the_logs():
-    ordered = scoring.rank({"a/x": {"growth": 10, "star": 100}}, scoring.COMPREHENSIVE, W)
+    ordered = ranking.rank({"a/x": {"growth": 10, "star": 100}}, ranking.COMPREHENSIVE, W)
     assert ordered[0][1]["_score"] > 0
 
 
@@ -105,7 +101,7 @@ class _GH:
 
     def stars(self, names):
         self.asked = list(names)
-        return gh_tasks.Harvest(stars={n: s for n, s in self.live.items() if n in set(names)})
+        return collect.Harvest(stars={n: s for n, s in self.live.items() if n in set(names)})
 
 
 def _baseline(stars, span, spans=None):

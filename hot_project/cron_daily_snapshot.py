@@ -24,32 +24,27 @@ from typing import NamedTuple
 from . import config
 from .common import logs
 from .common.timeutil import utc_today
-from .infra.store import snapshots, universe
+from .infra.data_access import snapshots, universe
 from .infra.tasks import TaskPool
 from .provider.github import request as gh
-from .provider.github import tasks as gh_tasks
+from .provider.github import collect
 from .provider.github import tokens as gh_tokens
 from .provider.github import trending
 
 logger = logging.getLogger("hot_project")
 
-# ── 采集参数:实测定死的,不是可调旋钮,所以不进 config ──
-#
-# GraphQL 并发在 `gh_tasks.GRAPHQL_WORKERS`(榜单实时取 star 走同一条道,只能有一处)。
-# Search 侧按 token 数走:每个 token 有独立的 30 次/分钟额度,配速由 token 池管。
 SEARCH_WORKERS_CAP = 12
-# Trending 只有三个周期,再多 worker 也没任务可领。
 FREE_WORKERS = 3
 
 
 def _make_pool(tokens: gh_tokens.TokenPool, search_workers: int) -> TaskPool:
     """把 token 池接到任务池上 —— 任务只说自己要哪种 token,不认识 token 池,配速在这里定。"""
-    paces = {gh_tasks.SEARCH_TOKEN: gh_tokens.SEARCH, gh_tasks.CORE_TOKEN: gh_tokens.CORE}
+    paces = {collect.SEARCH_TOKEN: gh_tokens.SEARCH, collect.CORE_TOKEN: gh_tokens.CORE}
     return TaskPool(
         lanes={
-            gh_tasks.SEARCH_LANE: search_workers,
-            gh_tasks.GRAPHQL_LANE: gh_tasks.GRAPHQL_WORKERS,
-            gh_tasks.FREE_LANE: FREE_WORKERS,
+            collect.SEARCH_LANE: search_workers,
+            collect.GRAPHQL_LANE: collect.GRAPHQL_WORKERS,
+            collect.FREE_LANE: FREE_WORKERS,
         },
         leaser=lambda kind: tokens.lease(paces[kind]),
     )
@@ -60,17 +55,17 @@ def _make_pool(tokens: gh_tokens.TokenPool, search_workers: int) -> TaskPool:
 # ──────────────────────────────────────────────────────────
 async def discover(
     tokens: gh_tokens.TokenPool, client, min_star: int, max_star: int
-) -> gh_tasks.Discovered:
+) -> collect.Discovered:
     """三阶段收集,一次性全提交 —— 关键词、星段、Trending 无先后关系,分开跑只让 token 闲着。"""
-    sink = gh_tasks.Discovered()
+    sink = collect.Discovered()
     words = [w for group in config.SEARCH_KEYWORDS.values() for w in group]
 
     async with _make_pool(tokens, min(SEARCH_WORKERS_CAP, tokens.capacity)) as pool:
         for word in words:
-            pool.submit(gh_tasks.KeywordPage(sink, client, word, min_star))
-        pool.submit(gh_tasks.SegmentProbe(sink, client, min_star, max_star))
+            pool.submit(collect.KeywordPage(sink, client, word, min_star))
+        pool.submit(collect.SegmentProbe(sink, client, min_star, max_star))
         for period in trending.PERIODS:
-            pool.submit(gh_tasks.TrendingPage(sink, client, period))
+            pool.submit(collect.TrendingPage(sink, client, period))
         await pool.join()
 
     logger.info(
@@ -110,13 +105,13 @@ def phase_yield(sources: dict[str, set[str]], fresh: set[str]) -> tuple[int, int
         return len(seen & fresh)
 
     return (
-        hit(lambda s: s.startswith(gh_tasks.KEYWORD_SOURCE)),
-        hit(lambda s: s == gh_tasks.SEGMENT_SOURCE),
-        hit(lambda s: s == gh_tasks.TRENDING_SOURCE),
+        hit(lambda s: s.startswith(collect.KEYWORD_SOURCE)),
+        hit(lambda s: s == collect.SEGMENT_SOURCE),
+        hit(lambda s: s == collect.TRENDING_SOURCE),
     )
 
 
-def log_yield(found: gh_tasks.Discovered, fresh: set[str]) -> None:
+def log_yield(found: collect.Discovered, fresh: set[str]) -> None:
     """三个阶段各给 DB 带来多少新仓库,再点名产出最高的来源。只写日志,不影响流程。
 
     用来找白跑的关键词:判据要跨多天看,单天 0 新增很正常。
@@ -125,7 +120,7 @@ def log_yield(found: gh_tasks.Discovered, fresh: set[str]) -> None:
                     reverse=True)
     if not scored:
         return
-    words = [(n, s) for n, s in scored if s.startswith(gh_tasks.KEYWORD_SOURCE)]
+    words = [(n, s) for n, s in scored if s.startswith(collect.KEYWORD_SOURCE)]
     barren = sum(1 for n, _ in words if n == 0)
 
     kw, seg, trend = phase_yield(found.sources, fresh)
@@ -139,19 +134,19 @@ def log_yield(found: gh_tasks.Discovered, fresh: set[str]) -> None:
 # ──────────────────────────────────────────────────────────
 # 第 4 步 采集
 # ──────────────────────────────────────────────────────────
-async def collect(
+async def fetch_stars(
     tokens: gh_tokens.TokenPool, client, names: list[str]
-) -> gh_tasks.Harvest:
+) -> collect.Harvest:
     """给每个仓库取一次当天的 star。"""
-    sink = gh_tasks.Harvest()
-    groups = gh_tasks.batches(names)
+    sink = collect.Harvest()
+    groups = collect.batches(names)
     logger.info("待采集 %d 个仓库,分 %d 批,并发 %d。",
-                len(names), len(groups), gh_tasks.GRAPHQL_WORKERS)
+                len(names), len(groups), collect.GRAPHQL_WORKERS)
 
     started = time.time()
     async with _make_pool(tokens, 1) as pool:
         for group in groups:
-            pool.submit(gh_tasks.StarBatch(sink, client, group))
+            pool.submit(collect.StarBatch(sink, client, group))
         await pool.join()
 
     logger.info(
@@ -163,12 +158,6 @@ async def collect(
 
 # ──────────────────────────────────────────────────────────
 # 第 7 步 淘汰
-#
-# DB 不能只增:废弃仓库会一直占着每天的采集量和 git 历史。
-#
-# 只有两条规则:GitHub 确认查不到(改名/删库/转私有),或者 star 掉到门槛以下。没有宽限期、
-# 没有对收藏/已上榜仓库的保护,因为**淘汰是可逆的** —— 再涨回门槛之上,下一次发现阶段会
-# 把它重新收进来。
 # ──────────────────────────────────────────────────────────
 class Eviction(NamedTuple):
     """该删哪些,以及为什么删 —— 分开列出,日志才能看出这轮是正常代谢还是采集出了事。"""
@@ -205,16 +194,11 @@ def decide(
     )
 
 
-# 一轮最多允许因「查不到」删掉多少:占库的这个比例,或这个绝对条数,取大的那个。
-#
-# `decide` 保证不了**确认查不到本身是错的**:GitHub 一次「200 + data 全 null」的事故会被
-# `StarBatch` 拆成几万个「确认查不到」。正常代谢每天几十个,闸门在正常日子里不会响;宁可
-# 多留一天垃圾,也不要在一次事故里把库删空(连 LLM 写过的 desc 一起没了)。
 MAX_MISSING_RATIO = 0.01
 MAX_MISSING_FLOOR = 200
 
 
-def retire(tracked: set[str], harvest: gh_tasks.Harvest, star_floor: int) -> list[str]:
+def retire(tracked: set[str], harvest: collect.Harvest, star_floor: int) -> list[str]:
     plan = decide(tracked, harvest.stars, harvest.missing, star_floor=star_floor)
 
     ceiling = max(MAX_MISSING_FLOOR, int(len(tracked) * MAX_MISSING_RATIO))
@@ -224,9 +208,6 @@ def retire(tracked: set[str], harvest: gh_tasks.Harvest, star_floor: int) -> lis
             "这个量级不是仓库集体消失,是采集出了系统性问题 —— 先查采集,库保持原样。",
             len(plan.missing), ceiling, len(tracked),
         )
-        # star 掉到门槛以下那部分照常执行:它来自**成功测到**的 star 值,不受影响。
-        # 不用 `_replace`:本类重写了 `__len__`,而 `_replace` 会拿 `len()` 自检字段个数,
-        # 于是必然 TypeError。
         plan = Eviction(missing=[], too_small=plan.too_small)
 
     if not plan:
@@ -281,7 +262,7 @@ async def run(args: argparse.Namespace) -> int:
             logger.info("调试模式:只采前 %d 个仓库,不落盘。", len(names))
 
         # ── 4. 采集 ──────────────────────────────────────
-        harvest = await collect(tokens, client, names)
+        harvest = await fetch_stars(tokens, client, names)
     finally:
         await client.aclose()
 
@@ -290,7 +271,6 @@ async def run(args: argparse.Namespace) -> int:
         return 0
 
     # ── 5-6. 覆盖率闸门 + 写快照 ─────────────────────────
-    # 闸门在 `snapshots.save` 里(覆盖率不足就不产生文件)。这里不再重复判断,以免两处阈值分叉。
     if snapshots.save(
         today, harvest.stars, not_found=sorted(harvest.missing), expected=len(names),
         throttle={"hits": tokens.stats["rate_limited"],
@@ -299,8 +279,6 @@ async def run(args: argparse.Namespace) -> int:
         logger.error("本次未落盘,明天重试(锚点可顺延到邻近快照)。")
         return 1
 
-    # 传 today:不传的话 prune 自己再取一次 UTC 日期,跨 UTC 零点的那一轮会拿 D 写快照、
-    # 却按 D+1 算截断点,把本该留着的 D−35 那份删掉。
     dropped = snapshots.prune(args.keep_days, today=today)
     if dropped:
         logger.info("清理过期快照 %d 份:%s ~ %s", len(dropped), dropped[0], dropped[-1])
@@ -320,8 +298,6 @@ def main() -> int:
     p.add_argument("--keep-days", type=int, default=config.SNAPSHOT_KEEP_DAYS)
     args = p.parse_args()
 
-    # 早挡一次:0 会连今天那份一起删光,而快照重算不回来。prune 里也有同样的检查,
-    # 但那时已经采集了两小时。
     if args.keep_days < 1:
         p.error(f"--keep-days 至少为 1,收到 {args.keep_days}(0 会删光全部快照)")
 

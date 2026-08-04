@@ -20,18 +20,17 @@ import sys
 from . import config
 from .common import logs
 from .common.timeutil import format_day, utc_today
-from .core import report_parse
 from .infra import notify
-from .infra.store import reports
+from .infra.data_access import reports
 from .provider.github import client as github
-from .tools import ranking
+from .service import ranking
 
 logger = logging.getLogger("hot_project")
 
 TOP_IN_PUSH = 5
 
 
-def previous_report(current: str) -> tuple[str, report_parse.Report] | None:
+def previous_report(current: str) -> tuple[str, reports.Report] | None:
     """找上一期**同类型**的报告(后缀相同、日期更早)。没有返回 None。
 
     必须按后缀配对:拿 `_NEW` 那份当综合榜的上期,「上新 / 移出」全是噪音。
@@ -41,9 +40,6 @@ def previous_report(current: str) -> tuple[str, report_parse.Report] | None:
         return None
     suffix = current[len(str(day)):]
 
-    # 必须显式按日期排,不能拿 `listing()` 的第一条 —— 那是按**修改时间**倒序的,而 CI
-    # 每次全新 checkout,所有报告 mtime 几乎相同、先后随机。挑错上期,推送里的
-    # 「上新 N · 移出 M」就全是错的,收到的人没有任何办法看出来。
     earlier = sorted(
         (item for item in reports.listing()
          if item.day is not None and item.day < day

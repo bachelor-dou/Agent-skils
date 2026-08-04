@@ -9,7 +9,6 @@
   const pagerPos = document.getElementById("pager-pos");
   const sidebarScroll = document.getElementById("sidebar-scroll");
 
-  // 结构化面板不存在（旧版 Markdown 报告）→ 保持平铺 + 锚点跳转
   if (!panels.length || !navItems.length) {
     return;
   }
@@ -66,7 +65,6 @@
     if (opts.scrollTop !== false) {
       window.scrollTo({ top: 0, behavior: "auto" });
     }
-    // 保证侧栏当前项可见
     const activeItem = navItems[index];
     if (sidebarScroll && activeItem && typeof activeItem.scrollIntoView === "function") {
       activeItem.scrollIntoView({ block: "nearest" });
@@ -156,7 +154,6 @@
     apply();
   });
 
-  // 过滤 chip：全部 /（有对比时）仅上新 / 仅收藏
   const freshCount = navItems.filter(function (item) {
     return item.hasAttribute("data-fresh");
   }).length;
@@ -191,7 +188,6 @@
   const searchBox = input.parentElement;
   searchBox.parentElement.insertBefore(bar, searchBox.nextSibling);
 
-  // 收藏数随服务端数据/用户操作更新；仅收藏视图下需实时重筛
   if (favoritesApi && typeof favoritesApi.subscribe === "function") {
     favoritesApi.subscribe(function () {
       const n = navItems.filter(isFav).length;
@@ -224,7 +220,6 @@
     app.style.setProperty("--sidebar-w", clamp(px) + "px");
   }
 
-  // 拖拽仅在桌面双栏布局下生效（移动端为抽屉，忽略）
   function isDesktop() {
     return window.matchMedia("(min-width: 961px)").matches;
   }
@@ -272,7 +267,6 @@
   window.addEventListener("pointerup", stop);
   window.addEventListener("pointercancel", stop);
 
-  // 双击手柄恢复默认宽度
   resizer.addEventListener("dblclick", function () {
     app.style.removeProperty("--sidebar-w");
     window.localStorage.removeItem(STORE_KEY);
@@ -313,15 +307,12 @@
   const setButtonState = window.HotCommon.applyRepoCopyState;
   const copyText = window.HotCommon.copyText;
 
-  // 经典「圆环带箭头」刷新图标（Feather rotate-cw），描边跟随文字色。
   const REFRESH_SVG =
     '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M23 4v6h-6"></path>' +
     '<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
 
-  // 段落已由后端按整页渲染的规则切好。只用 textContent 写入：内容是 LLM 生成的外部文本，
-  // 走 innerHTML 就是开一个 XSS 口子。段名对不上的面板跳过。
   function applySections(detail, sections) {
     const panels = Array.prototype.slice.call(detail.querySelectorAll(".repo-panel"));
     (sections || []).forEach(function (item) {
@@ -348,7 +339,6 @@
   async function refreshDescription(button) {
     const repo = button.getAttribute("data-repo") || "";
     const detail = button.closest(".repo-detail");
-    // 转圈期间再点无效：LLM 一轮要几秒到几十秒，连点只会排队重复消耗 token。
     if (!repo || !detail || button.classList.contains("is-spinning")) {
       return;
     }
@@ -426,7 +416,6 @@
     }
   });
 
-  // 侧栏项目行的收藏 ★：挂到 meta 行行首（上新/NEW 徽章之后）
   document.querySelectorAll(".repo-nav__item").forEach(function (item) {
     const repo = item.getAttribute("data-repo") || "";
     const meta = item.querySelector(".repo-nav__meta");
@@ -438,7 +427,6 @@
     star.className = "repo-nav__fav";
     star.setAttribute("data-repo", repo);
     setFavoriteButtonState(star, repo);
-    // 收藏点击不触发面板切换/跳转
     star.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
@@ -446,7 +434,6 @@
         favoritesApi.toggle(repo, star);
       }
     });
-    // 放在增长数与排名变化(↑/↓)之间：紧跟增长数之后
     const growthEl = meta.querySelector(".repo-nav__growth");
     if (growthEl) {
       meta.insertBefore(star, growthEl.nextSibling);
@@ -471,7 +458,6 @@
   if (favoritesApi && typeof favoritesApi.subscribe === "function") {
     favoritesApi.subscribe(syncAllFavButtons);
   }
-  // 预载服务端收藏数据（内部完成后会经 subscribe 回调刷新所有 ★ 状态）
   if (favoritesApi && typeof favoritesApi.ready === "function") {
     favoritesApi.ready();
   }
@@ -518,7 +504,6 @@
 
   const escapeHtml = (window.HotCommon && window.HotCommon.escapeHtml) || function (s) { return s; };
 
-  // 共享背景遮罩：走势弹层以居中浮层覆盖显示，不撑长页面
   const backdrop = document.createElement("div");
   backdrop.className = "repo-trend-backdrop";
   backdrop.hidden = true;
@@ -575,7 +560,6 @@
     const x = function (i) { return padL + (W - padL - padR) * (n === 1 ? 0 : i / (n - 1)); };
     const y = function (v) { return padT + (H - padT - padB) * (1 - (v - min) / span); };
 
-    // Y 轴：min / 中值 / max 三条网格线 + 刻度值
     const yTicks = [min, (min + max) / 2, max];
     const grid = yTicks.map(function (v) {
       const yy = y(v).toFixed(1);
@@ -583,7 +567,6 @@
         + '<text class="repo-trend__axis" x="' + (padL - 6) + '" y="' + (parseFloat(yy) + 3).toFixed(1) + '" text-anchor="end">' + kfmt(v) + "</text>";
     }).join("");
 
-    // X 轴：每个点的日期（月-日）；点多时隔一个显示
     const stepEvery = n > 8 ? 2 : 1;
     const xlabels = pts.map(function (p, i) {
       if (i % stepEvery !== 0 && i !== n - 1) return "";
@@ -592,7 +575,6 @@
     }).join("");
 
     const poly = pts.map(function (p, i) { return x(i).toFixed(1) + "," + y(p.star).toFixed(1); }).join(" ");
-    // 折线下方的面积填充（更显眼）：折线 + 右下角 + 左下角
     const baseY = (H - padB).toFixed(1);
     const area = poly + " " + x(n - 1).toFixed(1) + "," + baseY + " " + x(0).toFixed(1) + "," + baseY;
     const dots = pts.map(function (p, i) {

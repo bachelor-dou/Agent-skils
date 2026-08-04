@@ -23,7 +23,6 @@ URL = "https://github.com/trending"
 PERIODS = ("daily", "weekly", "monthly")
 DEFAULT_PERIOD = "weekly"
 
-# 不带 UA 会被当成爬虫挡掉。
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

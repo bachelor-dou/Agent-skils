@@ -28,22 +28,14 @@ class Pace(NamedTuple):
     interval: float
 
 
-# Search 真正的墙不是每 token 30 次/分(被拒时 remaining 还剩 21),而是按**来源 IP** 计的
-# 二级限流:12 个独立 token 共用一个额度,会在同一秒一起撞(retry-after 60)。
-# 这个配速控制不了撞墙(三轮实测:放慢反而撞得更早、发得更少),成因未知(GitHub 明说 undisclosed)。
-# 既然撞墙不可避免,就在冷却间隔内尽量多发请求 —— 配速越小吞吐越高;2.5s 为保守值(再小有封号风险)。
-# 间隔必须按 token 跨调用延续:多数搜索不到 3 页就结束、尾部没 sleep,页间 sleep 拦不住突发。
 SEARCH = Pace("search", 2.5)
 
-# GraphQL/REST 走 core(5000 点/小时),批量取 star 一次 100 个仓库,配额是零头,故间隔 0(保留只为同形)。
 CORE = Pace("core", 0.0)
 
 
-# 401:连续这么多次才永久失效,否则按瞬时故障冷却;任一次成功归还清零(「连续」是关键)。
 AUTH_FAIL_STRIKES = 3
 AUTH_FAIL_COOLDOWN = 60.0
 
-# 限流恢复后多等一会:reset 与实际放行有抖动,掐点重发会再吃一个 403(代价是整轮冷却)。
 RECOVERY_BUFFER = 3.0
 
 
@@ -109,7 +101,6 @@ class TokenPool:
             raise ValueError("token 池至少需要一个 token(设置 GITHUB_TOKENS)")
 
         self._tokens = [_Token(secret=s) for s in cleaned]
-        # 先建好只是让字段存在;真正绑到哪个循环由 `_bind_to_running_loop` 在首次借出时决定。
         self._cond = asyncio.Condition()
         self._cond_loop: asyncio.AbstractEventLoop | None = None
         self._now = time_fn or time.time
@@ -161,7 +152,6 @@ class TokenPool:
             await self._on_auth_failed(index, str(e))
             raise
         except BaseException:
-            # 不是 token 的错,只归还。但也不清零 401 计数:那次请求没成功,不算「健康」的证据。
             await self._on_released(index, healthy=False)
             raise
         else:
@@ -208,13 +198,11 @@ class TokenPool:
                 self.stats["waits"] += 1
                 wait = self._earliest_ready(now, pace)
                 if wait is None:
-                    # 全被借走了 —— 没有确定的到期时刻,只能等某个租约归还时来叫醒。
                     await self._cond.wait()
                     continue
 
                 self.stats["waited_seconds"] += wait
                 try:
-                    # 等冷却/配速到期,但也接受被提前叫醒(有人归还了、或新增了 token)。
                     await asyncio.wait_for(self._cond.wait(), timeout=wait)
                 except TimeoutError:
                     pass
@@ -247,16 +235,11 @@ class TokenPool:
         return self._tokens[index].secret
 
     async def _on_released(self, index: int, *, healthy: bool) -> None:
-        # 先同步清掉 in_use,再去抢锁:归还路径本身就跑在异常里(见 lease 的
-        # except BaseException),取消要是打在下面那个 await 上,in_use 就永远清不掉 ——
-        # token 被漏掉、_pick 永不返回它,若它是最后一张,等待者全挂死、join() 永不返回。
         self._tokens[index].in_use = False
         async with self._cond:
             token = self._tokens[index]
             if healthy:
                 token.auth_fails = 0
-            # notify_all 而不是 notify:等待者的条件各不相同(要的 pace 不一样),被叫醒的那个
-            # _pick 不到就把这次唤醒白吃掉,而挂在**无限** wait() 里的那个没被叫到。
             self._cond.notify_all()
 
     async def _on_rate_limited(self, index: int, reset_at: float, reason: str) -> None:
@@ -285,8 +268,6 @@ class TokenPool:
                 self.stats["invalidated"] += 1
                 logger.warning("token#%d 连续 %d 次 401,永久失效(容量 → %d)。",
                                index, token.auth_fails, self.capacity)
-                # 失效改变了「全部失效 → 抛错」这个出口条件,必须叫醒**所有**等待者,否则最后
-                # 一个 token 失效时已挂起的 worker 会永久错过出口而死锁。
                 self._cond.notify_all()
             else:
                 token.available_at = max(token.available_at,

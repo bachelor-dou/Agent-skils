@@ -31,16 +31,10 @@ class Task:
     lane: ClassVar[str] = "free"
     needs_token: ClassVar[bool] = False
 
-    # 需要哪种 token。对本层是**不透明字符串**,由接线时的 leaser 解释成具体配速。
     token_kind: ClassVar[str] = "default"
 
-    # 瞬时故障最多重排几次。超了就按失败收尾,避免网络长期不通时无限自旋。
     max_retries: ClassVar[int] = 3
 
-    # 撞限流最多回队几次。单独一本账、而且宽得多:限流不是这个任务的错,等一会儿必然放行,
-    # 不该占用瞬时故障的那三次。但**必须有界** —— GitHub 二级限流能连续几十分钟返 403,
-    # 无界重排会让每日任务转到 Actions 六小时超时,既没落盘也没报错,看起来像卡死;
-    # 有界则退化成「这批采集失败 → 覆盖率不足 → 拒绝落盘」,那是设计好的失败姿势。
     max_rate_limits: ClassVar[int] = 20
 
     attempts: int = 0               # 已经跑过几次,由池维护

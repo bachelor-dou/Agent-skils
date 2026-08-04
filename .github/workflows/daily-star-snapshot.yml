@@ -12,8 +12,9 @@ on:
 permissions:
   contents: write
 
+# group 和周报共用,理由见 weekly-report.yml:两者都写 Github_DB.json,不能同时跑。
 concurrency:
-  group: star-snapshot
+  group: main-data-write
   cancel-in-progress: false
 
 jobs:

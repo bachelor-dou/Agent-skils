@@ -17,45 +17,21 @@ import pytest
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = PACKAGE_ROOT.name
 
-# 顶层入口脚本(api_server.py / cron_*.py / agent_cli.py)的伪层名。
-# 它们是编排入口,可以 import 任何层;反过来任何层都不许 import 它们
-# —— 所以 SCRIPTS 不出现在任何其他层的允许集合里。
-#
-# 注意 `config.py` 也是顶层文件但**不**算脚本:判据是「名字是否已注册成层」,
-# 见 `_layer_of`。config 是最底座,人人可用。
 SCRIPTS = "<顶层入口脚本>"
 
-# 顺序即依赖方向:后面的可以 import 前面的。config 是单个顶层文件,其余都是目录。
-#
-# `web` 排在 `agent` 之后:网页端要用 agent(每个会话一个 Agent 实例),反过来 agent
-# 不该知道有个网页存在 —— 它同样服务于 CLI。
-_LAYERS = ["common", "config", "core", "infra", "provider", "tools", "agent", "web"]
+_LAYERS = ["common", "config", "infra", "provider", "service", "tools", "agent", "web"]
 
-# 各层允许 import 的层(不含同层 —— 同层一律允许)。顺序即依赖方向:后面的可以用前面的。
 ALLOWED: dict[str, set[str]] = {
     name: set(_LAYERS[:i]) for i, name in enumerate(_LAYERS)
 }
 ALLOWED[SCRIPTS] = set(_LAYERS)
 ALLOWED["tests"] = set(_LAYERS) | {SCRIPTS}
 
-# core 必须零 I/O:这些顶层模块一律不许出现在 core 里。
-# 允许 datetime/math/re/json 等纯计算与纯解析;禁网络、禁文件系统、禁子进程。
-# 连 `os` 也禁:纯逻辑不需要它,而 `import os` 一旦放进来就等于把整个操作系统的门打开,
-# 下一个人加一行 `os.path.exists` 看着无害,再下一个人加 `os.remove` 就没人挡了。
 CORE_FORBIDDEN = {
     "os", "pathlib", "requests", "aiohttp", "httpx", "urllib", "socket",
     "gzip", "shutil", "tempfile", "sqlite3", "subprocess", "asyncio",
 }
 
-# common 的成员判据:零项目知识。这些词出现在**标识符或字面量**里就说明它认识这个项目,
-# 那它该去 core / infra,或者调用它的那个模块,而不是 common。
-#
-# 光靠「不许 import 上层」挡不住 —— 那只挡住了依赖项目**状态**的代码,
-# 挡不住 `def is_hot(stars): return stars > 1000` 这种不需要 import 的项目逻辑。
-# 而这类函数正是杂物间的第一块砖:它没有别的家,于是被丢进 common。
-#
-# 只查标识符和普通字面量,不查文档字符串:docstring 里说明「为什么必须 UTC,否则快照窗口
-# 会差一天」是动机说明,不是代码知道的事,禁掉它只会让人写出没有理由的严格规则。
 PROJECT_WORDS = {
     "star", "stars", "repo", "repos", "repository", "snapshot", "snapshots",
     "ranking", "rank", "favorite", "favorites", "token", "tokens", "github",
@@ -250,23 +226,23 @@ def test_no_reverse_dependency():
     assert not violations, "反向依赖:\n" + "\n".join(violations)
 
 
-def test_core_stays_pure():
-    """core 零 I/O:不许 import 网络库、文件系统、子进程、asyncio。
+def test_growth_stays_pure():
+    """service/growth.py 零 I/O:不许 import 网络库、文件系统、子进程、asyncio。
 
-    这层的全部价值就是「不用 token、不联网、不碰盘就能跑完整的排名回归测试」。
+    它的全部价值就是「不用 token、不联网、不碰盘就能跑完整的增长回归测试」。
     一旦有人在里面 `open()` 一次,这个保证就没了,而且没有任何测试会因此变红 ——
     所以得有这一条。
     """
     violations = []
     for path, parts, _is_pkg, tree in _parsed():
-        if _layer_of(parts) != "core":
+        if parts[1:3] != ["service", "growth"]:
             continue
         for root, lineno in _external_roots(tree):
             if root in CORE_FORBIDDEN:
                 violations.append(
-                    f"{path.relative_to(PACKAGE_ROOT)}:{lineno} — core 不该 import {root}"
+                    f"{path.relative_to(PACKAGE_ROOT)}:{lineno} — growth 不该 import {root}"
                 )
-    assert not violations, "core 被污染:\n" + "\n".join(violations)
+    assert not violations, "growth 被污染:\n" + "\n".join(violations)
 
 
 def test_common_knows_nothing_about_the_project():

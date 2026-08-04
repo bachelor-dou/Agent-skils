@@ -98,7 +98,6 @@ async def test_rate_limited_token_is_skipped_until_reset(clock):
             burned = _index_of(lease)
             raise RateLimitError(reset_at=clock.t + 100)
 
-    # 冷却中的那个不该再被选中
     for _ in range(4):
         async with pool.lease() as lease:
             assert _index_of(lease) != burned

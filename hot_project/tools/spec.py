@@ -48,11 +48,8 @@ class Param:
         不做静默纠偏:越界就报错,让模型看到 `must_be_lte_200` 并自己改。
         """
         if self.kind == "int":
-            # bool 是 int 的子类,不拦的话 `top_n=true` 会变成 top_n=1
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return None, "expected_integer"
-            # json.loads 认 `1e400` 和 `NaN`,而 `int()` 对它们抛 OverflowError/ValueError。
-            # 异常从这里逃出去会让那轮的 tool_calls 配不上 tool 回复,会话之后一律 400。
             if isinstance(value, float) and not math.isfinite(value):
                 return None, "expected_integer"
             number = int(value)
@@ -82,8 +79,6 @@ class Tool:
     expensive: bool = False                 # 昂贵工具执行前要用户确认
 
     def __post_init__(self) -> None:
-        # 重名参数在 schema 里会静默合并成一条(后来者胜),校验时却两条都跑 —— 模型看到的
-        # 定义和实际生效的规则就不是同一条了。拦在构造时。
         names = [p.name for p in self.params]
         if len(names) != len(set(names)):
             dupes = sorted({n for n in names if names.count(n) > 1})
@@ -119,7 +114,6 @@ class Tool:
             else:
                 clean[param.name] = value
 
-        # 未知参数显式拒绝:吞掉会让模型以为幻觉参数生效了,然后一直这么调下去。
         known = {p.name for p in self.params}
         errors += [{"param": name, "reason": "unknown_parameter", "received": args[name]}
                    for name in sorted(set(args) - known)]

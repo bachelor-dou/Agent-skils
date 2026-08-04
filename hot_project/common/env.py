@@ -28,12 +28,6 @@ def truthy(value: object) -> bool:
     return bool(value)
 
 
-def flag(name: str, default: bool = False) -> bool:
-    """读布尔环境变量。未设置 → default;设置了但不在真值集合里 → False。"""
-    raw = os.environ.get(name)
-    return default if raw is None else truthy(raw)
-
-
 def text(name: str, default: str = "") -> str:
     """读字符串环境变量,去首尾空白。"""
     return os.environ.get(name, default).strip()

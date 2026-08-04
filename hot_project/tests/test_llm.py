@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hot_project.infra.llm import wire
+from hot_project.infra.llm import protocol
 from hot_project.infra.llm.client import LLMClient
 from hot_project.infra.llm.schemes import Scheme, build
 
@@ -72,14 +72,14 @@ def _sse(*chunks):
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
     """退避重试的 sleep 直接跳过 —— 测的是重试逻辑,不是计时器。"""
-    monkeypatch.setattr(wire.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(protocol.time, "sleep", lambda _s: None)
 
 
 @pytest.fixture
 def post(monkeypatch):
     def install(*replies):
         rec = Recorder(*replies)
-        monkeypatch.setattr(wire.requests, "post", rec)
+        monkeypatch.setattr(protocol.requests, "post", rec)
         return rec
     return install
 
@@ -124,7 +124,7 @@ def test_a_platform_without_a_key_is_not_usable():
 
 def test_azure_gets_max_completion_tokens_and_no_temperature():
     """发了 azure 不认的参数不是被忽略,是整个请求 400。"""
-    body = wire.payload("azure", "m", [], max_tokens=100, temperature=0.5,
+    body = protocol.payload("azure", "m", [], max_tokens=100, temperature=0.5,
                         enable_thinking=True, thinking_budget=64)
     assert body["max_completion_tokens"] == 100
     assert "max_tokens" not in body
@@ -134,7 +134,7 @@ def test_azure_gets_max_completion_tokens_and_no_temperature():
 
 
 def test_openai_gets_the_full_parameter_set():
-    body = wire.payload("openai", "m", [], max_tokens=100, temperature=0.5,
+    body = protocol.payload("openai", "m", [], max_tokens=100, temperature=0.5,
                         enable_thinking=True, thinking_budget=64)
     assert body["max_tokens"] == 100
     assert body["temperature"] == 0.5
@@ -142,8 +142,8 @@ def test_openai_gets_the_full_parameter_set():
 
 
 def test_azure_authenticates_with_a_header_of_its_own():
-    assert wire.headers("azure", "k") == {"api-key": "k", "Content-Type": "application/json"}
-    assert wire.headers("openai", "k")["Authorization"] == "Bearer k"
+    assert protocol.headers("azure", "k") == {"api-key": "k", "Content-Type": "application/json"}
+    assert protocol.headers("openai", "k")["Authorization"] == "Bearer k"
 
 
 # ── 回退顺序 ──────────────────────────────────────────────────────
@@ -229,9 +229,9 @@ def test_streaming_pieces_are_emitted_live_and_joined(post):
 def test_tool_call_fragments_merge_by_index():
     """OpenAI 流式约定:首片带 name,后续片只带 arguments 的一截,要按 index 拼。"""
     acc = {}
-    wire.merge_toolcall_fragment(acc, {"index": 0, "id": "c1",
+    protocol.merge_toolcall_fragment(acc, {"index": 0, "id": "c1",
                                        "function": {"name": "search", "arguments": '{"q"'}})
-    wire.merge_toolcall_fragment(acc, {"index": 0, "function": {"arguments": ':"x"}'}})
+    protocol.merge_toolcall_fragment(acc, {"index": 0, "function": {"arguments": ':"x"}'}})
     assert acc[0]["function"] == {"name": "search", "arguments": '{"q":"x"}'}
 
 
@@ -240,7 +240,7 @@ def test_repeated_index_in_one_chunk_lands_in_the_same_slot():
     acc = {}
     for frag in ({"index": 0, "function": {"arguments": "ab"}},
                  {"index": 0, "function": {"arguments": "cd"}}):
-        wire.merge_toolcall_fragment(acc, frag)
+        protocol.merge_toolcall_fragment(acc, frag)
     assert len(acc) == 1 and acc[0]["function"]["arguments"] == "abcd"
 
 
@@ -284,7 +284,7 @@ class _DiesMidStream(_Resp):
 
     def iter_lines(self, decode_unicode=False):
         yield f'data: {json.dumps({"choices": [{"delta": {"content": "半"}}]})}'
-        raise wire.requests.ConnectionError("连接断了")
+        raise protocol.requests.ConnectionError("连接断了")
 
 
 def test_a_stream_that_already_emitted_is_never_retried(post):

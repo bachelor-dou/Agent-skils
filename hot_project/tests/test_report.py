@@ -1,6 +1,6 @@
 """报告的生成 ↔ 解析往返,以及报告目录的读写。
 
-往返是这里唯一真正重要的测试:`tools/report.py` 写、`core/report_parse.py` 读,
+往返是这里唯一真正重要的测试:`service/report.py` 写、`data_access/reports.py` 读,
 两个文件谁改了格式而另一个没跟上,Web 页面和 `star_trend` 会静默变成空 —— 不报错,
 只是报告"不是结构化榜单"。单看任何一边的测试都发现不了。
 """
@@ -12,9 +12,8 @@ import pytest
 from hot_project import config
 from hot_project import cron_weekly_report as weekly
 from hot_project.common.timeutil import format_day, utc_today
-from hot_project.core import report_parse
-from hot_project.infra.store import reports
-from hot_project.tools import report
+from hot_project.infra.data_access import reports
+from hot_project.service import report
 from hot_project.web import render
 
 
@@ -46,7 +45,7 @@ def _render(descs=None, **kwargs):
 # ── 往返 ──────────────────────────────────────────────────────────
 
 def test_a_generated_report_parses_back_into_the_same_facts():
-    parsed = report_parse.parse(_render())
+    parsed = reports.parse(_render())
     assert parsed is not None
     assert [e.repo for e in parsed.entries] == [n for n, _ in RANKED]
     first = parsed.entries[0]
@@ -60,20 +59,20 @@ def test_a_generated_report_parses_back_into_the_same_facts():
 def test_the_growth_field_is_found_no_matter_the_window():
     """字段名里带着天数(近7天增长 / 近10天增长),写死键名的那版一改窗口就静默返回空。"""
     for days in (3, 7, 30):
-        parsed = report_parse.parse(_render(growth_days=days))
+        parsed = reports.parse(_render(growth_days=days))
         assert f"近{days}天增长" in parsed.entries[0].metadata
-        assert report_parse.growth_of(parsed.entries[0].metadata) == "+1,500"
+        assert reports.growth_of(parsed.entries[0].metadata) == "+1,500"
 
 
 def test_numbers_survive_the_round_trip():
-    parsed = report_parse.parse(_render())
-    assert report_parse.number_of(parsed.entries[0].metadata["总 Star"]) == 82000
-    assert report_parse.number_of(
-        report_parse.growth_of(parsed.entries[0].metadata)) == 1500
+    parsed = reports.parse(_render())
+    assert reports.number_of(parsed.entries[0].metadata["总 Star"]) == 82000
+    assert reports.number_of(
+        reports.growth_of(parsed.entries[0].metadata)) == 1500
 
 
 def test_all_four_sections_come_back():
-    parsed = report_parse.parse(_render())
+    parsed = reports.parse(_render())
     titles = [s["title"] for s in parsed.entries[0].sections]
     assert titles == list(report.describe.SECTIONS)
     assert all(s["content"] for s in parsed.entries[0].sections)
@@ -81,11 +80,11 @@ def test_all_four_sections_come_back():
 
 def test_a_report_without_the_required_metadata_is_not_a_ranking():
     """随手记的 md 不该被当报告解析,否则 Web 端会渲染出一堆空条目。"""
-    assert report_parse.parse("# 随手记\n\n## 1. owner/repo\n\n一些说明\n") is None
+    assert reports.parse("# 随手记\n\n## 1. owner/repo\n\n一些说明\n") is None
 
 
 def test_an_empty_document_is_not_a_ranking():
-    assert report_parse.parse("") is None
+    assert reports.parse("") is None
 
 
 # ── 解析细节 ───────────────────────────────────────────────────────
@@ -139,13 +138,13 @@ def test_the_refreshed_sections_are_split_the_same_way_the_page_renders_them():
 
 def test_a_missing_description_falls_back_to_metadata_not_a_blank_section():
     """LLM 全挂时报告照样要能出:只有 star 数没有介绍的报告仍然有用。"""
-    parsed = report_parse.parse(_render(descs={}))
+    parsed = reports.parse(_render(descs={}))
     for section in parsed.entries[0].sections:
         assert section["content"].strip()
 
 
 def test_finding_a_repo_in_a_report_accepts_a_partial_name():
-    parsed = report_parse.parse(_render())
+    parsed = reports.parse(_render())
     assert parsed.find("langchain").repo == "langchain-ai/langchain"
     assert parsed.find("LANGCHAIN-AI/LANGCHAIN").repo == "langchain-ai/langchain"
     assert parsed.find("nope/nope") is None
@@ -215,8 +214,6 @@ def test_a_report_name_can_never_escape_the_directory(report_dir):
     """名字来自工具参数,工具参数来自模型,模型的输入来自用户。"""
     for evil in ("../../etc/passwd", "..", "sub/dir.md", r"a\b.md"):
         assert reports.resolve_name(evil) is None
-    # 名字要同时过「不含穿越」和「目录里真有」两道。后者平时就能挡住穿越,所以这里
-    # 直接把穿越名塞进清单,让前者单独接受检验 —— 否则删掉它也没人会发现。
     listed = [reports.Listed("../x.md", "", None)]
     assert reports.resolve_name("../x.md", listed) is None
 
@@ -258,7 +255,6 @@ def test_the_previous_issue_is_picked_by_date_not_by_file_mtime(report_dir):
     import os
     for name in ("2026-06-01.md", "2026-07-01.md", "2026-07-20.md", "2026-07-27.md"):
         _write(report_dir, name)
-    # 日期越近,mtime 越早
     for offset, name in enumerate(("2026-07-27.md", "2026-07-20.md",
                                    "2026-07-01.md", "2026-06-01.md")):
         stamp = 1_000_000 + offset * 1000

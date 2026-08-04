@@ -14,7 +14,8 @@ import json
 import logging
 
 from .. import config
-from . import ranking
+from ..infra.data_access import universe
+from ..service import ranking
 from .spec import Param, Tool
 
 logger = logging.getLogger("hot_project")
@@ -59,14 +60,12 @@ def _keyword_pool(ctx, params: dict) -> dict[str, dict] | None:
     """
     words = params.get("keywords") or []
     if not words:
-        # 不能返回 None —— 那在 `_run` 里的含义是「没有候选池」,`ranking.run` 会去排全库:
-        # 用户要关键词榜,拿到一份综合榜,几分钟模型调用全花在不相关的项目上,还不报错。
         logger.warning("关键词榜收到空的 keywords,候选池按空处理(不退化成全库排名)。")
         return {}
     found = ctx.gh.keyword_sweep(words, params["min_star"])
     if not found:
         return {}
-    saved = ranking.universe.load()
+    saved = universe.load()
     pool = {
         name: {"created_at": (item.get("created_at")
                               or saved.get(name, {}).get("created_at", ""))}
@@ -107,9 +106,6 @@ def make(mode: str):
 
         pending = ctx.state.pending_confirmation_signature if ctx.state else None
         stored = (ctx.state.tool_state.get("pending_ranking") or {}) if ctx.state else {}
-        # 确认必须认「是哪张榜」:只看 pending 非空的话,回显关键词榜、再拿 confirm=true
-        # 调综合榜就能直接执行,走的还是模型这次传的参数。
-        # 同签名复调也算确认 —— 有些模型不带 confirm,而是把参数原样再发一遍。
         if not (pending and stored.get("mode") == mode and (confirm or pending == signature)):
             if ctx.state is not None:
                 ctx.state.pending_confirmation_signature = signature

@@ -16,7 +16,7 @@ from hot_project import cron_daily_snapshot as cron
 from hot_project.infra.exceptions import RateLimitError, RetryableError, TokenInvalidError
 from hot_project.infra.tasks import TaskPool
 from hot_project.provider.github import request as gh
-from hot_project.provider.github import tasks as gh_tasks
+from hot_project.provider.github import collect
 from hot_project.provider.github import tokens as gh_tokens
 from hot_project.provider.github import trending as gh_trending
 
@@ -83,7 +83,7 @@ def test_an_implausible_number_of_missing_repos_aborts_the_eviction(monkeypatch,
     查不到 —— 于是整个库被判死刑,而这一步是不可逆的(记录里的 LLM desc 一起没)。
     """
     tracked = {f"a/r{i}" for i in range(1000)}
-    harvest = gh_tasks.Harvest()
+    harvest = collect.Harvest()
     harvest.missing.update(tracked)                 # 全库"查不到"
     harvest.stars.update({"a/r0": 499})             # 这个是真·掉到门槛下
 
@@ -101,7 +101,7 @@ def test_an_implausible_number_of_missing_repos_aborts_the_eviction(monkeypatch,
 def test_a_normal_day_of_metabolism_still_gets_evicted(monkeypatch):
     """闸门不能把正常代谢也拦掉 —— 每天几十个是常态,拦了库就只增不减。"""
     tracked = {f"a/r{i}" for i in range(1000)}
-    harvest = gh_tasks.Harvest()
+    harvest = collect.Harvest()
     harvest.missing.update({f"a/r{i}" for i in range(5)})
 
     evicted: set[str] = set()
@@ -134,9 +134,9 @@ def test_repos_not_in_db_are_not_reported():
 def _pool(transport: httpx.MockTransport, tokens: int = 2) -> tuple[TaskPool, httpx.AsyncClient]:
     pool_tokens = gh_tokens.TokenPool([f"t{i}" for i in range(tokens)])
     client = httpx.AsyncClient(transport=transport)
-    paces = {gh_tasks.SEARCH_TOKEN: gh_tokens.CORE, gh_tasks.CORE_TOKEN: gh_tokens.CORE}
+    paces = {collect.SEARCH_TOKEN: gh_tokens.CORE, collect.CORE_TOKEN: gh_tokens.CORE}
     pool = TaskPool(
-        lanes={gh_tasks.SEARCH_LANE: 2, gh_tasks.GRAPHQL_LANE: 2, gh_tasks.FREE_LANE: 1},
+        lanes={collect.SEARCH_LANE: 2, collect.GRAPHQL_LANE: 2, collect.FREE_LANE: 1},
         leaser=lambda kind: pool_tokens.lease(paces[kind]),
     )
     return pool, client
@@ -182,11 +182,11 @@ def _graphql(stars_by_name: dict[str, int]):
 
 
 async def test_star_batch_separates_gone_from_unanswered():
-    sink = gh_tasks.Harvest()
+    sink = collect.Harvest()
     names = ["a/one", "a/two", "a/gone"]
     transport = _graphql({"a/one": 100, "a/two": 200})
 
-    await _drain(transport, lambda c: gh_tasks.StarBatch(sink, c, names))
+    await _drain(transport, lambda c: collect.StarBatch(sink, c, names))
 
     assert sink.stars == {"a/one": 100, "a/two": 200}
     assert sink.missing == {"a/gone"}, "响应回来了、只是没这个仓库 → 确认查不到"
@@ -199,10 +199,10 @@ async def test_a_batch_that_never_answers_goes_to_failed_not_missing():
     两件事各自要命:错记成 missing,淘汰会把这批活仓库全删了;不设上限,每日任务会一直
     转到 Actions 六小时超时,既不落盘也不报错(见 `Task.max_rate_limits`)。
     """
-    sink = gh_tasks.Harvest()
+    sink = collect.Harvest()
     names = ["a/one", "a/two"]
 
-    class Impatient(gh_tasks.StarBatch):
+    class Impatient(collect.StarBatch):
         max_rate_limits = 2         # 真值是 20,那要等 20 轮冷却,测不动
 
     def always_limited(request: httpx.Request) -> httpx.Response:
@@ -223,7 +223,7 @@ async def test_a_degenerate_all_null_batch_splits_instead_of_evicting():
 
     没有这条,一次退化就能让整批仓库同时被判死刑。
     """
-    sink = gh_tasks.Harvest()
+    sink = collect.Harvest()
     names = [f"a/r{i}" for i in range(8)]
     seen: list[int] = []
 
@@ -240,7 +240,7 @@ async def test_a_degenerate_all_null_batch_splits_instead_of_evicting():
                                 for i in range(len(aliases))}})
 
     await _drain(httpx.MockTransport(handler),
-                       lambda c: gh_tasks.StarBatch(sink, c, names))
+                       lambda c: collect.StarBatch(sink, c, names))
 
     assert len(sink.stars) == 8, "拆分后应该一个不漏"
     assert sink.missing == set(), "退化响应绝不能被当成「查不到」"
@@ -249,9 +249,9 @@ async def test_a_degenerate_all_null_batch_splits_instead_of_evicting():
 
 async def test_a_single_repo_that_stays_null_is_really_gone():
     """拆到只剩一个、且 GitHub 明说 NOT_FOUND —— 那它就是真的没了。"""
-    sink = gh_tasks.Harvest()
+    sink = collect.Harvest()
     await asyncio.wait_for(
-        _drain(_graphql({}), lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
+        _drain(_graphql({}), lambda c: collect.StarBatch(sink, c, ["a/ghost"])),
         timeout=10,
     )
     assert sink.missing == {"a/ghost"}
@@ -267,15 +267,14 @@ async def test_a_lone_null_without_not_found_counts_as_unanswered_not_as_deleted
 
     也顺便钉住不能无限拆:单名批返回 None 会让 `1 // 2 == 0` 拆出空批加原样批。
     """
-    sink = gh_tasks.Harvest()
+    sink = collect.Harvest()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        # 光秃秃的 null:没有 errors,也就没有 NOT_FOUND
         return httpx.Response(200, json={"data": {"r0": None}})
 
     await asyncio.wait_for(
         _drain(httpx.MockTransport(handler),
-               lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
+               lambda c: collect.StarBatch(sink, c, ["a/ghost"])),
         timeout=10,
     )
     assert sink.missing == set(), "没问到被当成了没了 —— 这条路通向清库"
@@ -284,7 +283,7 @@ async def test_a_lone_null_without_not_found_counts_as_unanswered_not_as_deleted
 
 async def test_an_incident_shaped_error_also_counts_as_unanswered():
     """RATE_LIMITED / INTERNAL 之类的 errors 同样不足以断定仓库没了。"""
-    sink = gh_tasks.Harvest()
+    sink = collect.Harvest()
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={
@@ -293,7 +292,7 @@ async def test_an_incident_shaped_error_also_counts_as_unanswered():
 
     await asyncio.wait_for(
         _drain(httpx.MockTransport(handler),
-               lambda c: gh_tasks.StarBatch(sink, c, ["a/ghost"])),
+               lambda c: collect.StarBatch(sink, c, ["a/ghost"])),
         timeout=10,
     )
     assert sink.missing == set()
@@ -317,44 +316,43 @@ def _search(pages: dict[int, list[str]], total: int = 0):
 
 
 async def test_keyword_search_follows_full_pages_and_stops_on_a_short_one():
-    sink = gh_tasks.Discovered()
-    full = [f"a/r{i}" for i in range(gh_tasks.PER_PAGE)]
+    sink = collect.Discovered()
+    full = [f"a/r{i}" for i in range(collect.PER_PAGE)]
     transport = _search({1: full, 2: ["a/last"], 3: ["a/never"]})
 
-    await _drain(transport, lambda c: gh_tasks.KeywordPage(sink, c, "agent", 500))
+    await _drain(transport, lambda c: collect.KeywordPage(sink, c, "agent", 500))
 
-    assert len(sink.repos) == gh_tasks.PER_PAGE + 1
+    assert len(sink.repos) == collect.PER_PAGE + 1
     assert "a/never" not in sink.repos, "第 2 页没满就该收手,不再翻第 3 页"
 
 
 async def test_search_stops_at_the_thousand_result_ceiling():
     """Search 只给前 1000 条,翻到第 11 页是 422。别去撞那堵墙。"""
-    sink = gh_tasks.Discovered()
-    full = {p: [f"a/p{p}n{i}" for i in range(gh_tasks.PER_PAGE)] for p in range(1, 13)}
+    sink = collect.Discovered()
+    full = {p: [f"a/p{p}n{i}" for i in range(collect.PER_PAGE)] for p in range(1, 13)}
     transport = _search(full)
 
-    await _drain(transport, lambda c: gh_tasks.KeywordPage(sink, c, "agent", 500))
+    await _drain(transport, lambda c: collect.KeywordPage(sink, c, "agent", 500))
 
-    assert len(sink.repos) == gh_tasks.MAX_PAGES * gh_tasks.PER_PAGE
+    assert len(sink.repos) == collect.MAX_PAGES * collect.PER_PAGE
 
 
 async def test_a_fat_star_range_splits_before_it_is_scanned():
     """命中超过 1000 就得先劈开区间,否则超出的部分永远拿不到。"""
-    sink = gh_tasks.Discovered()
+    sink = collect.Discovered()
     scanned: list[tuple[int, int]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         query = request.url.params["q"]
         lo, hi = (int(x) for x in query.removeprefix("stars:").split(".."))
         if request.url.params.get("per_page") == "1":
-            # 只有最细的段才装得下,逼它一路拆到底
             return httpx.Response(200, json={"total_count": 100 if hi - lo < 250 else 5000})
         scanned.append((lo, hi))
         return httpx.Response(200, json={"items": [
             {"full_name": f"a/{lo}", "stargazers_count": lo}]})
 
     await _drain(httpx.MockTransport(handler),
-                       lambda c: gh_tasks.SegmentProbe(sink, c, 500, 1500))
+                       lambda c: collect.SegmentProbe(sink, c, 500, 1500))
 
     assert scanned, "拆完之后必须真的去扫"
     assert all(hi - lo < 250 for lo, hi in scanned), "还装不下就不该开扫"
@@ -365,7 +363,7 @@ async def test_a_fat_star_range_splits_before_it_is_scanned():
 
 
 async def test_an_empty_star_range_costs_one_request():
-    sink = gh_tasks.Discovered()
+    sink = collect.Discovered()
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -373,7 +371,7 @@ async def test_an_empty_star_range_costs_one_request():
         return httpx.Response(200, json={"total_count": 0, "items": []})
 
     await _drain(httpx.MockTransport(handler),
-                       lambda c: gh_tasks.SegmentProbe(sink, c, 500, 1500))
+                       lambda c: collect.SegmentProbe(sink, c, 500, 1500))
     assert len(calls) == 1, "空段探一次就该收手,不该再拆也不该去扫"
 
 
@@ -383,29 +381,29 @@ async def test_every_keyword_gets_credited_for_a_repo_it_returned():
     这份账是砍关键词的唯一依据:按先到先得记的话,同一个词今天 0 个明天 50 个,量不出
     任何东西,只会把还有用的词误砍掉。
     """
-    sink = gh_tasks.Discovered()
+    sink = collect.Discovered()
     transport = httpx.MockTransport(
         lambda r: httpx.Response(200, json={"items": [{"full_name": "a/shared"}]}))
 
     for word in ("agent", "llm"):
-        await _drain(transport, lambda c, w=word: gh_tasks.KeywordPage(sink, c, w, 500))
+        await _drain(transport, lambda c, w=word: collect.KeywordPage(sink, c, w, 500))
 
     assert len(sink.repos) == 1, "收集箱本身仍然去重"
     assert sink.sources == {"kw:agent": {"a/shared"}, "kw:llm": {"a/shared"}}
 
 
 async def test_paging_does_not_split_one_keyword_into_several_sources():
-    sink = gh_tasks.Discovered()
-    full = [f"a/r{i}" for i in range(gh_tasks.PER_PAGE)]
+    sink = collect.Discovered()
+    full = [f"a/r{i}" for i in range(collect.PER_PAGE)]
     await _drain(_search({1: full, 2: ["a/last"]}),
-                 lambda c: gh_tasks.KeywordPage(sink, c, "agent", 500))
+                 lambda c: collect.KeywordPage(sink, c, "agent", 500))
     assert list(sink.sources) == ["kw:agent"]
-    assert len(sink.sources["kw:agent"]) == gh_tasks.PER_PAGE + 1
+    assert len(sink.sources["kw:agent"]) == collect.PER_PAGE + 1
 
 
 async def test_a_failed_search_is_recorded_but_does_not_stop_the_others():
     """一个关键词挂了不能让整轮发现失败 —— DB 是累积的,今天漏的明天补。"""
-    sink = gh_tasks.Discovered()
+    sink = collect.Discovered()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "bad" in request.url.params["q"]:
@@ -414,8 +412,8 @@ async def test_a_failed_search_is_recorded_but_does_not_stop_the_others():
 
     await asyncio.wait_for(_drain(
         httpx.MockTransport(handler),
-        lambda c: gh_tasks.KeywordPage(sink, c, "bad", 500),
-        lambda c: gh_tasks.KeywordPage(sink, c, "ok", 500),
+        lambda c: collect.KeywordPage(sink, c, "bad", 500),
+        lambda c: collect.KeywordPage(sink, c, "ok", 500),
     ), timeout=10)
 
     assert "a/good" in sink.repos
@@ -443,8 +441,6 @@ def test_http_status_maps_to_the_right_exception(status, expected):
     ({"x-ratelimit-remaining": "0"}, "{}", "主限额耗尽"),
     ({"retry-after": "60"}, '{"message": "You have exceeded a secondary rate limit"}',
      "二级限流"),
-    # 二级限流也可能带 remaining=0,此时正文说了算 —— 反过来判会把它错当成单 token 的事,
-    # 于是只冷却那一张、继续用其余 11 张往同一堵墙上撞。
     ({"x-ratelimit-remaining": "0"},
      '{"message": "You have exceeded a secondary rate limit"}', "二级限流"),
     ({}, "{}", "未分类"),
@@ -476,9 +472,9 @@ def test_retry_after_wins_over_the_ratelimit_reset_header():
 
 async def test_a_422_page_means_no_more_results_not_an_error():
     """翻过 1000 条上限时 Search 返回 422。那不是故障,是到底了。"""
-    sink = gh_tasks.Discovered()
+    sink = collect.Discovered()
     transport = httpx.MockTransport(lambda r: httpx.Response(422, json={"message": "only 1000"}))
-    await _drain(transport, lambda c: gh_tasks.KeywordPage(sink, c, "agent", 500))
+    await _drain(transport, lambda c: collect.KeywordPage(sink, c, "agent", 500))
     assert sink.failures == [], "422 不该被记成失败"
 
 

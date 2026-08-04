@@ -34,7 +34,5 @@ def send(title: str, body: str = "") -> bool:
             return True
         logger.warning("微信推送失败:HTTP %s %s", resp.status_code, resp.text[:200])
     except Exception as e:      # noqa: BLE001 —— 见模块文档:推送绝不影响主流程
-        # SendKey 是 URL 的一段,而 requests 的连接类异常消息里带完整 URL —— 原样记就是
-        # 把密钥写进 logs/,违反 config.py 里「密钥永不落文件」。脱敏后再记。
         logger.warning("微信推送异常:%s", str(e).replace(key, "***"))
     return False

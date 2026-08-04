@@ -20,7 +20,6 @@ from .prompts import SUMMARIZE_PROMPT
 
 logger = logging.getLogger("hot_project")
 
-# 一轮对话里最多问模型几次(每次可含多个工具调用);正常退出是模型不再要工具,这只是护栏。
 MAX_STEPS = 15
 
 MESSAGE_MAX_CHARS = 2000
@@ -87,8 +86,6 @@ class Agent:
             try:
                 result = self.run_tool(fn.get("name", ""), fn.get("arguments", "{}"))
             except Exception as e:      # noqa: BLE001 —— 兜底,理由见下
-                # 每条 tool_calls 必须无条件配一条 tool 回复:漏一条,该会话之后每次请求
-                # 都被接口 400,只能等 TTL 过期。
                 logger.exception("[Agent] 工具 %s 异常逃出 run_tool", fn.get("name", ""))
                 result = {"error": f"工具调用异常:{e}", "retryable": True}
             self.session.tool_result(call.get("id", ""), result)

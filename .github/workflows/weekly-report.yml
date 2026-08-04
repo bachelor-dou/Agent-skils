@@ -1,10 +1,12 @@
 name: weekly report
 
-# 触发对齐原本机 crontab(周三 13:40 北京),
+# 周三 10:30 北京 = 周三 02:30 UTC(GitHub 的 cron 一律按 UTC 解释)。
+# 刻意排在每日快照之后:候选池是 DB 全库,等当天的发现阶段入库,本周新冒出来的爆款才赶得上
+# 这一期。每日 00:23 触发 + 排队延迟 + 约 55 分钟,02:30 有富余;真拖过头了 concurrency 兜底。
 
 on:
   schedule:
-    - cron: "43 5 * * 4"
+    - cron: "30 2 * * 3"
   workflow_dispatch:
     inputs:
       top_n:
@@ -19,16 +21,18 @@ on:
 permissions:
   contents: write
 
-# 绝不用 pull_request_target:公开仓库存 PAT 和 LLM key 的前提是 fork 拿不到 secrets。
+# group 和每日快照共用:两个 workflow 都往 main 写 Github_DB.json,而 commit_and_push.sh
+# 是「以本次产物为准」的重放、不做内容合并 —— 同时跑的话后推的那个会整份盖掉先推的
+# (周报的 LLM 描述被抹 / 当天新发现的仓库回退)。排队让后跑的那个 checkout 到前者的结果。
 concurrency:
-  group: weekly-report
+  group: main-data-write
   cancel-in-progress: false
 
 jobs:
   report:
     if: github.repository == 'bachelor-dou/Agent-skils'
     runs-on: ubuntu-latest
-    # 上期 64 分钟;留足余量应对限流退避,仍远低于 GitHub 6 小时上限
+    # 为限流退避预留执行时间。
     timeout-minutes: 240
 
     steps:
@@ -63,14 +67,4 @@ jobs:
           bash .github/scripts/commit_and_push.sh \
             "chore: weekly hot projects report $(date -u +%Y-%m-%d)" \
             hot_project/data/Github_DB.json \
-            hot_project/report
-
-      - name: 上传运行日志
-        # logs/ 不入库,失败时靠这个 artifact 排查(控制台输出只留 90 天)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: weekly-report-logs
-          path: hot_project/logs/
-          retention-days: 30
-          if-no-files-found: warn
+            hot_project/data/report

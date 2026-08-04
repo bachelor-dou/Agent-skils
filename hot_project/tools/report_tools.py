@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from ..core import report_parse
-from ..infra.store import reports
+from ..infra.data_access import reports
 from .spec import Param, Tool
 
 logger = logging.getLogger("hot_project")
@@ -41,7 +40,6 @@ def analyze_report(ctx, args: dict) -> dict:
                 "link": entry.link, "metadata": entry.metadata,
                 "sections": entry.sections}
 
-    # 整体分析:一行一项的紧凑表,不是完整分段 —— 二十个项目的完整介绍会撑爆上下文
     rows = ["排名|仓库|总Star|增长|语言|主题"]
     for entry in report.entries:
         meta = entry.metadata
@@ -49,7 +47,7 @@ def analyze_report(ctx, args: dict) -> dict:
                           meta.get("主题标签", "").replace(",", ",").split(",")
                           if t.strip())
         rows.append(f"{entry.rank}|{entry.repo}|{meta.get('总 Star', '')}|"
-                    f"{report_parse.growth_of(meta)}|{meta.get('主语言', '')}|"
+                    f"{reports.growth_of(meta)}|{meta.get('主语言', '')}|"
                     f"{','.join(topics.split(',')[:TOPICS_IN_TABLE])}")
 
     return {"name": name, "title": report.title, "summary": report.summary,
@@ -69,8 +67,8 @@ def star_trend(ctx, args: dict) -> dict:
         if entry is None:
             continue
         series.append({"date": str(item.day), "repo": entry.repo, "rank": entry.rank,
-                       "star": report_parse.number_of(entry.metadata.get("总 Star", "")),
-                       "growth": report_parse.growth_of(entry.metadata)})
+                       "star": reports.number_of(entry.metadata.get("总 Star", "")),
+                       "growth": reports.growth_of(entry.metadata)})
 
     if not series:
         return {"repo": repo, "points": 0,

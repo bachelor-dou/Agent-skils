@@ -5,9 +5,7 @@
   "use strict";
 
   const KEY = "hot-user-id";
-  // 存储层可接受的 ID（含系统匿名 anon- 前缀，带连字符）
   const ID_RE = /^[A-Za-z0-9_-]{3,32}$/;
-  // 用户手动登录只允许大小写字母和数字
   const MANUAL_ID_RE = /^[A-Za-z0-9]{3,32}$/;
 
   function generateAnonId() {
@@ -39,7 +37,6 @@
     return ID_RE.test(String(id || ""));
   }
 
-  // 登录：迁移当前（匿名）身份下的收藏到新 ID，再切换并刷新
   async function login(newId) {
     const target = String(newId || "").trim();
     if (!MANUAL_ID_RE.test(target)) {
@@ -50,7 +47,6 @@
       try {
         await global.GitHubHotFavorites.migrateTo(oldId, target);
       } catch (_e) {
-        // 迁移失败不阻断登录，仅记录
         console.warn("收藏迁移失败", _e);
       }
     }
@@ -75,7 +71,6 @@
     logout: logout,
   };
 
-  // 聊天页状态栏登录标签（其他页无此元素时自动跳过）
   function setupLoginLabel() {
     const button = document.getElementById("user-login-button");
     const popover = document.getElementById("user-popover");

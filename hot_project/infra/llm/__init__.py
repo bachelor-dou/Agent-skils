@@ -1,7 +1,7 @@
 """LLM 出站 —— 多平台目录、顺序回退、流式。
 
     schemes.py   目录归一化 + key 落地(config 只声明 key_env,真值在这里取)
-    wire.py      线上协议:请求头 / 请求体 / 一次请求(含 SSE)。`if backend ==` 只在这里
+    protocol.py  线上协议:请求头 / 请求体 / 一次请求(含 SSE)。`if backend ==` 只在这里
     client.py    调用顺序:内部调用顺序回退,网页硬切换不回退
 
 对外只有 `get()`。**提示词不在这一层** —— 那是产品知识,归调用它的工具。

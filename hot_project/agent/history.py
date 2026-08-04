@@ -17,15 +17,12 @@ from .prompts import SYSTEM_PROMPT
 
 logger = logging.getLogger("hot_project")
 
-# 超过这么多条消息就压缩,保留最近这么多条。
 MAX_MESSAGES = 35
 KEEP_RECENT = 10
 
-# 工具结果超过这么多字符就换存根;存根远小于阈值,不会被二次卸载,所以不需要幂等标记。
 OFFLOAD_THRESHOLD = 1200
 DIGEST_CHARS = 200
 
-# 单条工具结果发给模型的上限,超了只给前半截。
 RESULT_MAX_CHARS = 8000
 
 
@@ -38,7 +35,6 @@ class Session:
 
     messages: list[dict] = field(default_factory=list)
     summary: str = ""
-    # 工具私有的会话槽,agent 层不看内容
     tool_state: dict = field(default_factory=dict)
     active_repo: str | None = None
     pending_confirmation_signature: str | None = None
@@ -110,7 +106,6 @@ class Session:
         if text := summarize(old):
             self.summary = text
 
-        # system 逐字节不变 —— 见模块头部
         rebuilt = [system]
         if self.summary:
             rebuilt.append({"role": "user", "content": f"[对话历史摘要]\n{self.summary}"})
@@ -127,7 +122,6 @@ class Session:
         store = self.tool_state.get("offloaded") or {}
         if not store:
             return 0
-        # 带引号比对,以免 tr1 被 tr10 误匹配
         alive = "".join(m.get("content") or "" for m in self.messages)
         orphans = [ref for ref in store if f'"{ref}"' not in alive]
         for ref in orphans:

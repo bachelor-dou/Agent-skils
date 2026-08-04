@@ -12,11 +12,8 @@
 
   let items = new Map();          // repo -> {repo, short_desc, category, ...}（内存缓存，保序）
   let readyPromise = null;
-  let defaultTags = [];           // 服务端预置标签（/api/favorite-tags）
   let activePicker = null;        // 当前打开的标签选择浮层（同一时刻只允许一个）
 
-  // 跨标签页同步：某页改动收藏后广播，其它已打开的页（报告页/聊天页）自动重新拉取。
-  // BroadcastChannel 不会回发给发送方本身；无该 API 时退回 localStorage storage 事件。
   let channel = null;
   try {
     channel = "BroadcastChannel" in global ? new global.BroadcastChannel(CHANNEL) : null;
@@ -39,7 +36,6 @@
   }
 
   function onExternalChange(uid) {
-    // 只有当广播来自同一用户（或未标注用户）时才刷新，避免多身份互相干扰
     if (!uid || uid === userId()) {
       refresh();
     }
@@ -69,7 +65,6 @@
   }
 
   function currentReport() {
-    // 报告页 URL 形如 /api/reports/2026-07-01.md/html
     const m = (global.location.pathname || "").match(/\/api\/reports\/([^/]+)\/html/);
     return m ? decodeURIComponent(m[1]) : "";
   }
@@ -124,19 +119,6 @@
     }
   }
 
-  async function loadTags() {
-    try {
-      const resp = await fetch("/api/favorite-tags");
-      if (resp.ok) {
-        const data = await resp.json();
-        defaultTags = (data.tags || []).map(cleanTag).filter(Boolean);
-      }
-    } catch (_e) {
-      defaultTags = [];
-    }
-  }
-
-  // 一次性迁移旧版 localStorage 收藏到服务端，成功后清除旧 key
   async function migrateLegacy(uid) {
     let legacy = [];
     try {
@@ -167,7 +149,7 @@
     if (!readyPromise) {
       readyPromise = (async function () {
         const uid = userId();
-        await Promise.all([loadTags(), migrateLegacy(uid)]);
+        await migrateLegacy(uid);
         try {
           loadItems(await apiGet(uid));
         } catch (_e) {
@@ -179,7 +161,6 @@
     return readyPromise;
   }
 
-  // 从服务端重新拉取（agent 在对话中新增收藏后调用，使收藏栏同步）
   async function refresh() {
     try {
       loadItems(await apiGet(userId()));
@@ -201,7 +182,6 @@
     return (it && it.category) || "";
   }
 
-  // 乐观新增置顶（带分类），失败回滚
   async function addFav(name, category) {
     const next = new Map([[name, { repo: name, short_desc: "", category: category }]]);
     items.forEach(function (v, k) {
@@ -238,7 +218,6 @@
     return items.has(name);
   }
 
-  // 已收藏→直接取消；未收藏→弹标签选择框，选定后带分类收藏（取消则不收藏）
   async function toggle(repo, anchorEl) {
     const name = String(repo || "").trim();
     if (!name) {
@@ -254,7 +233,29 @@
     return addFav(name, tag);
   }
 
-  // 给已收藏项目改分类（收藏栏里点分类标签时用）
+  async function setCategory(repo, category) {
+    const name = String(repo || "").trim();
+    const it = items.get(name);
+    if (!it) {
+      return "";
+    }
+    const next = cleanTag(category);
+    const prev = it.category || "";
+    if (next === prev) {
+      return prev;
+    }
+    it.category = next;
+    notify();
+    try {
+      await apiSet(userId(), name, "add", next);
+      broadcastChange();
+    } catch (_e) {
+      it.category = prev;
+      notify();
+    }
+    return it.category || "";
+  }
+
   async function retag(repo, anchorEl) {
     const name = String(repo || "").trim();
     const it = items.get(name);
@@ -265,20 +266,9 @@
     if (tag === null) {
       return it.category || "";
     }
-    const prev = it.category || "";
-    it.category = tag;
-    notify();
-    try {
-      await apiSet(userId(), name, "add", tag);
-      broadcastChange();
-    } catch (_e) {
-      it.category = prev;
-      notify();
-    }
-    return it.category || "";
+    return setCategory(name, tag);
   }
 
-  // 手动编辑收藏概要（short_desc 收藏后不会自动更新，供用户自行修改）
   async function setDesc(repo, text) {
     const name = String(repo || "").trim();
     const it = items.get(name);
@@ -320,7 +310,6 @@
         out.push(v);
       }
     }
-    defaultTags.forEach(add);
     items.forEach(function (x) {
       add(x.category);
     });
@@ -416,7 +405,6 @@
           finish(v);
         }
       });
-      // 下一帧再绑外部点击，避免开启这次点击立即把它关掉
       setTimeout(function () {
         document.addEventListener("mousedown", onDocClick, true);
         document.addEventListener("keydown", onKey, true);
@@ -427,7 +415,6 @@
     });
   }
 
-  // 登录时把旧身份收藏合并到新身份（HotUser.login 调用）
   async function migrateTo(oldId, newId) {
     let list = [];
     try {
@@ -461,6 +448,7 @@
     getAll: getAll,
     toggle: toggle,
     retag: retag,
+    setCategory: setCategory,
     setDesc: setDesc,
     subscribe: subscribe,
     migrateTo: migrateTo,

@@ -12,22 +12,23 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-STORE = ROOT / "hot_project" / "infra" / "store"
+STORE = ROOT / "hot_project" / "infra" / "data_access"
 TOKENS = ROOT / "hot_project" / "provider" / "github" / "tokens.py"
 TASKS = ROOT / "hot_project" / "infra" / "tasks" / "pool.py"
 CRON = ROOT / "hot_project" / "cron_daily_snapshot.py"
-GH_TASKS = ROOT / "hot_project" / "provider" / "github" / "tasks.py"
+GH_TASKS = ROOT / "hot_project" / "provider" / "github" / "collect.py"
 GH_CLIENT = ROOT / "hot_project" / "provider" / "github" / "client.py"
+GH_REQUEST = ROOT / "hot_project" / "provider" / "github" / "request.py"
 GH_TRENDING = ROOT / "hot_project" / "provider" / "github" / "trending.py"
-GROWTH = ROOT / "hot_project" / "core" / "growth.py"
-LLM_WIRE = ROOT / "hot_project" / "infra" / "llm" / "wire.py"
+GROWTH = ROOT / "hot_project" / "service" / "growth.py"
+LLM_WIRE = ROOT / "hot_project" / "infra" / "llm" / "protocol.py"
 LLM_CLIENT = ROOT / "hot_project" / "infra" / "llm" / "client.py"
 LLM_SCHEMES = ROOT / "hot_project" / "infra" / "llm" / "schemes.py"
 ENV = ROOT / "hot_project" / "common" / "env.py"
-SCORING = ROOT / "hot_project" / "core" / "scoring.py"
-REPORT_PARSE = ROOT / "hot_project" / "core" / "report_parse.py"
-RANKING = ROOT / "hot_project" / "tools" / "ranking.py"
-REPORT = ROOT / "hot_project" / "tools" / "report.py"
+SCORING = ROOT / "hot_project" / "service" / "ranking.py"
+REPORT_PARSE = ROOT / "hot_project" / "infra" / "data_access" / "reports.py"
+RANKING = ROOT / "hot_project" / "service" / "ranking.py"
+REPORT = ROOT / "hot_project" / "service" / "report.py"
 SPEC = ROOT / "hot_project" / "tools" / "spec.py"
 REPO_TOOLS = ROOT / "hot_project" / "tools" / "repo_tools.py"
 RANK_TOOLS = ROOT / "hot_project" / "tools" / "rank_tools.py"
@@ -35,7 +36,7 @@ HISTORY = ROOT / "hot_project" / "agent" / "history.py"
 AGENT_LOOP = ROOT / "hot_project" / "agent" / "loop.py"
 SECURITY = ROOT / "hot_project" / "web" / "security.py"
 SESSIONS = ROOT / "hot_project" / "web" / "sessions.py"
-REPORTS_STORE = ROOT / "hot_project" / "infra" / "store" / "reports.py"
+REPORTS_STORE = ROOT / "hot_project" / "infra" / "data_access" / "reports.py"
 RENDER = ROOT / "hot_project" / "web" / "render.py"
 
 STORE_TESTS = "hot_project/tests/test_store.py"
@@ -55,7 +56,7 @@ WEB_TESTS = "hot_project/tests/test_web.py"
 MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "读盘失败当空字典继续写(旧 save_db 的真实事故)",
-        STORE / "atomic.py",
+        STORE / "_file_io.py",
         'raise StoreReadError(f"{path} 读取失败({e})—— 放弃本次操作,盘上数据保持原样") from e',
         "return default if default is not None else {}",
         STORE_TESTS,
@@ -160,7 +161,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         STORE / "favorites.py",
         "    with transaction(config.FAVORITES_PATH, default=_empty()) as tx:",
         """    import time
-    from .atomic import read_json as _rj, write_whole as _ww
+    from ._file_io import read_json as _rj, write_whole as _ww
     import json as _json
 
     class _FakeTx:
@@ -241,7 +242,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "等待没有超时(限流后所有 worker 永久挂死)",
         TOKENS,
-        "                try:\n                    # 等冷却/配速到期,但也接受被提前叫醒(有人归还了、或新增了 token)。\n                    await asyncio.wait_for(self._cond.wait(), timeout=wait)\n                except TimeoutError:\n                    pass",
+        "                try:\n                    await asyncio.wait_for(self._cond.wait(), timeout=wait)\n                except TimeoutError:\n                    pass",
         "                await self._cond.wait()",
         TOKEN_TESTS,
         "test_waiter_wakes_itself_on_real_clock",
@@ -356,7 +357,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "整批 null 的退化响应被当成「这批仓库都没了」",
-        GH_CLIENT,
+        GH_REQUEST,
         "        if len(names) > 1:\n            return None",
         "        if False:\n            return None",
         SNAP_TESTS,
@@ -412,7 +413,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "403 不认成限流(当场判死,不换 token 重试)",
-        GH_CLIENT,
+        GH_REQUEST,
         "    if code in (403, 429):\n        raise RateLimitError(_reset_at(resp.headers), _limit_reason(resp))",
         '    if False:\n        raise RateLimitError(_reset_at(resp.headers), _limit_reason(resp))',
         SNAP_TESTS,
@@ -420,15 +421,15 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "搜索 422(翻过 1000 条上限)被当成故障",
-        GH_CLIENT,
-        "    if resp.status_code == 422:\n        # 分页越界",
-        "    if False:\n        # 分页越界",
+        GH_REQUEST,
+        '    if resp.status_code == 422:\n        logger.debug("搜索 422,当作没有更多:q=%r page=%d", query, page)',
+        '    if False:\n        logger.debug("搜索 422,当作没有更多:q=%r page=%d", query, page)',
         SNAP_TESTS,
         "test_a_422_page_means_no_more_results_not_an_error",
     ),
     (
         "GraphQL 藏在 200 里的限流被当成普通故障(不冷却 token,原地打转)",
-        GH_CLIENT,
+        GH_REQUEST,
         '        if "RATE_LIMITED" in errors:',
         "        if False:",
         SNAP_TESTS,
@@ -487,12 +488,12 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_losing_stars_stays_negative",
     ),
     (
-        "有人往 core 里 import 了文件系统(纯算法层的全部价值就此失效)",
+        "有人往 growth 里 import 了文件系统(纯算术模块的全部价值就此失效)",
         GROWTH,
         "from typing import NamedTuple",
         "import pathlib\nfrom typing import NamedTuple",
         LAYER_TESTS,
-        "test_core_stays_pure",
+        "test_growth_stays_pure",
     ),
     (
         "给 azure 发它不认的 temperature(整个请求 400,不是被忽略)",
@@ -899,14 +900,6 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_the_real_ip_is_taken_from_the_proxy_header",
     ),
     (
-        "允许 origins=* 配 credentials=true(任何网站都能带着用户 cookie 调接口)",
-        SECURITY,
-        '    if credentials and "*" in config.CORS_ALLOWED_ORIGINS:',
-        "    if False:",
-        WEB_TESTS,
-        "test_wildcard_origins_and_credentials_cannot_both_be_on",
-    ),
-    (
         "会话数没上限(随机 session_id 打几万次就能把内存撑爆)",
         SESSIONS,
         "        if len(_agents) >= MAX_SESSIONS:",
@@ -955,7 +948,6 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_a_javascript_url_in_a_report_is_defused",
     ),
 
-    # ── 第二轮审查(open-code-review)查出来的那批 ──────────────
     (
         "标签剥离只替换一次(拼接绕过:<scr<script>ipt src=...> 会重新拼成活标签)",
         RENDER,
@@ -967,7 +959,6 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "URL 白名单只认带引号的属性值(裸写的 href=javascript: 直接穿过)",
         RENDER,
-        # 等价于"无引号那一支不进白名单":裸值一律当安全,原样穿过去。
         'value = match.group("quoted") if quote else match.group("bare")',
         'value = match.group("quoted") if quote else "#"',
         WEB_TESTS,
@@ -1024,7 +1015,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "单名批的 null 一律当「确认查不到」(清库那条路的入口)",
-        GH_CLIENT,
+        GH_REQUEST,
         '        if types != {"NOT_FOUND"}:',
         "        if False:",
         SNAP_TESTS,
@@ -1064,12 +1055,12 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_the_previous_issue_is_picked_by_date_not_by_file_mtime",
     ),
     (
-        "WebSocket 不过安全检查(唯一真会驱动 agent 的入口反而没有黑名单和限速)",
+        "WebSocket 不过安全检查(唯一真会驱动 agent 的入口反而没有限速)",
         ROOT / "hot_project" / "api_server.py",
         "    if verdict := security.check(ip, websocket.url.path):",
         "    if False:",
         WEB_TESTS,
-        "test_the_websocket_is_guarded_too_not_just_the_http_routes",
+        "test_a_rate_limited_client_cannot_open_a_websocket_either",
     ),
     (
         "限速表只增不减(伪造 X-Forwarded-For 就能把它撑到几百万条)",
@@ -1134,9 +1125,6 @@ def main() -> int:
     if not _baseline_is_green():
         return 1
 
-    # 先把所有要改的文件原文存下来。哪怕脚本被 Ctrl-C 或 kill 掉,`_restore_all` 也能
-    # 在 finally 里把它们全部复原 —— 只靠单条的 finally 不够:kill -9 一来,
-    # 变异就留在工作区里了(这是实际发生过的)。
     originals = {path: path.read_text(encoding="utf-8") for _, path, *_ in MUTATIONS}
 
     def _restore_all() -> None:

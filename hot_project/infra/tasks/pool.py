@@ -21,7 +21,6 @@ from .task import Ctx, Task
 
 logger = logging.getLogger("hot_project")
 
-# 给 leaser 的类型:传入任务自称的 token 种类,还回来一个异步上下文管理器。
 Leaser = Callable[[str], AbstractAsyncContextManager[Any]]
 
 
@@ -117,8 +116,6 @@ class TaskPool:
             raise                                   # 关池子,别当成任务失败
 
         except RateLimitError as e:
-            # 不计入重试次数:外部节流不是这个任务的问题。租约已经记过账并冷却了那个 token,
-            # 直接回队即可,下次会拿到另一个。另记一本有界的账,理由见 `Task.max_rate_limits`。
             task.attempts -= 1
             task.rate_limits += 1
             self.stats["rate_limited"] += 1
@@ -129,8 +126,6 @@ class TaskPool:
                 queue.put_nowait(task)
 
         except (RetryableError, TokenInvalidError) as e:
-            # 401 也归这里:租约已按 strikes 处置过了,换个 token 多半就好。但**计入**次数,
-            # 以免 token 集体失效时无限自旋。
             if task.attempts > task.max_retries:
                 self._finish(task, err=e)
             else:

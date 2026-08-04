@@ -57,8 +57,6 @@ body {
   min-height: calc(100vh - 36px);
   position: relative;  /* sash 的定位上下文 */
   display: grid;
-  /* 侧栏宽度收敛为一个百分比变量：拖拽改它、收起置 0，
-     两态同为百分比，grid-template-columns 才能被平滑插值 */
   --sidebar-w: 38%;
   grid-template-columns: minmax(0, 1fr) var(--sidebar-w);
   gap: 18px;
@@ -67,7 +65,6 @@ body {
               gap 200ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-/* 拖拽中禁用过渡，否则跟手会有迟滞 */
 .shell.is-resizing,
 .shell.is-resizing .sidebar-sash {
   transition: none;
@@ -85,15 +82,9 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* 固定视口高度：报告/收藏各自内部滚动，而非把整页往下撑。
-     与左侧 chat-panel 同为 stretch 网格项，高度/顶部对齐（不用 sticky，否则会偏移）。 */
   max-height: calc(100vh - 36px);
 }
 
-/* 收起态的展开按钮：贴 .shell 右上角，尺寸与标题栏里的 .panel-collapse 一致
-   （36px 宽 × 58px 高 —— 58px 即 .panel-tabs 行高：18px 上下内边距 + 18px 字号的
-   默认行框 ≈ 21.6px），因此两态的箭头落点重合，收起/展开不用换位置去点。
-   展开态不显示（那时主开关在标题栏里），由 JS 的 .is-collapsed 控制出现。 */
 .sidebar-handle {
   position: absolute;
   top: 0;
@@ -106,9 +97,7 @@ body {
   height: 58px;
   padding: 0;
   border: 0;
-  /* 右上角跟随聊天面板的圆角，读起来像"嵌进面板角上"的控件 */
   border-radius: 0 var(--radius-xl) 0 12px;
-  /* 收起态下这是唯一的展开入口，且压在深色 hero 上，用主色实心块保证一眼可见 */
   background: var(--accent-deep);
   color: #fff;
   cursor: pointer;
@@ -116,7 +105,6 @@ body {
   transition: background 160ms ease, color 160ms ease, transform 160ms ease-out;
 }
 
-/* 用 transform 而非 width 做 hover 反馈：不触发布局，向内探出示意可拉 */
 .sidebar-handle:hover {
   background: #9d5017;
   transform: translateX(-3px);
@@ -126,9 +114,6 @@ body {
   transform: translateX(-1px) scale(0.96);
 }
 
-/* 收起后看不到面板内容，用角标提示"里面还有 N 条收藏"。
-   挂在右下角：右上角被 28px 圆角切走了，角标放那儿会显得脱开。
-   底色已是主色，故角标反过来用白底深色字才有对比 */
 .sidebar-handle__badge {
   position: absolute;
   bottom: 3px;
@@ -155,7 +140,6 @@ body {
   transition: transform 220ms ease;
 }
 
-/* 折叠态：箭头翻转，示意"点我把侧栏拉回来" */
 .sidebar-handle.is-collapsed .sidebar-handle__chevron {
   transform: rotate(180deg);
 }
@@ -821,8 +805,6 @@ h1 {
 .messages {
   min-width: 0;
   min-height: 0;
-  /* 对话居中成固定宽度栏：面板变宽（尤其收起侧栏后）时左右自动留等宽外边距，
-     气泡不再只顶着左侧、右边留一大片空白，看起来是刻意的留白而非"没填满的白框"。 */
   padding-top: 18px;
   padding-bottom: calc(18px + var(--composer-space));
   padding-inline: max(18px, calc((100% - 820px) / 2));
@@ -836,8 +818,6 @@ h1 {
     linear-gradient(90deg, rgba(215, 232, 251, 0.08), rgba(248, 216, 176, 0.08));
 }
 
-/* 滚动条：明显可见但收拾干净——去掉原生上下箭头，轨道用淡淡的可见底色（不再是刺眼白），
-   滑块用棕灰实色。Firefox 用 scrollbar-color 等效处理。 */
 .messages,
 .report-list,
 .fav-list {
@@ -1222,8 +1202,6 @@ textarea {
   padding: 12px;
   min-height: 0;
   background: linear-gradient(180deg, rgba(255, 251, 245, 0.68), rgba(241, 234, 223, 0.5));
-  /* .panel-pane.is-active 把本元素变成 grid，默认单列按 max-content 撑宽，
-     会被超长 repo 名/描述撑破导致标签、✕ 被裁切；约束为容器宽度以启用内部 min-width:0 截断 */
   grid-template-columns: minmax(0, 1fr);
 }
 
@@ -1296,7 +1274,6 @@ textarea {
   color: var(--ok);
 }
 
-/* 上榜次数：跟在复制按钮后的小角标，数字本身就是全部信息，别抢仓库名的视觉权重 */
 .fav-item__seen {
   flex: 0 0 auto;
   min-width: 16px;
@@ -1367,10 +1344,14 @@ textarea {
 
 /* 收藏栏按分类分组 */
 .fav-group {
+  margin-bottom: 12px;
+}
+
+.fav-group__items {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-bottom: 12px;
+  padding-top: 6px;
 }
 
 .fav-group__head {
@@ -1381,6 +1362,24 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.fav-group__head::-webkit-details-marker {
+  display: none;
+}
+
+.fav-group__head::before {
+  content: "▸";
+  font-size: 10px;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+
+.fav-group[open] > .fav-group__head::before {
+  transform: rotate(90deg);
 }
 
 .fav-group__count {
@@ -1409,6 +1408,36 @@ textarea {
 
 .fav-item__tag:hover {
   background: rgba(215, 136, 58, 0.2);
+}
+
+.fav-item__tag {
+  touch-action: none;
+  cursor: grab;
+}
+
+.fav-item__tag--handle {
+  padding: 3px 7px;
+  letter-spacing: 1px;
+}
+
+.fav-item.is-dragging {
+  opacity: 0.35;
+}
+
+.fav-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 900;
+  pointer-events: none;
+  opacity: 0.92;
+  box-shadow: 0 12px 28px rgba(23, 50, 77, 0.28);
+}
+
+.fav-group.is-drop-target > .fav-group__head {
+  background: rgba(215, 136, 58, 0.18);
+  border-radius: 8px;
+  color: var(--accent);
 }
 
 /* 标签选择浮层（点 ★ 收藏 / 改分类时弹出） */
@@ -1498,7 +1527,6 @@ textarea {
   background: var(--brand-soft, #2f5b82);
 }
 
-/* 按压反馈：按下时轻微缩放，符合“可按压”的物理直觉（emilkowalski/skills） */
 .fav-item__copy,
 .fav-item__remove,
 .fav-item__tag,
@@ -1518,7 +1546,6 @@ textarea {
   transform: scale(0.94);
 }
 
-/* 标签浮层入场：从触发点方向轻微放大淡入，比直接出现更有“打开”感 */
 .tag-picker {
   animation: tagPickerIn 160ms cubic-bezier(0.23, 1, 0.32, 1);
   transform-origin: top left;

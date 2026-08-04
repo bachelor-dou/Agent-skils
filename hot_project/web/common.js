@@ -32,8 +32,6 @@
     return "https://github.com/" + encodeURIComponent(repo).replace(/%2F/g, "/");
   }
 
-  // 复制按钮统一状态：切换样式类、无障碍文案，并在按钮上浮出可见的「已复制 / 复制失败」气泡。
-  // report.html 与 chat.html 共用，避免两处实现各自漂移。
   function applyRepoCopyState(button, state, repo) {
     const messages = {
       idle: "复制 " + repo,

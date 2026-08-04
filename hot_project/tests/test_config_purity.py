@@ -11,8 +11,6 @@ import sys
 
 from hot_project import config
 
-# 把三个建目录的入口全部换成炸弹,再 import 配置。
-# 用子进程是因为本进程里这些模块早就 import 过了,替换钩子拦不到已发生的 import。
 _PROBE = """
 import os, pathlib
 def _boom(*a, **k):

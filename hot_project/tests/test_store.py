@@ -20,8 +20,8 @@ from pathlib import Path
 import pytest
 
 from hot_project import config
-from hot_project.infra.store import atomic, favorites, snapshots, universe
-from hot_project.infra.store.atomic import StoreReadError
+from hot_project.infra.data_access import _file_io, favorites, snapshots, universe
+from hot_project.infra.data_access._file_io import StoreReadError
 
 # ──────────────────────────────────────────────────────────
 # 真实数据的读取自检
@@ -235,7 +235,7 @@ def test_caller_exception_abandons_the_write(sandbox):
     original = path.read_bytes()
 
     with pytest.raises(RuntimeError, match="boom"):
-        with atomic.transaction(path) as tx:
+        with _file_io.transaction(path) as tx:
             tx.data["projects"]["a/b"]["star"] = 999
             raise RuntimeError("boom")
 

@@ -3,7 +3,7 @@
 纯算术,没有 I/O,所以这些测试跑起来是毫秒级的 —— 这正是把它放进 `core/` 换来的东西。
 """
 
-from hot_project.core import growth
+from hot_project.service import growth
 
 
 def test_baseline_subtraction_is_just_subtraction():

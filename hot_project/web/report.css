@@ -285,7 +285,6 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
   color: var(--muted);
   opacity: 0;
-  /* 让空心 ☆ 描边更粗、更"胖" */
   -webkit-text-stroke: 1px currentColor;
   transition: opacity 140ms ease, color 140ms ease, transform 140ms ease;
 }
@@ -701,7 +700,6 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
 
 .repo-trend[hidden] { display: none; }
 
-/* 居中浮层显示（点击按钮弹出，覆盖内容，不撑长页面） */
 .repo-trend-backdrop {
   position: fixed;
   inset: 0;
@@ -722,7 +720,6 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   margin: 0;
   padding: 22px 26px;
   overflow: auto;
-  /* 浅色卡片：反光屏下更清晰 */
   background: #f4f7fb;
   border: 1px solid rgba(15, 23, 42, 0.12);
   box-shadow: 0 30px 70px rgba(0, 0, 0, 0.5);
@@ -828,7 +825,6 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease, opacity 140ms ease;
 }
 
-/* 刷新按钮默认隐身，鼠标移到该项目卡片上才淡入 —— 和侧栏收藏 ★ 一个套路，避免常驻打扰。 */
 .content .repo-refresh-btn {
   opacity: 0;
 }
@@ -868,7 +864,6 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   to { transform: rotate(360deg); }
 }
 
-/* 触摸设备无 hover：淡显常驻，保证点得到 */
 @media (hover: none) {
   .content .repo-refresh-btn { opacity: 0.5; }
 }

@@ -6,12 +6,8 @@
     rank_tools.py    三张榜(昂贵,执行前要用户确认)
     local_tools.py   零成本:查库、关键词表、取回暂存、Trending
 
-    ranking.py       榜单流水线(rank_tools 和周报 cron 共用)
-    report.py        Markdown 报告生成
-    describe.py      项目介绍:抓素材 + 提示词 + 调 LLM
-
 给模型看的 JSON schema 和运行时校验规则都从同一个 `Param` 长出来,不可能漂移。
-提示词也在这一层:「用中文、四段式、不许编造」是产品决定,「某家挂了换哪家」才是基础设施。
+榜单/报告/文案的流水线在 `service/`,工具 handler 只是它们的薄封装。
 """
 
 from __future__ import annotations

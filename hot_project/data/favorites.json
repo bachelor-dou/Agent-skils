@@ -2,6 +2,20 @@
   "users": {
     "dou": [
       {
+        "repo": "mifi/lossless-cut",
+        "favorited_at": "2026-08-04T02:48:19Z",
+        "source_report": "",
+        "short_desc": "无损剪辑音视频的多功能工具",
+        "category": "娱乐"
+      },
+      {
+        "repo": "Breakthrough/PySceneDetect",
+        "favorited_at": "2026-08-04T02:48:16Z",
+        "source_report": "",
+        "short_desc": "基于Python和OpenCV的场景切分与转场检测程序/库",
+        "category": "工具"
+      },
+      {
         "repo": "pingdotgg/t3code",
         "favorited_at": "2026-08-02T17:24:38Z",
         "source_report": "2026-07-29.md",
@@ -40,7 +54,7 @@
         "repo": "virgiliojr94/book-to-skill",
         "favorited_at": "2026-07-31T14:43:09Z",
         "source_report": "2026-07-29.md",
-        "short_desc": "将技术书PDF转为Claude Code技能，便于学习、查阅和工作中使用",
+        "short_desc": "将技术书PDF转为Claude Code skill，便于学习、查阅和工作中使用",
         "category": "工具"
       },
       {

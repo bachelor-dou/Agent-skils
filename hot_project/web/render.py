@@ -21,10 +21,9 @@ from typing import NamedTuple
 from markdown import Markdown
 
 from .. import config
-from ..core import report_parse
-from ..infra.store import reports, universe
-from ..infra.store.atomic import StoreReadError
-from ..tools.describe import SECTIONS
+from ..infra.data_access import reports, universe
+from ..infra.data_access._file_io import StoreReadError
+from ..service.describe import SECTIONS
 
 logger = logging.getLogger("hot_project")
 
@@ -87,8 +86,6 @@ _SAFE_SCHEMES = frozenset({"http", "https", "mailto"})
 _RELATIVE_PREFIXES = ("#", "/", "./", "../", "//")
 _SCHEME = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*):")
 _CTRL = re.compile(r"[\x00-\x20]+")
-# 无引号那一支不能省:原文里直接写的 `<a href=javascript:alert(1)>` 会原样穿过渲染,
-# 只认带引号的等于放它过去。
 _URL_ATTR = re.compile(
     r'(?P<attr>\b(?:href|src))\s*=\s*'
     r'(?:(?P<quote>["\'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))',
@@ -127,8 +124,6 @@ def _sanitize_urls(html_text: str) -> str:
         value = match.group("quoted") if quote else match.group("bare")
         if _is_safe_url(value):
             return match.group(0)
-        # href 换成锚点(点了什么也不发生),src 只能清空 —— 给 src 塞 "#" 会让浏览器
-        # 重新请求当前页面。重写时一律补上引号,以免裸值中的空格把后续内容拆成新属性。
         fallback = "#" if match.group("attr").lower() == "href" else ""
         return f'{match.group("attr")}="{fallback}"'
 
@@ -184,7 +179,7 @@ class _Diff(NamedTuple):
 
 
 @functools.lru_cache(maxsize=16)
-def _load_cached(name: str, mtime: float) -> report_parse.Report | None:
+def _load_cached(name: str, mtime: float) -> reports.Report | None:
     """解析上一期报告,按 (文件名, mtime) 缓存。
 
     mtime 必须进 key(还只能当参数传,lru_cache 只认参数):同一天的报告会被重跑覆盖,
@@ -200,14 +195,14 @@ def _mtime(name: str) -> float | None:
         return None
 
 
-def _title_prefix(report: report_parse.Report) -> str:
+def _title_prefix(report: reports.Report) -> str:
     """标题去掉日期部分(「GitHub 热门项目 — 2026-07-01」→「GitHub 热门项目」)。"""
     return (report.title or "").split("—")[0].strip()
 
 
 def _prev_report(
-    name: str, current: report_parse.Report
-) -> tuple[str, report_parse.Report] | None:
+    name: str, current: reports.Report
+) -> tuple[str, reports.Report] | None:
     """同尾缀(同类榜)且日期更早的最近一份报告。
 
     还要再比一次标题前缀:旧命名规则下关键词榜和综合榜的尾缀会混叠,拿错会算出一整页假「上新」。
@@ -237,7 +232,7 @@ def _prev_report(
     return None
 
 
-def _diff_of(name: str, current: report_parse.Report) -> _Diff | None:
+def _diff_of(name: str, current: reports.Report) -> _Diff | None:
     prev = _prev_report(name, current)
     if prev is None:
         return None
@@ -255,16 +250,6 @@ def _diff_of(name: str, current: report_parse.Report) -> _Diff | None:
 # ══════════════════════════════════════════════════════════════
 # 描述与 DB 实时同步
 # ══════════════════════════════════════════════════════════════
-#
-# 报告 .md 里的四段描述是生成当天写死的快照。渲染时用 DB 里的 desc 覆盖同名小节,这样描述
-# 被修正或重刷之后,已经生成的旧报告也跟着更新(star、增长这些统计仍保持当时的快照 ——
-# 它们是那一天的事实,不该被今天的数覆盖)。
-#
-# DB 有 29MB 且绝大部分是 star 历史,所以只抽非空 desc 建索引(体量小),并按 mtime 缓存:
-# 每次渲染都重读一遍 30MB 会让页面卡到不可用。
-
-# 四段规范之前生成的描述还有这两段。它们不进报告,但必须参与切分 —— 不认它们的话,
-# 它们的正文会被当成上一段的续行,粘到「技术架构与特性」的覆盖文本里。
 _LEGACY_SECTIONS = ("核心依赖与生态", "已知局限或注意事项")
 _DESC_HEAD = re.compile(
     r"^(?P<title>"
@@ -272,7 +257,6 @@ _DESC_HEAD = re.compile(
     + r")[:：]\s*(?P<body>.*)$"
 )
 
-# (mtime, 索引)。只留一份:DB 只有一个,历史版本没有读者。
 _desc_cache: tuple[float, dict[str, str]] | None = None
 
 
@@ -350,7 +334,7 @@ _LANG_COLORS = {
 
 
 def _structured_html(
-    report: report_parse.Report, diff: _Diff | None
+    report: reports.Report, diff: _Diff | None
 ) -> tuple[str, str]:
     """返回 (详情面板集合, 侧栏项目列表)。
 
@@ -373,10 +357,8 @@ def _structured_html(
         topics = [t.strip() for t in _TOPIC_SEP.split(metadata.get("主题标签", "")) if t.strip()]
         language = metadata.get("主语言", "")
         status_value = metadata.get("项目状态", "")
-        # 增长字段名带着窗口天数(「近7天增长」),标签要按原名显示,所以除了 growth_of
-        # 给的值还得知道键名。
         growth_label = next((k for k in metadata if "增长" in k), "")
-        growth_value = report_parse.growth_of(metadata)
+        growth_value = reports.growth_of(metadata)
 
         stat_items: list[str] = []
         if metadata.get("总 Star"):
@@ -401,7 +383,6 @@ def _structured_html(
         section_items: list[str] = []
         for section in entry.sections:
             title = section["title"]
-            # DB 的 desc 优先于 .md 里写死的那份;DB 没有这一段就用原文。
             content = overrides.get(title) or section["content"]
             paragraphs = _paragraphs(content) or ["暂无补充信息，可进入仓库查看 README。"]
             section_items.append(
@@ -425,8 +406,6 @@ def _structured_html(
             '<div class="repo-trend" hidden></div>'
         )
 
-        # 上期没有 → 蓝色「上新」;排名变化 → ↑/↓。没有上一期时(prev_ranks 是 None)
-        # 两者都不出现 —— 那不是「全部上新」,是「无从比较」。
         is_fresh = prev_ranks is not None and entry.repo not in prev_ranks
         delta = prev_ranks[entry.repo] - entry.rank if prev_ranks is not None and not is_fresh else 0
         delta_html = nav_delta = ""
@@ -474,7 +453,6 @@ def _structured_html(
             f'<span class="repo-nav__rank">{entry.rank}</span>'
             '<span class="repo-nav__body">'
             f'<span class="repo-nav__name">{escape(entry.repo)}</span>'
-            # 徽章放 meta 行行首:项目名过长被截断时徽章仍可见;收藏 ★ 由 report.js 挂载
             f'<span class="repo-nav__meta">{fresh_chip}{new_chip}{growth_chip}{nav_delta}{lang_dot}</span>'
             '</span>'
             '</a>'
@@ -508,13 +486,6 @@ def _summary_chips(summary: str, extra_chips: list[str] | None = None) -> str:
 # ══════════════════════════════════════════════════════════════
 # 通用 Markdown 路径
 # ══════════════════════════════════════════════════════════════
-#
-# 渲染前的预清洗。.md 里可以写原始 HTML,markdown 库会照原样透传,所以危险标签和 on* 事件
-# 属性得在进渲染器之前就抹掉。结构化榜单那条路径不需要这一步 —— 那边每个字段单独 escape。
-#
-# 正则清洗是钝器:它抹掉的是这几个已知标签和 on* 属性,不是完备的 HTML 消毒(`onerror=x`
-# 被抹成裸的 `x`,标签本身还在)。且 report/ 里的内容并非全都出自我们之手 —— agent 的报告
-# 保存工具是聊天驱动的,提示词里让它写什么它就写什么。所以这里按"内容不可信"对待:
 # ponytail: 黑名单清洗,不是白名单。撑得住已知向量(见 test_web.py 的探针集),但下一个
 # 没想到的形态就是下一个洞。真正的修法是换 nh3/bleach 做白名单,代价是多一个依赖。
 
@@ -527,9 +498,6 @@ _RAW_TAG = re.compile(
 )
 _EVENT_ATTR = re.compile(r"\bon\w+\s*=", re.IGNORECASE)
 
-# 替换一次不够:删掉内层匹配后,剩下的两截会重新拼成一个新标签。实测
-# `<scr<script>ipt src=http://evil/x.js>` 单次清洗后会渲染出可执行的外链 script。
-# 每轮只做删除,所以文本严格变短,必然收敛;给个上限是防着有人拿深嵌套刷 O(n²)。
 _MAX_CLEAN_PASSES = 8
 
 
@@ -567,7 +535,7 @@ def _plain_page(name: str, markdown: str) -> str:
     )
 
 
-def _structured_page(name: str, report: report_parse.Report) -> str:
+def _structured_page(name: str, report: reports.Report) -> str:
     diff = _diff_of(name, report)
     article_html, toc_html = _structured_html(report, diff)
 
@@ -598,5 +566,5 @@ def report_html(name: str, markdown: str) -> str:
     `name` 只用于展示和找上一期,不用来读文件 —— 原文由调用方读好传进来(路径穿越挡在
     `reports.resolve_name`)。
     """
-    report = report_parse.parse(markdown)
+    report = reports.parse(markdown)
     return _structured_page(name, report) if report else _plain_page(name, markdown)

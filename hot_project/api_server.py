@@ -22,7 +22,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -30,7 +29,7 @@ from pydantic import BaseModel
 from . import config
 from .common import logs
 from .infra import llm
-from .infra.store import favorites, reports, universe
+from .infra.data_access import favorites, reports, universe
 from .tools import repo_tools
 from .web import render, security, sessions
 
@@ -42,9 +41,7 @@ NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
 
 REPO_NAME = re.compile(r"^[\w.-]+/[\w.-]+$")
 
-# WebSocket 空闲时的心跳间隔:反代会掐掉长时间没数据的连接,而出榜要跑几分钟。
 WS_HEARTBEAT = 15
-# 轮询进度队列的粒度。也是正文流式的最小粒度,所以要细 —— 只在对话进行时空转。
 WS_POLL = 0.05
 
 
@@ -90,8 +87,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GitHub Hot Projects", version="2.0.0", lifespan=lifespan)
 app.mount("/web", StaticFiles(directory=config.WEB_DIR), name="web")
-app.add_middleware(CORSMiddleware, **security.cors_options())
-app.add_middleware(security.Guard)       # 后注册先执行,所以它在 CORS 之前拦
+app.add_middleware(security.Guard)
 
 
 def _page(name: str, missing: str) -> HTMLResponse:
@@ -122,8 +118,6 @@ def chat(body: ChatIn):
     """同步 `def` 是有意的,见文件头。"""
     logger.info("HTTP 对话:session=%s message=%s", body.session_id, body.message[:120])
     agent = sessions.get(body.session_id)
-    # 必须带超时。同步 `def` 跑在全站共享的线程池里,无超时地等这把全局锁会把池占满 ——
-    # 之后每个同步接口都无限期排队,整台服务卡死。
     if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
         logger.warning("HTTP 等执行锁超时:%s", body.session_id)
         raise HTTPException(status_code=503, detail="系统繁忙,请稍后重试。")
@@ -199,7 +193,6 @@ def report_list():
         out.append({"name": item.name, "title": item.title,
                     "day": str(item.day) if item.day else "",
                     "size": stat.st_size,
-                    # 必须是 ISO 字符串:前端 `new Date(v)` 把裸数字当**毫秒**,给秒会错到 1970。
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat()})
     return {"reports": out}
 
@@ -248,7 +241,7 @@ def repo_describe(body: DescribeIn):
     if not REPO_NAME.match(body.repo or ""):
         raise HTTPException(status_code=400, detail="无效的仓库名")
     from .provider.github import client as github
-    from .tools import report
+    from .service import report
     if not (gh := github.shared()).usable:
         raise HTTPException(status_code=503, detail="没有可用的 GitHub token,无法刷新介绍。")
     if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
@@ -266,11 +259,6 @@ def repo_describe(body: DescribeIn):
 
 # ── 收藏 ────────────────────────────────────────────────────────
 
-@app.get("/api/favorite-tags")
-async def favorite_tags():
-    return {"tags": list(config.FAVORITE_DEFAULT_TAGS)}
-
-
 @app.get("/api/favorites")
 def favorite_list(user_id: str):
     if not favorites.valid_user_id(user_id):
@@ -287,10 +275,11 @@ def favorite_update(body: FavoriteIn):
     """概要收藏时才生成,不在出报告时给几百个项目预生成。"""
     short = None
     if body.action == "add":
+        already = next((x for x in favorites.get(body.user_id)
+                        if x.get("repo") == body.repo), {})
         if body.short_desc is not None:
-            # 用户手填的(含清空)直接用,不再花一次 LLM
             short = body.short_desc.strip()[:repo_tools.FAVORITE_DESC_MAX]
-        else:
+        elif not already:
             from .provider.github import client as github
             saved = universe.load().get(body.repo, {})
             short = repo_tools.short_desc(body.repo, saved, github.shared()) or None
@@ -311,8 +300,6 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 
     整段重发不是冗余:增量可能中途断掉,前端要一份完整的做最终渲染和历史存档。
     """
-    # 安全中间件对 WebSocket 不生效(starlette 见到非 http scope 直接放行),必须自己问一次
-    # —— 否则最该保护的入口是唯一没保护的入口。
     ip = security.client_ip(websocket)
     if verdict := security.check(ip, websocket.url.path):
         logger.warning("WS %s拦截:%s %s", verdict.reason, ip, session_id)
@@ -325,7 +312,6 @@ async def ws_chat(websocket: WebSocket, session_id: str):
     logger.info("WS 已连接:%s(user=%s model=%s lite=%s)",
                 session_id, user_id or "-", model or "-", lite or "-")
 
-    # 断线期间攒下的回复,重连补推。发不出去就放回去,下次再试。
     for reply in sessions.take(session_id):
         try:
             await websocket.send_text(reply)

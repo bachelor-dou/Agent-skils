@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from . import wire
+from . import protocol
 from .schemes import Scheme
 
 logger = logging.getLogger("hot_project")
@@ -85,8 +85,6 @@ class LLMClient:
         if not order:
             return None
 
-        # 「外发过就不能重来」不只管平台内重试,也管换平台:p1 吐了半句才断线,回退到 p2
-        # 会让用户看到「半句 + 另一个完整答案」。wire 只看得见自己这一次请求,所以记在这里。
         emitted = False
         if on_delta is not None:
             inner = on_delta
@@ -97,7 +95,7 @@ class LLMClient:
                 inner(piece)
 
         for scheme, model in order:
-            data = wire.request(
+            data = protocol.request(
                 scheme, model, messages, tools=tools,
                 max_tokens=max_tokens, temperature=temperature,
                 enable_thinking=enable_thinking, thinking_budget=thinking_budget,

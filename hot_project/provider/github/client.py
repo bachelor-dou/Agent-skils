@@ -22,17 +22,15 @@ from ...infra import tasks
 from ...infra.exceptions import RetryableError
 from . import repo as repo_api
 from . import request as gh
-from . import tasks as gh_tasks
+from . import collect
 from . import trending as trending_api
 from .tokens import CORE, SEARCH, TokenPool
 
 logger = logging.getLogger("hot_project")
 
-# 关键词榜一次最多几路并发搜。配速由 token 池管,这里只是别开出比 token 还多的 worker。
 SEARCH_WORKERS = 12
 
-# 任务只说自己要哪种 token,配速由这里翻译。和 `cron_daily_snapshot._make_pool` 同一张表。
-_PACES = {gh_tasks.SEARCH_TOKEN: SEARCH, gh_tasks.CORE_TOKEN: CORE}
+_PACES = {collect.SEARCH_TOKEN: SEARCH, collect.CORE_TOKEN: CORE}
 
 
 class GitHub:
@@ -74,26 +72,26 @@ class GitHub:
         return self._run(lambda c: repo_api.search(c, self.pool, query,
                                                    limit=limit, sort=sort))
 
-    def stars(self, names: list[str]) -> gh_tasks.Harvest:
+    def stars(self, names: list[str]) -> collect.Harvest:
         """批量取**当前** star。榜单的被减数走这里,和每日采集是同一条路。
 
         `Harvest` 把「取到 / 确认查不到 / 这次没问到」分开,后两者不能混:一次限流高峰就能
         让上万个活仓库集体从榜上消失。
         """
         if not names:
-            return gh_tasks.Harvest()
+            return collect.Harvest()
         if self.pool.capacity < 1:
             logger.error("所有 token 都已失效,取不到当前 star。")
-            return gh_tasks.Harvest()
+            return collect.Harvest()
 
         async def harvest(client):
-            sink = gh_tasks.Harvest()
+            sink = collect.Harvest()
             async with tasks.TaskPool(
-                lanes={gh_tasks.GRAPHQL_LANE: gh_tasks.GRAPHQL_WORKERS},
+                lanes={collect.GRAPHQL_LANE: collect.GRAPHQL_WORKERS},
                 leaser=lambda kind: self.pool.lease(_PACES[kind]),
             ) as pool:
-                for group in gh_tasks.batches(names):
-                    pool.submit(gh_tasks.StarBatch(sink, client, group))
+                for group in collect.batches(names):
+                    pool.submit(collect.StarBatch(sink, client, group))
                 await pool.join()
             return sink
 
@@ -115,21 +113,18 @@ class GitHub:
         if not words:
             return {}
 
-        # capacity 会因为 401 strike 掉到 0,而 TaskPool 对 workers=0 抛 ValueError。
         if self.pool.capacity < 1:
             logger.error("所有 token 都已失效,关键词搜索无法进行。")
             return {}
 
         async def sweep(client):
-            sink = gh_tasks.Discovered()
+            sink = collect.Discovered()
             async with tasks.TaskPool(
-                lanes={gh_tasks.SEARCH_LANE: min(SEARCH_WORKERS, self.pool.capacity)},
-                # 必须按 kind 分派:写死 SEARCH 会让非搜索任务白挨 2.1 秒配速,慢一个
-                # 数量级而且不报错。
+                lanes={collect.SEARCH_LANE: min(SEARCH_WORKERS, self.pool.capacity)},
                 leaser=lambda kind: self.pool.lease(_PACES[kind]),
             ) as pool:
                 for word in words:
-                    pool.submit(gh_tasks.KeywordPage(sink, client, word, min_star))
+                    pool.submit(collect.KeywordPage(sink, client, word, min_star))
                 await pool.join()
             if sink.failures:
                 logger.warning("关键词搜索有 %d 处失败,结果可能不全。", len(sink.failures))

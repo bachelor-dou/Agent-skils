@@ -22,7 +22,6 @@ logger = logging.getLogger("hot_project")
 TTL_SECONDS = 3600
 MAX_SESSIONS = 100
 
-# 工具执行全局串行,见模块头部。等锁必须带超时,不能让前端无限期转圈。
 TOOL_LOCK_TIMEOUT = 90
 tool_lock = threading.Lock()
 
