@@ -32,6 +32,7 @@ from .service import report as report_tool
 logger = logging.getLogger("hot_project")
 
 TOP_IN_PUSH = 5
+TRENDING_PERIODS = ("weekly", "monthly")
 
 
 def previous_report(current: str) -> tuple[str, reports.Report] | None:
@@ -77,31 +78,37 @@ def push(result: dict) -> None:
     notify.send(f"GitHub 周报 {format_day(utc_today())}", "\n\n".join(parts))
 
 
-async def _weekly_trending() -> list[dict]:
+async def _fetch_trending(period: str) -> list[dict]:
     client = gh_request.build_client()
     try:
-        return await trending.fetch_trending(client, "weekly")
+        return await trending.fetch_trending(client, period)
     finally:
         await client.aclose()
 
 
 def attach_trending(result: dict) -> None:
-    """报告尾部接一段 Trending 周榜对照。任何失败只记日志 —— 附栏绝不能搞砸周报。"""
+    """报告尾部接周榜和月榜两段 Trending 对照。
+
+    两个周期各自独立:月榜抓挂了不该连累已经写好的周榜,所以每个周期单独 try 单独记日志。
+    任何失败都只记日志 —— 附栏绝不能搞砸周报。
+    """
     path = result.get("report_path")
     if not path:
         return
-    try:
-        rows = asyncio.run(_weekly_trending())
-    except Exception:       # noqa: BLE001
-        logger.exception("Trending 周榜抓取失败,本期没有对照附栏。")
-        return
-    if not rows:
-        logger.warning("Trending 周榜解析出 0 条,跳过附栏。")
-        return
-    if report_tool.append_trending(path, rows, result["ranked"], gh=github.shared()):
-        logger.info("Trending 对照附栏已追加:%d 条。", len(rows))
-    else:
-        logger.error("Trending 对照附栏写入失败,报告正文不受影响。")
+    for period in TRENDING_PERIODS:
+        try:
+            rows = asyncio.run(_fetch_trending(period))
+        except Exception:       # noqa: BLE001
+            logger.exception("Trending %s 抓取失败,本期没有这段对照附栏。", period)
+            continue
+        if not rows:
+            logger.warning("Trending %s 解析出 0 条,跳过这段附栏。", period)
+            continue
+        if report_tool.append_trending(path, rows, result["ranked"],
+                                       gh=github.shared(), period=period):
+            logger.info("Trending 对照附栏已追加(%s):%d 条。", period, len(rows))
+        else:
+            logger.error("Trending 对照附栏(%s)写入失败,报告正文不受影响。", period)
 
 
 def run(args: argparse.Namespace) -> int:

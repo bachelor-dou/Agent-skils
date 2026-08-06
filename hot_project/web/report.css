@@ -222,6 +222,13 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   color: var(--muted);
 }
 
+/* 前 60 名 = 热门区,序号淡蓝。特异度低于下面两条,所以选中态和前三名描金照旧压过它。 */
+.repo-nav__item--hot .repo-nav__rank {
+  background: rgba(96, 165, 250, 0.14);
+  border-color: rgba(96, 165, 250, 0.35);
+  color: var(--fresh);
+}
+
 .repo-nav__item.is-active .repo-nav__rank {
   background: var(--gradient);
   border-color: transparent;
@@ -500,6 +507,136 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   background: rgba(96, 165, 250, 0.12);
   border-color: rgba(96, 165, 250, 0.35);
   color: var(--fresh);
+}
+
+/* Trending 对照附栏：橙色一系，和「上新」的蓝、「NEW」的红区分开 */
+
+.hero__chip--trend,
+.repo-detail__trend,
+.repo-nav__trend,
+.trend-card__flag {
+  background: rgba(251, 146, 60, 0.14);
+  border: 1px solid rgba(251, 146, 60, 0.35);
+  color: #fdba74;
+}
+
+.repo-detail__trend {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.repo-nav__trend {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.trend-note {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.trend-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trend-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-m);
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--line);
+}
+
+.trend-row--full {
+  display: block;
+  padding: 0;
+  background: none;
+  border: none;
+}
+
+.trend-row__no {
+  flex: 0 0 auto;
+  min-width: 34px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--muted);
+}
+
+.trend-row__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.trend-row__hit {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.content a.trend-row__hit { color: var(--accent-a); text-decoration: none; }
+.content a.trend-row__hit:hover { text-decoration: underline; }
+
+.trend-card {
+  padding: 18px 20px;
+  border-radius: var(--radius-m);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-left: 2px solid rgba(251, 146, 60, 0.55);
+}
+
+.trend-card__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.trend-card__name {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.content .trend-card__name a { color: var(--ink); text-decoration: none; }
+.content .trend-card__name a:hover { color: var(--accent-a); }
+
+.trend-card__flag {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
 }
 
 /* 侧栏「全部 / 仅上新」过滤 chip（report.js 动态插入） */

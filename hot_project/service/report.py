@@ -282,7 +282,17 @@ def generate(ranked: list[tuple[str, dict]], *, mode: str = "comprehensive",
 
 # ── Trending 对照附栏 ────────────────────────────────────────────────
 
-APPENDIX_MARK = "## 附:GitHub Trending 周榜对照"
+APPENDIX_MARK = "## 附:GitHub Trending"     # 各周期共用的前缀
+
+# 周期 → (榜名, 增长字段名)。字段名必须写明是哪个窗口:Trending 的口径和我们的窗口增量
+# 不同源,月榜的数字更不能顶着「本周新增」出现。
+PERIOD_TEXT = {"weekly": ("周榜", "本周新增"), "monthly": ("月榜", "本月新增")}
+
+
+def appendix_mark(period: str) -> str:
+    """某个周期的附栏标题。幂等判断和渲染共用这一份,免得两边写法漂移。"""
+    label, _ = PERIOD_TEXT.get(period, PERIOD_TEXT["weekly"])
+    return f"{APPENDIX_MARK} {label}对照({period})"
 
 
 def _positions(ranked: list[tuple[str, dict]],
@@ -305,20 +315,24 @@ def _position_of(name: str, saved_by_name: dict[str, dict],
 
 
 def render_trending(rows: list[dict], ranked: list[tuple[str, dict]],
-                    saved_by_name: dict[str, dict], descs: dict[str, str]) -> str:
-    """Trending 周榜 → 对照附栏 Markdown。纯字符串处理。
+                    saved_by_name: dict[str, dict], descs: dict[str, str],
+                    period: str = "weekly") -> str:
+    """Trending 某个周期的榜单 → 对照附栏 Markdown。纯字符串处理。
 
     条目标题用 `T1.` 而非纯数字排名:报告解析器只认 `## 数字. owner/repo`,附栏对它
     不可见,不会混进「上新/移出」、出场次数、star 趋势的统计。已上榜的一行指回正文排名;
-    没上榜的按正文同款格式补全,增长数字是 Trending 页面的「本周新增」口径,和我们的
-    窗口增量不同源,字段名里写明,不冒充。
+    没上榜的按正文同款格式补全,增长数字是 Trending 页面的口径,和我们的窗口增量不同源,
+    字段名里写明是哪个窗口,不冒充。
+
+    周期写进标题的括号里(`(weekly)` / `(monthly)`),解析端靠它把两段附栏分开归位。
     """
+    label, gained = PERIOD_TEXT.get(period, PERIOD_TEXT["weekly"])
     by_name, by_id = _positions(ranked, saved_by_name)
     hits = sum(1 for r in rows
                if _position_of(r["full_name"], saved_by_name, by_name, by_id))
 
-    out = ["---", "", f"{APPENDIX_MARK}(weekly)", "",
-           f"> Trending 周榜 {len(rows)} 个 | 已在本期榜单 {hits} 个 | "
+    out = ["---", "", appendix_mark(period), "",
+           f"> Trending {label} {len(rows)} 个 | 已在本期榜单 {hits} 个 | "
            f"附栏补全 {len(rows) - hits} 个 | 抓取: {format_day(utc_today())}", ""]
 
     for i, row in enumerate(rows, 1):
@@ -335,7 +349,7 @@ def render_trending(rows: list[dict], ranked: list[tuple[str, dict]],
         if language := (row.get("language") or saved.get("language") or "").strip():
             out.append(f"- 主语言: {language}")
         out.append(f"- 总 Star: {row.get('star', 0):,}")
-        out.append(f"- 本周新增(Trending 口径): +{row.get('stars_today', 0):,}")
+        out.append(f"- {gained}(Trending 口径): +{row.get('stars_today', 0):,}")
         if topics := [t for t in saved.get("topics") or [] if t][:TOPICS_SHOWN]:
             out.append(f"- 主题标签: {', '.join(topics)}")
         out.append("")
@@ -347,8 +361,10 @@ def render_trending(rows: list[dict], ranked: list[tuple[str, dict]],
 
 
 def append_trending(path: str, rows: list[dict], ranked: list[tuple[str, dict]],
-                    gh=None, progress=None) -> bool:
-    """把 Trending 对照附栏接到已生成的报告尾部。幂等:已有附栏就不再追加。
+                    gh=None, progress=None, period: str = "weekly") -> bool:
+    """把某个周期的 Trending 对照附栏接到已生成的报告尾部。
+
+    幂等**按周期算**:周榜已在不挡月榜,重跑同一个周期才跳过。
 
     没上榜的条目走和正文同一条 LLM 介绍管线;不在 DB 里的仓库拿 Trending 自带的简介
     当素材兜底,写回时 `write_descriptions` 自己会跳过它们。
@@ -357,7 +373,7 @@ def append_trending(path: str, rows: list[dict], ranked: list[tuple[str, dict]],
     text = reports.read(name)
     if text is None:
         return False
-    if APPENDIX_MARK in text:
+    if appendix_mark(period) in text:
         return True
 
     saved_by_name = universe.load()
@@ -376,5 +392,5 @@ def append_trending(path: str, rows: list[dict], ranked: list[tuple[str, dict]],
     if writeback:
         universe.write_descriptions(writeback)
 
-    appendix = render_trending(rows, ranked, enriched, descs)
+    appendix = render_trending(rows, ranked, enriched, descs, period)
     return reports.save(name, text.rstrip() + "\n\n" + appendix) is not None

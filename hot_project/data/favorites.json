@@ -2,6 +2,13 @@
   "users": {
     "dou": [
       {
+        "repo": "firecrawl/anydoc",
+        "favorited_at": "2026-08-06T09:29:59Z",
+        "source_report": "2026-08-06.md",
+        "short_desc": "将Word、PDF等办公文档快速统一转换为干净的Markdown，支持CLI、Node/Python和浏览器离线使用。",
+        "category": "效率工具"
+      },
+      {
         "repo": "yc-software/qm",
         "favorited_at": "2026-08-05T07:11:47Z",
         "source_report": "2026-08-05.md",
@@ -97,13 +104,6 @@
         "favorited_at": "2026-07-30T13:15:21Z",
         "source_report": "2026-07-29.md",
         "short_desc": "混合架构代码审查工具，支持精准行级评论，内置NPE、线程安全、XSS、SQL注入规则，并兼容OpenAI和Anthrop",
-        "category": "效率工具"
-      },
-      {
-        "repo": "headroomlabs-ai/headroom",
-        "favorited_at": "2026-07-28T05:13:01Z",
-        "source_report": "2026-07-22.md",
-        "short_desc": "Agent压缩工具输出、日志、文件和RAG分块，减少LLM输入token，提供库、代理和MCP服务。",
         "category": "效率工具"
       },
       {

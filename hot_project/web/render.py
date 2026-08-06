@@ -150,6 +150,11 @@ def _paragraphs(text: str) -> list[str]:
     return [block.strip() for block in _BLANK_LINE.split(text) if block.strip()]
 
 
+def _anchor(rank: int, repo: str) -> str:
+    """详情面板的锚点 id。附栏靠它跳回正文,公式只能有一份。"""
+    return f"repo-{rank}-{_slug(repo)}"
+
+
 def _stat(label: str, value: str, kind: str = "") -> str:
     class_name = f"repo-stat repo-stat--{kind}" if kind else "repo-stat"
     return (
@@ -333,8 +338,129 @@ _LANG_COLORS = {
 }
 
 
+# 侧栏序号淡蓝的分界。60 是八期历史里「周涨 2,000+」个数的稳定区间(51-64,中位 58),
+# 61 名往后基本只剩存量大仓的慢涨。纯展示分区,不影响出榜数量。
+NAV_HOT_CUTOFF = 60
+
+TREND_ANCHOR = "trending-appendix"
+
+# 附栏条目的字段是生成端按顺序写死的,这里按名字上色,认不出的当增长口径处理
+_TREND_STAT_KINDS = {"总 Star": "star", "主语言": "language", "创建时间": "created"}
+_TREND_LABELS = {"weekly": "周榜", "monthly": "月榜"}
+
+
+class _Trend(NamedTuple):
+    label: str              # 周榜 / 月榜
+    panel: str              # 附栏面板(和正文面板同级,排在最后)
+    nav: str                # 侧栏入口(必须和 panel 同时出现)
+    chip: str               # 头部信息条
+    repos: frozenset[str]   # 附栏点到的仓库,正文里的那些要挂角标
+
+
+def _trend_card(entry: reports.Entry) -> str:
+    """没上榜的附栏条目 → 一张完整卡片。复用正文的 stat / panel 样式,不另起一套。"""
+    stats = "".join(
+        _stat(label, value,
+              _TREND_STAT_KINDS.get(label, "growth" if "新增" in label else ""))
+        for label, value in entry.metadata.items() if label != "主题标签"
+    )
+    topics = [t.strip() for t in _TOPIC_SEP.split(entry.metadata.get("主题标签", "")) if t.strip()]
+    topics_html = (
+        f'<div class="repo-detail__topics">'
+        + "".join(f'<span class="repo-topic">{escape(t)}</span>' for t in topics[:6])
+        + '</div>'
+    ) if topics else ""
+    sections = "".join(
+        f'<section class="repo-panel"><h3>{escape(s["title"])}</h3>'
+        + "".join(f"<p>{escape(p)}</p>" for p in _paragraphs(s["content"]))
+        + '</section>'
+        for s in entry.sections
+    )
+    link = _safe_href(entry.link or f"https://github.com/{entry.repo}")
+    return (
+        '<div class="trend-card">'
+        '<div class="trend-card__head">'
+        f'<span class="trend-row__no">T{entry.rank}</span>'
+        f'<h3 class="trend-card__name">'
+        f'<a href="{escape(link)}" target="_blank" rel="noreferrer">{escape(entry.repo)}</a></h3>'
+        '<span class="trend-card__flag">未进本期榜单</span>'
+        '</div>'
+        f'<div class="repo-detail__stats">{stats}</div>'
+        f'{topics_html}'
+        f'<div class="repo-detail__grid">{sections}</div>'
+        '</div>'
+    )
+
+
+def _trend_of(period: str, entries: list[reports.Entry],
+              ranks: dict[str, int]) -> _Trend:
+    """一个周期的附栏 → 一个独立面板 + 一个侧栏入口。
+
+    每个周期单独成一个面板,也不把附栏条目混进正文面板列表:`report.js` 是按下标把面板
+    和侧栏项配对的,多塞或少塞一个就整页错位。已上榜的那些只渲染成一行锚点跳回正文,
+    和 Markdown 里一致。
+    """
+    label = _TREND_LABELS.get(period, period)
+    anchor = f"{TREND_ANCHOR}-{period}"
+    rows: list[str] = []
+    listed: set[str] = set()
+
+    for entry in entries:
+        # 生成端只给了「见正文 #N」那一行 = 已上榜,没有任何字段
+        if entry.metadata:
+            rows.append(f'<li class="trend-row trend-row--full">{_trend_card(entry)}</li>')
+            continue
+        listed.add(entry.repo)
+        rank = ranks.get(entry.repo)
+        target = (
+            f'<a class="trend-row__hit" href="#{_anchor(rank, entry.repo)}">榜内 #{rank}</a>'
+            if rank else '<span class="trend-row__hit">已入选本期榜单</span>'
+        )
+        rows.append(
+            '<li class="trend-row">'
+            f'<span class="trend-row__no">T{entry.rank}</span>'
+            f'<span class="trend-row__name">{escape(entry.repo)}</span>'
+            f'{target}</li>'
+        )
+
+    total, hits = len(entries), len(listed)
+    panel = (
+        f'<section class="repo-detail trend-panel" id="{anchor}">'
+        '<header class="repo-detail__head">'
+        '<span class="repo-detail__rank">附</span>'
+        f'<h2>GitHub Trending {escape(label)}对照</h2>'
+        '</header>'
+        f'<p class="trend-note">共 {total} 个 · 已在本期榜单 {hits} 个 · '
+        f'附栏补全 {total - hits} 个。已上榜的点一下跳回正文。</p>'
+        f'<ol class="trend-list">{"".join(rows)}</ol>'
+        '</section>'
+    )
+    nav = (
+        f'<a class="repo-nav__item repo-nav__item--trend" href="#{anchor}" '
+        f'data-panel="{anchor}" data-search="trending {escape(label)} 附">'
+        '<span class="repo-nav__rank">附</span>'
+        '<span class="repo-nav__body">'
+        f'<span class="repo-nav__name">Trending {escape(label)}对照</span>'
+        f'<span class="repo-nav__meta"><span class="repo-nav__trend">{total} 个</span></span>'
+        '</span></a>'
+    )
+    chip = (
+        '<span class="hero__chip hero__chip--trend">'
+        f'Trending {escape(label)} {total}: 榜内 {hits} · 补全 {total - hits}'
+        '</span>'
+    )
+    return _Trend(label, panel, nav, chip, frozenset(listed))
+
+
+def _trending(report: reports.Report) -> list[_Trend]:
+    """报告里的每段附栏各出一块。顺序跟着报告走(周榜在前、月榜在后)。"""
+    ranks = {e.repo: e.rank for e in report.entries}
+    return [_trend_of(period, entries, ranks)
+            for period, entries in report.trending.items() if entries]
+
+
 def _structured_html(
-    report: reports.Report, diff: _Diff | None
+    report: reports.Report, diff: _Diff | None, trends: list[_Trend] | None = None
 ) -> tuple[str, str]:
     """返回 (详情面板集合, 侧栏项目列表)。
 
@@ -345,11 +471,15 @@ def _structured_html(
     nav_items: list[str] = []
     prev_ranks = diff.prev_ranks if diff else None
     desc_index = _desc_index()
+    on_trending: dict[str, list[str]] = {}      # 仓库 → 在哪几个榜上,同时上榜就两个都列
+    for item in trends or []:
+        for repo in item.repos:
+            on_trending.setdefault(repo, []).append(item.label)
 
     for entry in report.entries:
         metadata = entry.metadata
         overrides = _desc_sections(desc_index.get(entry.repo, ""))
-        anchor = f"repo-{entry.rank}-{_slug(entry.repo)}"
+        anchor = _anchor(entry.rank, entry.repo)
 
         repo_link = _safe_href(entry.link or f"https://github.com/{entry.repo}")
         readme_link = _safe_href(f"{repo_link}#readme") if repo_link != "#" else "#"
@@ -422,6 +552,12 @@ def _structured_html(
         fresh_badge = '<span class="repo-detail__fresh" title="上期报告中没有的项目">上新</span>' if is_fresh else ""
         new_badge = '<span class="repo-detail__new" title="新项目">NEW</span>' if status_value else ""
         fresh_attr = ' data-fresh="1"' if is_fresh else ""
+        trend_labels = on_trending.get(entry.repo, [])
+        trend_badge = (
+            f'<span class="repo-detail__trend" title="同时在 GitHub Trending '
+            f'{escape("、".join(trend_labels))}上">TRENDING</span>'
+            if trend_labels else ""
+        )
 
         article_parts.append(
             f'<section class="repo-detail" id="{anchor}" data-repo="{escape(entry.repo)}" data-rank="{entry.rank}"{fresh_attr}>'
@@ -431,6 +567,7 @@ def _structured_html(
             f'<h2>{escape(entry.repo)}</h2>'
             f'{fresh_badge}'
             f'{new_badge}'
+            f'{trend_badge}'
             '</header>'
             f'<div class="repo-detail__stats">{"".join(stat_items)}</div>'
             f'{topics_html}'
@@ -446,17 +583,27 @@ def _structured_html(
         growth_chip = f'<span class="repo-nav__growth">{escape(growth_value)}</span>' if growth_value else ""
         new_chip = '<span class="repo-nav__new">NEW</span>' if status_value else ""
         fresh_chip = '<span class="repo-nav__fresh">上新</span>' if is_fresh else ""
-        search_blob = " ".join([entry.repo, language] + topics).lower()
+        trend_chip = '<span class="repo-nav__trend">TRENDING</span>' if trend_labels else ""
+        search_blob = " ".join(
+            [entry.repo, language] + topics
+            + (["trending", *trend_labels] if trend_labels else [])).lower()
+        hot_class = " repo-nav__item--hot" if entry.rank <= NAV_HOT_CUTOFF else ""
         nav_items.append(
-            f'<a class="repo-nav__item" href="#{anchor}" data-panel="{anchor}" '
+            f'<a class="repo-nav__item{hot_class}" href="#{anchor}" data-panel="{anchor}" '
             f'data-repo="{escape(entry.repo)}" data-search="{escape(search_blob)}"{fresh_attr}>'
             f'<span class="repo-nav__rank">{entry.rank}</span>'
             '<span class="repo-nav__body">'
             f'<span class="repo-nav__name">{escape(entry.repo)}</span>'
-            f'<span class="repo-nav__meta">{fresh_chip}{new_chip}{growth_chip}{nav_delta}{lang_dot}</span>'
+            f'<span class="repo-nav__meta">{fresh_chip}{new_chip}{trend_chip}'
+            f'{growth_chip}{nav_delta}{lang_dot}</span>'
             '</span>'
             '</a>'
         )
+
+    # 面板和侧栏项在 report.js 里是按下标配对的:附栏这两块只能一起加,也只能加在最后。
+    for item in trends or []:
+        article_parts.append(item.panel)
+        nav_items.append(item.nav)
 
     toc_html = (
         f'<nav class="repo-nav" id="repo-nav">{"".join(nav_items)}</nav>'
@@ -537,7 +684,8 @@ def _plain_page(name: str, markdown: str) -> str:
 
 def _structured_page(name: str, report: reports.Report) -> str:
     diff = _diff_of(name, report)
-    article_html, toc_html = _structured_html(report, diff)
+    trends = _trending(report)
+    article_html, toc_html = _structured_html(report, diff, trends)
 
     extra_chips: list[str] = []
     if diff:
@@ -547,6 +695,7 @@ def _structured_page(name: str, report: reports.Report) -> str:
             f'上新 {diff.added} · 移出 {diff.removed}'
             '</span>'
         )
+    extra_chips.extend(item.chip for item in trends)
 
     return page(
         _REPORT_TEMPLATE,

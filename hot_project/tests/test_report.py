@@ -296,6 +296,40 @@ def test_the_trending_appendix_is_invisible_to_the_report_parser():
     assert [e.repo for e in parsed.entries] == [n for n, _ in RANKED]
 
 
+def _with_appendices() -> str:
+    """正文 + 周榜附栏 + 月榜附栏,和 cron 实际写出来的报告同一个形状。"""
+    return "\n".join([
+        _render(),
+        report.render_trending(TRENDING_ROWS, RANKED, SAVED, {}, "weekly"),
+        report.render_trending(TRENDING_ROWS[:1], RANKED, SAVED, {}, "monthly"),
+    ])
+
+
+def test_each_period_is_parsed_into_its_own_bucket():
+    """周榜和月榜的条目都从 T1 起,靠附栏标题分段;串了段就会张冠李戴。"""
+    parsed = reports.parse(_with_appendices())
+    assert [e.repo for e in parsed.entries] == [n for n, _ in RANKED]   # 正文不受影响
+    assert list(parsed.trending) == ["weekly", "monthly"]
+    assert len(parsed.trending["weekly"]) == 2
+    assert [e.repo for e in parsed.trending["monthly"]] == ["openai/whisper"]
+
+
+def test_both_trending_appendices_reach_the_rendered_page():
+    """附栏进得了 Markdown、上不了网页,是这功能上一次的坏法 —— 生成端改了前端没跟。
+
+    最后一条断言守的是 `report.js` 的配对:面板和侧栏项按下标配对,数量对不上整页错位。
+    """
+    html = render.report_html("2026-07-30.md", _with_appendices())
+
+    assert "GitHub Trending 周榜对照" in html
+    assert "GitHub Trending 月榜对照" in html
+    assert html.count(f'id="{render.TREND_ANCHOR}-') == 2
+    assert 'href="#repo-1-openai-whisper"' in html      # 已上榜的一行跳回正文
+    assert "uber/adr" in html                           # 没上榜的整卡补全
+    assert "同时在 GitHub Trending 周榜、月榜上" in html   # 两个榜都在的挂一个角标,列全
+    assert html.count('<section class="repo-detail') == html.count('<a class="repo-nav__item')
+
+
 def test_a_listed_trending_repo_links_back_and_an_unlisted_one_is_rendered_in_full():
     appendix = report.render_trending(TRENDING_ROWS, RANKED, SAVED, {})
     assert "## T1. openai/whisper" in appendix

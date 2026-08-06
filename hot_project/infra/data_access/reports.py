@@ -173,6 +173,11 @@ def save(name: str, text: str) -> Path | None:
 # ── 报告 Markdown → 结构化数据(纯解析,不碰文件系统) ──
 
 _HEADING = re.compile(r"##\s+(?P<rank>\d+)\.\s+(?P<repo>[\w.-]+/[\w.-]+)\s*$")
+# 附栏条目写成 `## T1. owner/repo`,和正文的纯数字排名分开,免得混进「上新/移出」、
+# 出场次数、star 趋势的统计。解析成单独一份名单,不进 `entries`。
+# 周榜和月榜的条目编号都从 T1 起,靠上一行的附栏标题 `(weekly)` / `(monthly)` 分段归位。
+_TREND_HEADING = re.compile(r"##\s+T(?P<rank>\d+)\.\s+(?P<repo>[\w.-]+/[\w.-]+)\s*$")
+_APPENDIX = re.compile(r"##\s+附[:：].*\((?P<period>[a-z]+)\)\s*$")
 _META = re.compile(r"-\s*(?P<label>[^:：]+)[:：]\s*(?P<value>.+)")
 _LINK = re.compile(r"链接[:：]\s*(?P<url>.+)")
 _DIGITS = re.compile(r"[^\d-]")
@@ -192,6 +197,8 @@ class Report(NamedTuple):
     title: str
     summary: str
     entries: list[Entry]
+    # {周期: 附栏条目},周期就是 Trending 的 weekly / monthly。只读;统计一律只看 entries
+    trending: dict[str, list[Entry]] = {}
 
     def find(self, repo: str) -> Entry | None:
         """在报告里找一个仓库:先精确匹配,再子串兜底(说「找 langchain」不必打全名)。"""
@@ -264,20 +271,29 @@ def parse(markdown: str) -> Report | None:
     summary = next((ln[1:].strip() for ln in lines if ln.startswith(">")), "")
 
     entries: list[Entry] = []
+    trending: dict[str, list[Entry]] = {}
+    period = ""
     idx = 0
     while idx < len(lines):
-        m = _HEADING.match(lines[idx].strip())
-        if not m:
+        line = lines[idx].strip()
+        if m := _HEADING.match(line):
+            entry, idx = _parse_entry(lines, idx + 1, int(m.group("rank")), m.group("repo"))
+            entries.append(entry)
+        elif m := _APPENDIX.match(line):
+            period = m.group("period")
+            trending.setdefault(period, [])
             idx += 1
-            continue
-        entry, idx = _parse_entry(lines, idx + 1, int(m.group("rank")), m.group("repo"))
-        entries.append(entry)
+        elif period and (m := _TREND_HEADING.match(line)):
+            entry, idx = _parse_entry(lines, idx + 1, int(m.group("rank")), m.group("repo"))
+            trending[period].append(entry)
+        else:
+            idx += 1
 
     if not entries:
         return None
     if not any(all(e.metadata.get(k) for k in _REQUIRED_META) for e in entries):
         return None
-    return Report(title, summary, entries)
+    return Report(title, summary, entries, trending)
 
 
 def as_dict(report: Report) -> dict[str, Any]:
