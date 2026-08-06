@@ -2,7 +2,8 @@
 """每日任务:发现新仓库 → 给 DB 里每个仓库记一份当天 star → 清理旧快照 → 淘汰。
 
 star 时间戳已被 GitHub 限权,增长只能靠「今天的 star − T−N 那天快照里的 star」,所以这个
-脚本漏一天是补不回来的。它因此被设计成幂等:当天已有快照就直接退出,可以每小时触发一次。
+脚本漏一天是补不回来的。它因此被设计成幂等:当天已有快照就直接退出,一天触发几次都行
+(workflow 配的是三次,任何一次成功即完成,其余秒退)。
 
 失败策略各不相同:发现失败记一笔继续跑(DB 明天能补,快照不能,绝不能拖累采集);采集
 部分失败照常落盘,缺席的仓库不进淘汰判定;覆盖率不足则中止**不落盘** —— 宁可缺一天锚点
@@ -86,6 +87,8 @@ def register(found: dict[str, dict], min_star: int) -> list[str]:
         if star < min_star:
             continue
         records[name] = {"star": star, "created_at": item.get("created_at", "")}
+        if isinstance(item.get("id"), int):
+            records[name]["id"] = item["id"]
     return universe.insert_discovered(records)
 
 
@@ -266,13 +269,36 @@ async def run(args: argparse.Namespace) -> int:
     finally:
         await client.aclose()
 
+    # ── 4.5 改名归并:只留规范新名 ──────────────────────
+    # 采集时免费捕获「旧名→规范新名」。落盘只存新名,DB 里的旧名记录并入新名,下一轮起
+    # 不再采旧名。历史快照不动,基线按 databaseId 对齐。
+    dropped_dups = 0
+    if harvest.renames:
+        for old, (new, rid) in harvest.renames.items():
+            harvest.missing.discard(old)
+            harvest.ids.pop(old, None)
+            harvest.ids[new] = rid
+            if old in harvest.stars:
+                star = harvest.stars.pop(old)
+                if new in harvest.stars:
+                    dropped_dups += 1          # 新旧名都取到了:同一个值,丢掉旧名那份
+                else:
+                    harvest.stars[new] = star   # 只取到旧名:直接改挂到新名
+        universe.apply_renames(harvest.renames)
+
     if args.limit > 0:
         logger.info("调试模式结束,未写入快照。取到 %d 个。", len(harvest.stars))
         return 0
 
+    filled = universe.set_ids(harvest.ids)
+    if filled:
+        logger.info("DB 回填 databaseId:%d 条。", filled)
+
     # ── 5-6. 覆盖率闸门 + 写快照 ─────────────────────────
     if snapshots.save(
-        today, harvest.stars, not_found=sorted(harvest.missing), expected=len(names),
+        today, harvest.stars, not_found=sorted(harvest.missing),
+        expected=len(names) - dropped_dups,   # 旧名被并进新名,不再算作应测数,否则覆盖率虚降
+        ids=harvest.ids,
         throttle={"hits": tokens.stats["rate_limited"],
                   "waited_seconds": round(tokens.stats["waited_seconds"], 1)},
     ) is None:

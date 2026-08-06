@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -89,6 +89,14 @@ app = FastAPI(title="GitHub Hot Projects", version="2.0.0", lifespan=lifespan)
 app.mount("/web", StaticFiles(directory=config.WEB_DIR), name="web")
 app.add_middleware(security.Guard)
 
+BUSY_DETAIL = "系统繁忙,请稍后重试。"
+
+
+@app.exception_handler(sessions.Busy)
+async def _busy_to_503(request, exc: sessions.Busy) -> JSONResponse:
+    """`Busy` → 503 只翻译这一次;WS 不走这里,在自己的闭包里接。"""
+    return JSONResponse(status_code=503, content={"detail": BUSY_DETAIL})
+
 
 def _page(name: str, missing: str) -> HTMLResponse:
     try:
@@ -118,14 +126,9 @@ def chat(body: ChatIn):
     """同步 `def` 是有意的,见文件头。"""
     logger.info("HTTP 对话:session=%s message=%s", body.session_id, body.message[:120])
     agent = sessions.get(body.session_id)
-    if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
-        logger.warning("HTTP 等执行锁超时:%s", body.session_id)
-        raise HTTPException(status_code=503, detail="系统繁忙,请稍后重试。")
-    try:
+    with sessions.hold_tool_lock(f"HTTP 对话 {body.session_id}"):
         reply = agent.chat(body.message, user_id=body.user_id,
                            model=body.model, lite=body.lite)
-    finally:
-        sessions.tool_lock.release()
     return ChatOut(session_id=body.session_id, reply=reply,
                    session_ttl_seconds=sessions.TTL_SECONDS,
                    session_expires_at=sessions.expires_at())
@@ -247,13 +250,8 @@ def repo_describe(body: DescribeIn):
     from .service import report
     if not (gh := github.shared()).usable:
         raise HTTPException(status_code=503, detail="没有可用的 GitHub token,无法刷新介绍。")
-    if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
-        logger.warning("刷新介绍等执行锁超时:%s", body.repo)
-        raise HTTPException(status_code=503, detail="系统繁忙,请稍后重试。")
-    try:
+    with sessions.hold_tool_lock(f"刷新介绍 {body.repo}"):
         desc = report.regenerate(body.repo, gh)
-    finally:
-        sessions.tool_lock.release()
     if not desc:
         raise HTTPException(status_code=502,
                             detail=f"生成 {body.repo} 的介绍失败(LLM 未配置或全部平台不可用)。")
@@ -329,14 +327,12 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 
     def run(message: str, progress, on_delta) -> str:
         agent = sessions.get(session_id)
-        if not sessions.tool_lock.acquire(timeout=sessions.TOOL_LOCK_TIMEOUT):
-            logger.warning("WS 等执行锁超时:%s", session_id)
-            return "系统繁忙,请稍后重试。"
         try:
-            return agent.chat(message, progress=progress, user_id=user_id,
-                              model=model, lite=lite, on_delta=on_delta)
-        finally:
-            sessions.tool_lock.release()
+            with sessions.hold_tool_lock(f"WS 对话 {session_id}"):
+                return agent.chat(message, progress=progress, user_id=user_id,
+                                  model=model, lite=lite, on_delta=on_delta)
+        except sessions.Busy:
+            return BUSY_DETAIL
 
     try:
         while True:

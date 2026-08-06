@@ -17,7 +17,9 @@ Agent-skils/
 │
 ├── shared/                             # 公共工具库（骨架，待多 Agent 复用时填充）
 │
-└── skills/                             # Copilot 自定义 skill
+└── skills/                             # 个人自进化安装速查知识库（+自定义 skill）
+    ├── install-kb/                     #   └─ 知识库总指导（必读入口，见根 AGENTS.md）
+    ├── <模块>/                          #   └─ 各工具模块速查（clash、nodejs、cc-switch…）
     └── task-runner/                    #   └─ 连续任务执行器
 ```
 

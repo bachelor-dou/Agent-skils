@@ -19,13 +19,15 @@ from ._file_io import Tx, read_json, transaction
 logger = logging.getLogger("hot_project")
 
 # ── 字段归属 ──
-DISCOVER_FIELDS = frozenset({"star", "created_at"})
+DISCOVER_FIELDS = frozenset({"star", "created_at", "id"})
 
 DISPLAY_FIELDS = frozenset({"language", "topics", "gh_desc"})
 
 DESC_FIELDS = frozenset({"desc", "desc_updated_at"})
 
 STAR_FIELD = frozenset({"star"})
+
+ID_FIELD = frozenset({"id"})
 
 GH_DESC_MAX = 500   # gh_desc 截断长度
 
@@ -78,6 +80,7 @@ def insert_discovered(records: dict[str, dict]) -> list[str]:
 
     「不碰已有」是正确性:发现阶段拿的是搜索粗字段,覆盖会盖掉后来补的完整数据。
     更新 star 走 `refresh_stars`。判重在事务内,所以「哪些是新的」只有这里知道。
+    判重先看名字、再看 `id`:同一个 id 换了名字 → 改挂新名,不插重复。
     """
     if not records:
         return []
@@ -85,13 +88,27 @@ def insert_discovered(records: dict[str, dict]) -> list[str]:
 
     with transaction(config.DB_PATH, default=_empty()) as tx:
         projects = _open_projects(tx)
-        inserted = []
+        known_ids = {info["id"]: name for name, info in projects.items()
+                     if isinstance(info, dict) and isinstance(info.get("id"), int)}
+        inserted, renamed = [], 0
         for name, info in records.items():
             if name in projects:
                 continue
+            rid = info.get("id")
+            old = known_ids.get(rid)
+            if old is not None:
+                projects[name] = projects.pop(old)
+                projects[name]["id"] = rid
+                known_ids[rid] = name
+                renamed += 1
+                continue
             projects[name] = dict(info)
+            if isinstance(rid, int):
+                known_ids[rid] = name
             inserted.append(name)
-        _commit(tx, len(inserted), "新增仓库")
+        if renamed:
+            logger.info("DB 发现阶段按 id 识别改名:%d 条已改挂新名。", renamed)
+        _commit(tx, len(inserted) + renamed, "新增仓库")
         return inserted
 
 
@@ -160,6 +177,53 @@ def write_descriptions(descs: dict[str, dict]) -> int:
             target.update(info)
             changed += 1
         return _commit(tx, changed, "描述更新")
+
+
+def set_ids(ids: dict[str, int]) -> int:
+    """给已有仓库写入 GitHub databaseId。不认识的名字跳过,已一致的不算变更。"""
+    if not ids:
+        return 0
+
+    with transaction(config.DB_PATH, default=_empty()) as tx:
+        projects = _open_projects(tx)
+        updated = 0
+        for name, rid in ids.items():
+            info = projects.get(name)
+            if (not isinstance(info, dict) or not isinstance(rid, int)
+                    or info.get("id") == rid):
+                continue
+            info["id"] = rid
+            updated += 1
+        return _commit(tx, updated, "databaseId 回写")
+
+
+def apply_renames(renames: dict[str, tuple[str, int | None]]) -> int:
+    """按改名表把 DB 收敛到规范名:旧名记录并入新名后删除旧名。返回变更条数。
+
+    - 新名已在库 → 以新名为主,旧名里有、新名缺的字段补过去(别丢之前生成的 LLM 描述),删旧名。
+    - 新名不在库 → 直接把旧名记录改挂到新名。
+    历史快照一律不动,基线按 databaseId 对齐。
+    """
+    if not renames:
+        return 0
+
+    with transaction(config.DB_PATH, default=_empty()) as tx:
+        projects = _open_projects(tx)
+        changed = 0
+        for old, (new, rid) in renames.items():
+            if new == old or old not in projects:
+                continue
+            src = projects.pop(old)
+            dst = projects.get(new)
+            if isinstance(dst, dict):
+                for key, value in src.items():      # 新名缺的字段才补,不覆盖已有值
+                    dst.setdefault(key, value)
+            else:
+                projects[new] = src
+            if isinstance(rid, int):
+                projects[new]["id"] = rid
+            changed += 1
+        return _commit(tx, changed, "改名归并(旧名→规范新名)")
 
 
 def evict(names: set[str] | frozenset[str]) -> list[str]:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from ..agent import Agent, build
@@ -24,6 +25,25 @@ MAX_SESSIONS = 100
 
 TOOL_LOCK_TIMEOUT = 90
 tool_lock = threading.Lock()
+
+
+class Busy(Exception):
+    """等全局工具锁超时。HTTP 入口由 api_server 的异常处理器翻成 503,WS 入口自己接。"""
+
+
+@contextmanager
+def hold_tool_lock(label: str):
+    """全局工具锁的唯一入口:统一超时、超时日志、必然释放。
+
+    `label` 说清「谁在等」(操作 + session/repo),超时日志只有这一处。
+    """
+    if not tool_lock.acquire(timeout=TOOL_LOCK_TIMEOUT):
+        logger.warning("等执行锁超时:%s", label)
+        raise Busy(label)
+    try:
+        yield
+    finally:
+        tool_lock.release()
 
 _agents: dict[str, tuple[Agent, float]] = {}
 _lock = threading.Lock()

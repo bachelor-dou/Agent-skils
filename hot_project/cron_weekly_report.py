@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 
@@ -23,7 +24,10 @@ from .common.timeutil import format_day, utc_today
 from .infra import notify
 from .infra.data_access import reports
 from .provider.github import client as github
+from .provider.github import request as gh_request
+from .provider.github import trending
 from .service import ranking
+from .service import report as report_tool
 
 logger = logging.getLogger("hot_project")
 
@@ -73,6 +77,33 @@ def push(result: dict) -> None:
     notify.send(f"GitHub 周报 {format_day(utc_today())}", "\n\n".join(parts))
 
 
+async def _weekly_trending() -> list[dict]:
+    client = gh_request.build_client()
+    try:
+        return await trending.fetch_trending(client, "weekly")
+    finally:
+        await client.aclose()
+
+
+def attach_trending(result: dict) -> None:
+    """报告尾部接一段 Trending 周榜对照。任何失败只记日志 —— 附栏绝不能搞砸周报。"""
+    path = result.get("report_path")
+    if not path:
+        return
+    try:
+        rows = asyncio.run(_weekly_trending())
+    except Exception:       # noqa: BLE001
+        logger.exception("Trending 周榜抓取失败,本期没有对照附栏。")
+        return
+    if not rows:
+        logger.warning("Trending 周榜解析出 0 条,跳过附栏。")
+        return
+    if report_tool.append_trending(path, rows, result["ranked"], gh=github.shared()):
+        logger.info("Trending 对照附栏已追加:%d 条。", len(rows))
+    else:
+        logger.error("Trending 对照附栏写入失败,报告正文不受影响。")
+
+
 def run(args: argparse.Namespace) -> int:
     logger.info("周报开始:top_n=%d,窗口 %d 天,最低 star %d,增长阈值 %d。",
                 args.top_n, args.growth_days, config.MIN_STAR,
@@ -91,6 +122,8 @@ def run(args: argparse.Namespace) -> int:
     if not args.no_report and not result.get("report_path"):
         logger.error("榜单算出来了但报告没写成(看上面的落盘错误)。")
         return 1
+    if not args.no_report and not args.no_trending:
+        attach_trending(result)
 
     logger.info("周报完成:%d 个项目,报告 %s", len(result["ranked"]),
                 result.get("report_path") or "(未生成)")
@@ -106,6 +139,7 @@ def main() -> int:
                    help="增长窗口(天);基线取窗口内最早那份快照,快照不齐时实际窗口会更短")
     p.add_argument("--no-report", action="store_true", help="只算榜单不写报告(快)")
     p.add_argument("--no-push", action="store_true", help="不推微信")
+    p.add_argument("--no-trending", action="store_true", help="不追加 Trending 对照附栏")
     args = p.parse_args()
 
     log_path = logs.setup(config.LOG_DIR, "weekly", day=utc_today())

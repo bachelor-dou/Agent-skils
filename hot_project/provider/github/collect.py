@@ -217,11 +217,15 @@ class Harvest:
         stars    成功取到的 star
         missing  采集成功、但 GitHub 明确查不到 —— 删库/改名/转私有,该淘汰
         failed   压根没问到(限流、超时、重试耗尽)—— **绝不能当成 missing**
+        ids      {名字: databaseId}
+        renames  {旧名: (规范新名, databaseId)} —— GraphQL 用旧名查到的规范名不同即改名
     """
 
     stars: dict[str, int] = field(default_factory=dict)
     missing: set[str] = field(default_factory=set)
     failed: set[str] = field(default_factory=set)
+    ids: dict[str, int] = field(default_factory=dict)
+    renames: dict[str, tuple[str, int | None]] = field(default_factory=dict)
 
 
 class StarBatch(Task):
@@ -238,7 +242,8 @@ class StarBatch(Task):
         self.sink, self.client, self.names = sink, client, names
 
     async def run(self, ctx: Ctx) -> dict[str, int] | None:
-        stars = await gh.fetch_stars(self.client, ctx.token, self.names)
+        stars = await gh.fetch_stars(self.client, ctx.token, self.names,
+                                     ids=self.sink.ids, renames=self.sink.renames)
         if stars is None:
             logger.warning("%d 个仓库整批为 null,拆半重试(疑似查询过大退化)。", len(self.names))
             mid = len(self.names) // 2

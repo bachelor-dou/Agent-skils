@@ -246,6 +246,21 @@ def test_a_full_run_ranks_and_reports_the_funnel(world):
     assert out["growth_days"] == 7
 
 
+def test_a_renamed_repo_keeps_its_history_through_the_id(world):
+    """基线按 databaseId 归键:仓库改了名,快照里旧名条目折到同一个 id 下,
+    增长不被重置成改名后那几天。"""
+    world["db"] = {"new/n": {"created_at": _created(500), "id": 42}}
+    world["baselines"][7] = _baseline({42: 1000}, 7)      # 旧名时代的历史,挂在 id 下
+    gh = _GH({"new/n": 4000})
+
+    out = ranking.run(min_star=500, growth_threshold=1000, growth_days=7,
+                      do_report=False, gh=gh)
+
+    assert [n for n, _ in out["ranked"]] == ["new/n"]
+    assert out["ranked"][0][1]["growth"] == 3000              # 4000 − 1000,历史没丢
+    assert gh.asked == ["new/n"]
+
+
 def test_hot_new_keeps_only_recently_created_repos(world):
     world["db"] = {"a/old": {"created_at": _created(900)},
                    "b/fresh": {"created_at": _created(3)}}

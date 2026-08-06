@@ -278,3 +278,103 @@ def generate(ranked: list[tuple[str, dict]], *, mode: str = "comprehensive",
     name = filename(mode, growth_days=growth_days, created_days=created_days, topic=topic)
     path = reports.save(name, text)
     return str(path) if path else ""
+
+
+# ── Trending 对照附栏 ────────────────────────────────────────────────
+
+APPENDIX_MARK = "## 附:GitHub Trending 周榜对照"
+
+
+def _positions(ranked: list[tuple[str, dict]],
+               saved_by_name: dict[str, dict]) -> tuple[dict[str, int], dict[int, int]]:
+    """名字 → 榜内排名,以及 databaseId → 排名。"""
+    by_name: dict[str, int] = {}
+    by_id: dict[int, int] = {}
+    for pos, (name, info) in enumerate(ranked, 1):
+        by_name[name] = pos
+        rid = info.get("id") or (saved_by_name.get(name) or {}).get("id")
+        if isinstance(rid, int):
+            by_id[rid] = pos
+    return by_name, by_id
+
+
+def _position_of(name: str, saved_by_name: dict[str, dict],
+                 by_name: dict[str, int], by_id: dict[int, int]) -> int | None:
+    rid = (saved_by_name.get(name) or {}).get("id")
+    return by_name.get(name) or (by_id.get(rid) if isinstance(rid, int) else None)
+
+
+def render_trending(rows: list[dict], ranked: list[tuple[str, dict]],
+                    saved_by_name: dict[str, dict], descs: dict[str, str]) -> str:
+    """Trending 周榜 → 对照附栏 Markdown。纯字符串处理。
+
+    条目标题用 `T1.` 而非纯数字排名:报告解析器只认 `## 数字. owner/repo`,附栏对它
+    不可见,不会混进「上新/移出」、出场次数、star 趋势的统计。已上榜的一行指回正文排名;
+    没上榜的按正文同款格式补全,增长数字是 Trending 页面的「本周新增」口径,和我们的
+    窗口增量不同源,字段名里写明,不冒充。
+    """
+    by_name, by_id = _positions(ranked, saved_by_name)
+    hits = sum(1 for r in rows
+               if _position_of(r["full_name"], saved_by_name, by_name, by_id))
+
+    out = ["---", "", f"{APPENDIX_MARK}(weekly)", "",
+           f"> Trending 周榜 {len(rows)} 个 | 已在本期榜单 {hits} 个 | "
+           f"附栏补全 {len(rows) - hits} 个 | 抓取: {format_day(utc_today())}", ""]
+
+    for i, row in enumerate(rows, 1):
+        name = row["full_name"]
+        out += [f"## T{i}. {name}", ""]
+        if pos := _position_of(name, saved_by_name, by_name, by_id):
+            out += [f"已入选本期榜单 → 见正文 #{pos}。", ""]
+            continue
+
+        saved = saved_by_name.get(name, {})
+        created = (saved.get("created_at") or "")[:10]
+        out += [f"链接: https://github.com/{name}", "",
+                f"- 创建时间: {created or '未知'}"]
+        if language := (row.get("language") or saved.get("language") or "").strip():
+            out.append(f"- 主语言: {language}")
+        out.append(f"- 总 Star: {row.get('star', 0):,}")
+        out.append(f"- 本周新增(Trending 口径): +{row.get('stars_today', 0):,}")
+        if topics := [t for t in saved.get("topics") or [] if t][:TOPICS_SHOWN]:
+            out.append(f"- 主题标签: {', '.join(topics)}")
+        out.append("")
+        for title, content in _sections(name, saved, descs.get(name, ""),
+                                        config.DAYS_SINCE_CREATED):
+            out += [f"### {title}", "", *_paragraphs(content), ""]
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def append_trending(path: str, rows: list[dict], ranked: list[tuple[str, dict]],
+                    gh=None, progress=None) -> bool:
+    """把 Trending 对照附栏接到已生成的报告尾部。幂等:已有附栏就不再追加。
+
+    没上榜的条目走和正文同一条 LLM 介绍管线;不在 DB 里的仓库拿 Trending 自带的简介
+    当素材兜底,写回时 `write_descriptions` 自己会跳过它们。
+    """
+    name = path.rsplit("/", 1)[-1]
+    text = reports.read(name)
+    if text is None:
+        return False
+    if APPENDIX_MARK in text:
+        return True
+
+    saved_by_name = universe.load()
+    by_name, by_id = _positions(ranked, saved_by_name)
+    enriched = dict(saved_by_name)
+    for row in rows:
+        enriched.setdefault(row["full_name"], {
+            "gh_desc": row.get("description", ""),
+            "language": row.get("language", ""),
+        })
+
+    offlist = [r["full_name"] for r in rows
+               if not _position_of(r["full_name"], saved_by_name, by_name, by_id)]
+    descs, writeback = descriptions([(n, {}) for n in offlist], enriched,
+                                    gh=gh, progress=progress)
+    if writeback:
+        universe.write_descriptions(writeback)
+
+    appendix = render_trending(rows, ranked, enriched, descs)
+    return reports.save(name, text.rstrip() + "\n\n" + appendix) is not None

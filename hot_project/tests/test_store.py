@@ -143,6 +143,33 @@ def test_discover_only_inserts_new(sandbox):
     assert projects["new/repo"]["star"] == 700
 
 
+def test_apply_renames_merges_old_into_new_and_drops_it(sandbox):
+    """改名归并:旧名并入规范新名后删除。新名已在库 → 补齐它缺的字段(别丢已花钱生成的
+    描述),已有值不覆盖;新名不在库 → 整条改挂过去。"""
+    sandbox({"projects": {
+        "old/n": {"star": 5, "created_at": "c", "desc": "花钱生成的描述"},
+        "new/n": {"star": 9, "created_at": "c"},        # 缺 desc
+        "solo/a": {"star": 1, "created_at": "c"},       # 新名不在库
+    }})
+
+    changed = universe.apply_renames({"old/n": ("new/n", 1), "solo/a": ("solo/b", 2)})
+
+    db = _read_db()["projects"]
+    assert changed == 2
+    assert "old/n" not in db and "solo/a" not in db, "旧名要剔除"
+    assert db["new/n"]["desc"] == "花钱生成的描述", "旧名的描述补给新名,不重复生成"
+    assert db["new/n"]["star"] == 9, "新名已有值不被旧名覆盖"
+    assert db["new/n"]["id"] == 1 and db["solo/b"]["id"] == 2
+    assert db["solo/b"]["star"] == 1, "新名不在库时整条改挂"
+
+
+def test_apply_renames_writes_nothing_when_no_old_name_is_tracked(sandbox):
+    """要归并的旧名一个都不在库 → 不写盘,不在 git 留空 diff。"""
+    sandbox({"projects": {"keep/n": {"star": 1}}})
+    assert universe.apply_renames({"gone/x": ("gone/y", 1)}) == 0
+    assert _read_db()["projects"] == {"keep/n": {"star": 1}}
+
+
 # ── 拦截 2:forks 已退出展示字段,既不许写、也不许碰残留旧值 ──
 
 
@@ -363,9 +390,12 @@ def test_prune_only_deletes_snapshots(sandbox):
     assert (config.SNAPSHOT_DIR / "2026-01-01.json.gz.lock").exists()
 
 
-def _write_snapshot(day, stars: dict[str, int]) -> None:
+def _write_snapshot(day, stars: dict[str, int], ids: dict[str, int] | None = None) -> None:
+    payload: dict = {"stars": stars}
+    if ids:
+        payload["ids"] = ids
     with gzip.open(snapshots.path_of(day), "wt", encoding="utf-8") as f:
-        json.dump({"stars": stars}, f)
+        json.dump(payload, f)
 
 
 def test_the_baseline_takes_each_repos_earliest_measurement_in_the_window(sandbox):
@@ -396,6 +426,46 @@ def test_a_snapshot_older_than_the_window_is_not_a_baseline(sandbox):
 
     base = snapshots.earliest_in_window(7, today=today)
     assert base.oldest is None and base.stars == {}
+
+
+# ── 改名与 id ──────────────────────────────────────────────────────
+
+def test_discover_recognizes_a_rename_by_id_and_does_not_duplicate(sandbox):
+    """搜索用新名带回库里已有的 databaseId:改挂新名、保留旧记录的字段,不插重复条目。"""
+    sandbox({"projects": {"old/n": {"star": 5, "created_at": "c", "id": 42,
+                                    "desc": "花钱生成的描述"}}})
+    inserted = universe.insert_discovered({"new/n": {"star": 9, "created_at": "c", "id": 42}})
+
+    db = _read_db()["projects"]
+    assert inserted == []
+    assert "old/n" not in db
+    assert db["new/n"]["desc"] == "花钱生成的描述"
+
+
+def test_set_ids_backfills_and_skips_unknown_names(sandbox):
+    sandbox({"projects": {"a/b": {"star": 1}, "c/d": {"star": 2, "id": 7}}})
+    assert universe.set_ids({"a/b": 3, "c/d": 7, "x/y": 9}) == 1
+    db = _read_db()["projects"]
+    assert db["a/b"]["id"] == 3 and "x/y" not in db
+
+
+def test_snapshot_saves_the_id_table_only_for_measured_repos(sandbox):
+    day = snapshots.utc_today()
+    snapshots.save(day, {"a/b": 1, "c/d": 2}, not_found=[], expected=2,
+                   ids={"a/b": 7, "gone/x": 9})
+    assert snapshots.load_ids(day) == {"a/b": 7}
+
+
+def test_the_baseline_folds_a_renamed_repos_history_through_its_id(sandbox):
+    """改名前的历史挂在旧名下,但 id 相同 → 基线折到同一个 key、取最早那次,
+    否则新名查不到基线、增长被重置成只覆盖改名后那几天。"""
+    today = snapshots.utc_today()
+    _write_snapshot(today - timedelta(days=6), {"old/n": 500}, ids={"old/n": 42})   # 改名前
+    _write_snapshot(today - timedelta(days=2), {"new/n": 1800}, ids={"new/n": 42})  # 改名后
+
+    base = snapshots.earliest_in_window(7, today=today)
+    assert base.stars == {42: 500}          # 取最早(6 天前那次),不是 1800
+    assert base.days == {42: 6}
 
 
 def test_a_snapshot_written_today_makes_the_run_idempotent(sandbox):

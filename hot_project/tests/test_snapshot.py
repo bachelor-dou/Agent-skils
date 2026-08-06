@@ -17,6 +17,7 @@ from hot_project.infra.exceptions import RateLimitError, RetryableError, TokenIn
 from hot_project.infra.tasks import TaskPool
 from hot_project.provider.github import request as gh
 from hot_project.provider.github import collect
+from hot_project.provider.github import repo as repo_api
 from hot_project.provider.github import tokens as gh_tokens
 from hot_project.provider.github import trending as gh_trending
 
@@ -497,6 +498,51 @@ def test_repo_names_with_quotes_do_not_break_the_query():
     query = gh._star_query(['ow"ner/re\\po'])
     assert '\\"' in query or "\\\\" in query
     assert query.count("repository(") == 1
+
+
+def test_fetch_stars_captures_a_rename_without_an_extra_request():
+    """GraphQL 用旧名查改过名的仓库会回规范 nameWithOwner;请求名≠规范名即记为改名,
+    star 仍按**请求名**回填(快照 key 稳定),身份信息同一次请求免费拿到。"""
+    def handler(request):
+        return httpx.Response(200, json={"data": {
+            "r0": {"stargazerCount": 25129, "nameWithOwner": "emil/skills", "databaseId": 118},
+            "r1": {"stargazerCount": 400, "nameWithOwner": "a/b", "databaseId": 7},
+        }})
+
+    async def go():
+        transport = httpx.MockTransport(handler)
+        renames: dict = {}
+        async with httpx.AsyncClient(transport=transport) as c:
+            pool = gh_tokens.TokenPool(["t0"])
+            async with pool.lease(gh_tokens.CORE) as lease:
+                stars = await gh.fetch_stars(c, lease, ["emil/skill", "a/b"], renames=renames)
+        assert stars == {"emil/skill": 25129, "a/b": 400}          # 按请求名回填
+        assert renames == {"emil/skill": ("emil/skills", 118)}     # 只记改了名的那个
+
+    asyncio.run(asyncio.wait_for(go(), timeout=10))
+
+
+def test_moved_repo_endpoint_is_followed_not_abandoned():
+    """改过名的仓库 REST 会 301 到 /repositories/{id};客户端要跟随,不能当可重试错误放弃,
+    否则 readme/commits 抓空、介绍缺素材。"""
+    assert gh.build_client().follow_redirects is True, "build_client 必须跟随重定向"
+
+    def handler(request):
+        if request.url.path == "/repos/old/name/readme":
+            return httpx.Response(301, headers={
+                "Location": "https://api.github.com/repositories/42/readme"})
+        if request.url.path == "/repositories/42/readme":
+            return httpx.Response(200, json={"content": "aGk=", "encoding": "base64"})
+        return httpx.Response(404)
+
+    async def go():
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as c:
+            pool = gh_tokens.TokenPool(["t0"])
+            data = await repo_api._get(c, pool, "/repos/old/name/readme")
+        assert data == {"content": "aGk=", "encoding": "base64"}, "应拿到重定向后的正文"
+
+    asyncio.run(asyncio.wait_for(go(), timeout=10))
 
 
 # ──────────────────────────────────────────────────────────

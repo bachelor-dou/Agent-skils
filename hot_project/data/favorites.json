@@ -2,6 +2,20 @@
   "users": {
     "dou": [
       {
+        "repo": "yc-software/qm",
+        "favorited_at": "2026-08-05T07:11:47Z",
+        "source_report": "2026-08-05.md",
+        "short_desc": "面向团队协作的多智能体编排框架，支持隔离工作区、共享上下文、Slack/网页协作与插件接入。",
+        "category": "多agent"
+      },
+      {
+        "repo": "firecrawl/pdf-inspector",
+        "favorited_at": "2026-08-05T06:13:21Z",
+        "source_report": "2026-08-05.md",
+        "short_desc": "PDF 检查、分类与文本提取的 Rust 库，可智能识别扫描件和文本型 PDF。",
+        "category": "效率工具"
+      },
+      {
         "repo": "mattpocock/skills",
         "favorited_at": "2026-08-04T12:22:02Z",
         "source_report": "2026-07-29.md",

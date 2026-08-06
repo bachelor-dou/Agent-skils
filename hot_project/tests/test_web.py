@@ -305,6 +305,44 @@ def test_dropping_a_session_also_drops_its_stashed_replies():
     assert sessions.take("a") == []
 
 
+# ── 执行锁 ────────────────────────────────────────────────────────
+
+def test_the_tool_lock_is_released_after_the_block():
+    with sessions.hold_tool_lock("测试"):
+        assert sessions.tool_lock.locked()
+    assert not sessions.tool_lock.locked()
+
+
+def test_a_held_lock_raises_busy_after_the_timeout(monkeypatch):
+    monkeypatch.setattr(sessions, "TOOL_LOCK_TIMEOUT", 0.05)
+    assert sessions.tool_lock.acquire()
+    try:
+        with pytest.raises(sessions.Busy):
+            with sessions.hold_tool_lock("测试"):
+                pass
+    finally:
+        sessions.tool_lock.release()
+
+
+def test_the_lock_survives_an_exception_in_the_block():
+    """漏了 release 的锁是永久的:下一个请求会等满超时然后 503,而且没有堆栈可查。"""
+    with pytest.raises(RuntimeError):
+        with sessions.hold_tool_lock("测试"):
+            raise RuntimeError("炸")
+    assert not sessions.tool_lock.locked()
+
+
+def test_a_busy_server_answers_chat_with_503(client, monkeypatch):
+    """钉住 Busy → 503 的翻译层真的挂在 app 上,而不只是 guard 自己会抛。"""
+    monkeypatch.setattr(sessions, "TOOL_LOCK_TIMEOUT", 0.05)
+    assert sessions.tool_lock.acquire()
+    try:
+        resp = client.post("/api/chat", json={"message": "hi"})
+    finally:
+        sessions.tool_lock.release()
+    assert resp.status_code == 503
+
+
 # ── 渲染 ──────────────────────────────────────────────────────────
 
 def test_a_javascript_url_in_a_report_is_defused(report_dir):

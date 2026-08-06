@@ -277,3 +277,52 @@ def test_the_previous_issue_must_be_the_same_kind_of_ranking(report_dir):
 def test_the_first_issue_ever_has_no_previous(report_dir):
     _write(report_dir, "2026-07-30.md")
     assert weekly.previous_report("2026-07-30.md") is None
+
+
+# ── Trending 对照附栏 ──────────────────────────────────────────────
+
+TRENDING_ROWS = [
+    {"full_name": "openai/whisper", "star": 82500, "stars_today": 900,
+     "language": "Python", "description": "Robust speech recognition"},
+    {"full_name": "uber/adr", "star": 828, "stars_today": 148,
+     "language": "Python", "description": "Agent security"},
+]
+
+
+def test_the_trending_appendix_is_invisible_to_the_report_parser():
+    """附栏条目要是被解析成正文条目,「上新/移出」、出场次数、star 趋势全被污染。"""
+    text = _render() + "\n" + report.render_trending(TRENDING_ROWS, RANKED, SAVED, {})
+    parsed = reports.parse(text)
+    assert [e.repo for e in parsed.entries] == [n for n, _ in RANKED]
+
+
+def test_a_listed_trending_repo_links_back_and_an_unlisted_one_is_rendered_in_full():
+    appendix = report.render_trending(TRENDING_ROWS, RANKED, SAVED, {})
+    assert "## T1. openai/whisper" in appendix
+    assert "见正文 #1" in appendix
+    assert "## T2. uber/adr" in appendix
+    assert "链接: https://github.com/uber/adr" in appendix
+    assert "- 本周新增(Trending 口径): +148" in appendix
+    assert "近7天增长" not in appendix          # 不冒充我们的窗口口径
+
+
+def test_a_renamed_trending_repo_is_matched_through_its_id():
+    """Trending 上挂新名、榜内还是旧名时,靠 databaseId 也要能对上,不重复补全。"""
+    ranked = [("old/name", {"star": 100, "growth": 50, "id": 7})]
+    saved = {"new/name": {"id": 7}}
+    rows = [{"full_name": "new/name", "star": 100, "stars_today": 10,
+             "language": "", "description": ""}]
+    appendix = report.render_trending(rows, ranked, saved, {})
+    assert "见正文 #1" in appendix
+
+
+def test_append_trending_only_appends_once(report_dir, monkeypatch):
+    monkeypatch.setattr(report.universe, "load", lambda: SAVED)
+    monkeypatch.setattr(report, "descriptions", lambda *a, **k: ({}, {}))
+    path = str(reports.save("2026-07-30.md", _render()))
+
+    assert report.append_trending(path, TRENDING_ROWS, RANKED)
+    once = reports.read("2026-07-30.md")
+    assert report.APPENDIX_MARK in once
+    assert report.append_trending(path, TRENDING_ROWS, RANKED)
+    assert reports.read("2026-07-30.md") == once

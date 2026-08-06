@@ -40,11 +40,13 @@ def path_of(day: date) -> Path:
 
 
 def save(day: date, stars: dict[str, int], *, not_found: list[str],
-         expected: int, throttle: dict | None = None) -> Path | None:
+         expected: int, ids: dict[str, int] | None = None,
+         throttle: dict | None = None) -> Path | None:
     """写当天快照。覆盖率不足则**不产生文件**并返回 None。
 
     `not_found` 是 GitHub 明确查不到的名字(改名/删库/转私有),供淘汰判定;`expected` 是
-    本次应测总数,用来算覆盖率;`throttle` 记这轮限流次数与等待,事后好和代码 bug 区分。
+    本次应测总数,用来算覆盖率;`throttle` 记这轮限流次数与等待,事后好和代码 bug 区分;
+    `ids` 是 {名字: databaseId},一并落盘。
     """
     if not stars:
         logger.error("拒绝写入空快照:它会被当成「全仓库掉到 0」,污染整个窗口的增长。")
@@ -70,6 +72,8 @@ def save(day: date, stars: dict[str, int], *, not_found: list[str],
     if throttle:
         meta["throttle"] = throttle
     payload = {"meta": meta, "stars": stars}
+    if ids:
+        payload["ids"] = {n: i for n, i in ids.items() if n in stars}
 
     def _write(tmp: Path) -> None:
         with gzip.open(tmp, "wt", encoding="utf-8") as f:
@@ -112,9 +116,18 @@ def load_stars(day: date) -> dict[str, int] | None:
     return stars if isinstance(stars, dict) and stars else None
 
 
+def load_ids(day: date) -> dict[str, int]:
+    """读某天的 {名字: databaseId} 表。旧格式没有这项,返回空表。"""
+    data = _load_raw(day)
+    if data is None:
+        return {}
+    ids = data.get("ids")
+    return ids if isinstance(ids, dict) else {}
+
+
 def already_written(day: date) -> bool:
     """今天这份快照写过没有?每日脚本靠它做幂等 —— GitHub 的 schedule 会漂、会静默跳过,
-    所以那个脚本每小时触发一次,当天已有快照就秒退、一个请求都不发。
+    所以那个脚本一天触发三次,当天已有快照就秒退、一个请求都不发。
     """
     return path_of(day).exists()
 
@@ -145,26 +158,27 @@ def available_dates() -> list[date]:
 class Baseline(NamedTuple):
     """窗口内每个仓库**最早**被测到的 star,以及那天到今天的实际天数。
 
+    key 是 databaseId,快照没带 id 的条目退化为名字。
     `days` 必须逐仓给:拿全局天数去除会让晚进库的仓库日均速率虚高一倍多。
     `span` 是最早那份快照的跨度,用作全轮名义窗口(报告标题、判「窗口内新建」)。
     """
 
-    stars: dict[str, int]
-    days: dict[str, int]
+    stars: dict[int | str, int]
+    days: dict[int | str, int]
     oldest: date | None
     span: int
 
 
 def earliest_in_window(days: int, today: date | None = None) -> Baseline:
-    """一趟扫出窗口内每个仓库最早被测到的 star。
+    """一趟扫出窗口内每个仓库最早被测到的 star,按 databaseId 归键(无 id 的条目按名字)。
 
     取「最早的一份」而不是「正好 T−N 那天」:晚进库的仓库按它算出的是**实测下界**,比整个
     丢掉强,漏采几天时 `span` 也会如实说明实际跨度。今天那份不作基线(窗口 0 天,增长恒为 0)。
     """
     now = today or utc_today()
     floor = shift_days(now, -days)
-    stars: dict[str, int] = {}
-    spans: dict[str, int] = {}
+    stars: dict[int | str, int] = {}
+    spans: dict[int | str, int] = {}
     oldest: date | None = None
 
     for day in available_dates():           # 升序,所以先落进表里的就是最早的那次
@@ -174,12 +188,14 @@ def earliest_in_window(days: int, today: date | None = None) -> Baseline:
         snapshot = load_stars(day)
         if snapshot is None:
             continue
+        ids = load_ids(day)
         if oldest is None:
             oldest = day
         for name, star in snapshot.items():
-            if name not in stars:
-                stars[name] = star
-                spans[name] = span
+            key = ids.get(name, name)
+            if key not in stars:
+                stars[key] = star
+                spans[key] = span
 
     return Baseline(stars, spans, oldest,
                     days_between(now, oldest) if oldest is not None else days)

@@ -73,8 +73,10 @@ def qualify(stars: dict[str, int], meta: dict[str, dict], base: snapshots.Baseli
     for name, star in stars.items():
         if star < min_star:
             continue
-        created = meta.get(name, {}).get("created_at", "")
-        result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
+        info = meta.get(name, {})
+        created = info.get("created_at", "")
+        key = info.get("id") or name
+        result = growth_calc.resolve(star, base.stars.get(key), base.days.get(key),
                                      age_days(created), base.span)
         if result is None:
             unresolved += 1
@@ -82,7 +84,8 @@ def qualify(stars: dict[str, int], meta: dict[str, dict], base: snapshots.Baseli
         if result.value < threshold:
             continue
         pool[name] = {"star": star, "growth": result.value,
-                      "window_days": result.window_days, "created_at": created}
+                      "window_days": result.window_days, "created_at": created,
+                      "id": info.get("id")}
     return pool, unresolved
 
 
@@ -100,11 +103,11 @@ def recent(pool: dict[str, dict], days: int) -> int:
 
     hit = 0
     for name, info in pool.items():
-        anchor = base.stars.get(name)
+        anchor = base.stars.get(info.get("id") or name)
         if anchor is None or info["star"] < anchor:
             continue
         info["recent_growth"] = info["star"] - anchor
-        info["recent_days"] = base.days.get(name, base.span)
+        info["recent_days"] = base.days.get(info.get("id") or name, base.span)
         hit += 1
     logger.info("爆发探针基线 %s(%d 天):%d/%d 个候选可算。",
                 base.oldest, base.span, hit, len(pool))

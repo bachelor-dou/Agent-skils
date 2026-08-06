@@ -31,6 +31,9 @@ def build_client(timeout: float = 90.0) -> httpx.AsyncClient:
     """建一个可跨请求复用的连接池。"""
     return httpx.AsyncClient(
         timeout=timeout,
+        # 改过名的仓库,REST 会 301 到 /repositories/{id};不跟随就抓不到 readme/commits。
+        # 同源重定向,httpx 会保留 Authorization 头。
+        follow_redirects=True,
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=100),
     )
 
@@ -153,18 +156,24 @@ def _star_query(names: list[str]) -> str:
         owner, _, repo = full_name.partition("/")
         parts.append(
             f"r{i}: repository(owner:{json.dumps(owner)}, name:{json.dumps(repo)})"
-            " { stargazerCount }"
+            " { stargazerCount nameWithOwner databaseId }"
         )
     return "query{" + "\n".join(parts) + "}"
 
 
 async def fetch_stars(
-    client: httpx.AsyncClient, lease: Lease, names: list[str]
+    client: httpx.AsyncClient, lease: Lease, names: list[str],
+    *, renames: dict[str, tuple[str, int | None]] | None = None,
+    ids: dict[str, int] | None = None,
 ) -> dict[str, int] | None:
     """批量取 star。
 
     键缺失 = **GitHub 确认查不到**(已删/改名/转私有),是淘汰判定的依据,不能混进「没问到」。
     返回 None = 整批全 null 的退化响应,应对半拆开重来,**绝不可当成「都没了」**。
+
+    `ids` 给了就填 {请求名: databaseId};`renames` 给了就记改名(请求名 ≠ 规范
+    `nameWithOwner` 时填 {旧名: (规范名, databaseId)})。star 仍按**请求名**回填,
+    身份信息来自同一次请求,不额外发包。
     """
     resp = await _send(client.post(
         GRAPHQL_URL, headers=lease.graphql_headers, json={"query": _star_query(names)},
@@ -184,6 +193,12 @@ async def fetch_stars(
         node = data.get(f"r{i}")
         if isinstance(node, dict) and isinstance(node.get("stargazerCount"), int):
             stars[full_name] = node["stargazerCount"]
+            if ids is not None and isinstance(node.get("databaseId"), int):
+                ids[full_name] = node["databaseId"]
+            if renames is not None:
+                canon = node.get("nameWithOwner")
+                if isinstance(canon, str) and canon and canon != full_name:
+                    renames[full_name] = (canon, node.get("databaseId"))
 
     if not stars:
         if len(names) > 1:
