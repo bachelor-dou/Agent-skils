@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   report:
-    if: github.repository == 'bachelor-dou/Agent-skils'
+    if: github.repository == 'bachelor-dou/Ai-workbench'
     runs-on: ubuntu-latest
     # 为限流退避预留执行时间。
     timeout-minutes: 240

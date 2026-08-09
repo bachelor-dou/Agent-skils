@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   snapshot:
-    if: github.repository == 'bachelor-dou/Agent-skils'
+    if: github.repository == 'bachelor-dou/Ai-workbench'
     runs-on: ubuntu-latest
     # 发现约 25 分钟(受按 IP 共享的二级限流约束) + 采集约 10 分钟,余量应对退避。
     timeout-minutes: 120
