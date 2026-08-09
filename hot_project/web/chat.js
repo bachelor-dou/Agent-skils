@@ -1498,14 +1498,6 @@
           }
           return;
         }
-        const tagBtn = e.target.closest(".fav-item__tag");
-        if (tagBtn) {
-          const repo = tagBtn.getAttribute("data-repo");
-          if (repo) {
-            api.retag(repo, tagBtn);
-          }
-          return;
-        }
         const rmBtn = e.target.closest(".fav-item__remove");
         if (rmBtn) {
           const repo = rmBtn.getAttribute("data-repo");
@@ -1617,7 +1609,6 @@
       function renderItem(item) {
         const repo = escapeHtml(item.repo);
         const desc = escapeHtml(item.short_desc || "");
-        const cat = (item.category || "").trim();
         const descRow = desc
           ? `<span class="fav-item__desc" data-repo="${repo}" title="${desc}&#10;（点击编辑）">${desc}</span>`
           : `<span class="fav-item__desc fav-item__desc--empty" data-repo="${repo}" title="点击添加概要">暂无描述</span>`;
@@ -1626,11 +1617,8 @@
         const seenBadge = total
           ? `<span class="fav-item__seen" title="共 ${total} 期定时周报，上榜 ${seen} 期">${seen}/${total}</span>`
           : "";
-        // 已有分类的靠拖；未分类的多一颗按钮，用来起一个新标签
-        const tagBtn = cat ? "" :
-          `<button type="button" class="fav-item__tag" data-repo="${repo}" title="添加自定义标签">＋ 标签</button>`;
         return `
-            <div class="fav-item" data-repo="${repo}" title="按住拖到分组上改分类；右键换新标签">
+            <div class="fav-item" data-repo="${repo}" title="按住拖到分组上改分类；右键改分类/细分">
               <div class="fav-item__main">
                 <div class="fav-item__name">
                   <a class="fav-item__repo" href="https://github.com/${repo}" target="_blank" rel="noopener" title="${repo}">${repo}</a>
@@ -1639,10 +1627,44 @@
                 </div>
                 ${descRow}
               </div>
-              ${tagBtn}
               <button type="button" class="fav-item__remove" data-repo="${repo}" title="取消收藏" aria-label="取消收藏">✕</button>
             </div>
           `;
+      }
+
+      function subHead(name, count, loose) {
+        return `<div class="fav-sub${loose ? " fav-sub--loose" : ""}">` +
+          `<span class="fav-sub__name">${escapeHtml(name)}</span>` +
+          `<span class="fav-sub__count">${count}</span></div>`;
+      }
+
+      // 组内二级：细分的排在上面，没细分的坠底 —— 跟一级「未分类」排最后同一个规矩
+      function renderGroupItems(groupItems) {
+        const subs = new Map();
+        const loose = [];
+        groupItems.forEach(function (item) {
+          const sub = (item.subcategory || "").trim();
+          if (!sub) {
+            loose.push(item);
+            return;
+          }
+          if (!subs.has(sub)) {
+            subs.set(sub, []);
+          }
+          subs.get(sub).push(item);
+        });
+        if (!subs.size) {
+          return groupItems.map(renderItem).join("");  // 没人分过就还是一张平铺清单
+        }
+        const parts = [];
+        subs.forEach(function (subItems, name) {
+          parts.push(subHead(name, subItems.length, false), subItems.map(renderItem).join(""));
+        });
+        if (loose.length) {
+          // 上面已经有小标题了，散项不给个头会看着像挂在最后一个细分底下
+          parts.push(subHead("未细分", loose.length, true), loose.map(renderItem).join(""));
+        }
+        return parts.join("");
       }
 
       function render(list) {
@@ -1674,7 +1696,7 @@
             `<button type="button" class="fav-group__rename" title="重命名分类" aria-label="重命名分类 ${escapeHtml(key)}">✎</button>`;
           return `<details class="fav-group" data-group="${escapeHtml(key)}"${expanded.has(key) ? " open" : ""}>
               <summary class="fav-group__head"><span class="fav-group__name">${escapeHtml(key)}</span>${renameBtn}<span class="fav-group__count">${groupItems.length}</span></summary>
-              <div class="fav-group__items">${groupItems.map(renderItem).join("")}</div>
+              <div class="fav-group__items">${renderGroupItems(groupItems)}</div>
             </details>`;
         }).join("");
       }

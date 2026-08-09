@@ -511,3 +511,23 @@ def test_favorites_rejects_bad_input(sandbox):
                 ("tester", "owner/repo", "sideways")):  # action 不认识
         with pytest.raises(ValueError):
             favorites.set_favorite(*bad)
+
+
+def test_subcategory_does_not_outlive_its_parent(sandbox):
+    """细分挂在父分类下面才成立:父分类一清空,「文档」这种标签就无处可归。
+
+    留着它的话,项目在未分类组里会顶着一个上一任父分类的细分标题。
+    """
+    def item() -> dict:
+        return favorites.get("tester")[0]
+
+    favorites.set_favorite("tester", "owner/repo", "add",
+                           category="效率工具", subcategory="文档")
+    assert item()["subcategory"] == "文档"
+
+    favorites.set_favorite("tester", "owner/repo", "add", category="")
+    assert item()["subcategory"] == ""
+
+    # 直接以「无父分类」的姿态新建也不该留下细分
+    favorites.set_favorite("tester", "other/repo", "add", subcategory="自动化")
+    assert favorites.get("tester")[0]["subcategory"] == ""

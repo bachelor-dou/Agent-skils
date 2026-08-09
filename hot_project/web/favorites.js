@@ -9,6 +9,7 @@
   const CHANNEL = "gh-hot-favorites";
   const listeners = new Set();
   const MAX_TAG_LEN = 20;
+  const SUB_MIN = 10;             // 分类攒够这么多条，浮层里才浮现「细分」那一栏
 
   let items = new Map();          // repo -> {repo, short_desc, category, ...}（内存缓存，保序）
   let readyPromise = null;
@@ -96,7 +97,7 @@
     });
   }
 
-  async function apiSet(uid, repo, action, category, shortDesc) {
+  async function apiSet(uid, repo, action, category, shortDesc, subcategory) {
     const body = {
       user_id: uid,
       repo: repo,
@@ -105,6 +106,9 @@
     };
     if (category != null) {
       body.category = category;  // "" 表示未分类；不传则服务端保留原分类
+    }
+    if (subcategory != null) {
+      body.subcategory = subcategory;
     }
     if (shortDesc !== undefined) {
       body.short_desc = shortDesc;  // 用户手动编辑概要；不传则服务端按需自动生成
@@ -226,14 +230,15 @@
     if (items.has(name)) {
       return removeFav(name);
     }
-    const tag = await chooseTag(anchorEl, "");
-    if (tag === null) {
+    const pick = await chooseTag(anchorEl, "");
+    if (pick === null) {
       return false;  // 用户取消，不收藏
     }
-    return addFav(name, tag);
+    return addFav(name, pick.tag);
   }
 
-  async function setCategory(repo, category) {
+  // subcategory 省略 = 沿用原细分，但换了父分类就丢掉（细分只在原父分类下说得通）
+  async function setCategory(repo, category, subcategory) {
     const name = String(repo || "").trim();
     const it = items.get(name);
     if (!it) {
@@ -241,16 +246,22 @@
     }
     const next = cleanTag(category);
     const prev = it.category || "";
-    if (next === prev) {
+    const prevSub = it.subcategory || "";
+    const nextSub = !next ? ""
+      : subcategory !== undefined ? cleanTag(subcategory)
+      : next === prev ? prevSub : "";
+    if (next === prev && nextSub === prevSub) {
       return prev;
     }
     it.category = next;
+    it.subcategory = nextSub;
     notify();
     try {
-      await apiSet(userId(), name, "add", next);
+      await apiSet(userId(), name, "add", next, undefined, nextSub);
       broadcastChange();
     } catch (_e) {
       it.category = prev;
+      it.subcategory = prevSub;
       notify();
     }
     return it.category || "";
@@ -293,11 +304,11 @@
       return "";
     }
     const cur = it.category || "";
-    const tag = await chooseTag(anchorEl, cur, cur !== "");
-    if (tag === null) {
+    const pick = await chooseTag(anchorEl, cur, cur !== "", subSection(cur, it.subcategory || ""));
+    if (pick === null) {
       return it.category || "";
     }
-    return setCategory(name, tag);
+    return setCategory(name, pick.tag, pick.sub);
   }
 
   async function setDesc(repo, text) {
@@ -348,6 +359,30 @@
     return out;
   }
 
+  // 细分栏出不出现，看这个分类是不是真的大到需要再分一层：条目攒够 SUB_MIN，
+  // 或者组里已经有人分过（分完掉回 SUB_MIN 以下也得留着入口，否则改不回来）。
+  function subSection(parent, current) {
+    if (!parent) {
+      return null;
+    }
+    const group = getAll().filter(function (x) {
+      return (x.category || "") === parent;
+    });
+    const options = [];
+    const seen = new Set();
+    group.forEach(function (x) {
+      const v = cleanTag(x.subcategory);
+      if (v && !seen.has(v)) {
+        seen.add(v);
+        options.push(v);
+      }
+    });
+    if (group.length < SUB_MIN && !options.length) {
+      return null;
+    }
+    return { parent: parent, current: cleanTag(current), options: options };
+  }
+
   function positionPicker(pop, anchorEl) {
     const r = anchorEl && anchorEl.getBoundingClientRect
       ? anchorEl.getBoundingClientRect() : null;
@@ -368,12 +403,22 @@
     pop.style.top = Math.max(8, top) + "px";
   }
 
+  function customForm(placeholder, isSub) {
+    return '<form class="tag-picker__custom"' + (isSub ? ' data-sub="1"' : "") + ">" +
+      '<input type="text" class="tag-picker__input" placeholder="' + placeholder +
+      '" maxlength="' + MAX_TAG_LEN + '" />' +
+      '<button type="submit" class="tag-picker__add">添加</button>' +
+      "</form>";
+  }
+
   // allowNone:是否给"未分类"这颗。新收藏时它是"先收着不分类"的确认键；
   // 改分类时只有本来带分类的才需要它来清空,已经在未分类里的点它等于没点。
-  function chooseTag(anchorEl, current, allowNone) {
+  // sub:subSection() 的结果,null 就不长细分那一栏。返回 {tag, sub} 或 null(取消)。
+  function chooseTag(anchorEl, current, allowNone, sub) {
     return new Promise(function (resolve) {
       closePicker();
       const cur = cleanTag(current);
+      const curSub = sub ? sub.current : "";
       const pop = document.createElement("div");
       pop.className = "tag-picker";
       const chips = tagOptions(cur).map(function (t) {
@@ -384,15 +429,26 @@
       const noneChip = allowNone === false ? "" :
         '<button type="button" class="tag-picker__chip tag-picker__chip--none' +
         (cur === "" ? " is-active" : "") + '" data-tag="">未分类</button>';
+      const subHtml = !sub ? "" :
+        '<div class="tag-picker__title tag-picker__title--sub">' +
+          escHtml(sub.parent) + " · 细分</div>" +
+        '<div class="tag-picker__chips">' +
+          sub.options.map(function (t) {
+            return '<button type="button" class="tag-picker__chip tag-picker__chip--sub' +
+              (t === curSub ? " is-active" : "") +
+              '" data-tag="' + escHtml(t) + '">' + escHtml(t) + "</button>";
+          }).join("") +
+          '<button type="button" class="tag-picker__chip tag-picker__chip--sub ' +
+          "tag-picker__chip--none" + (curSub === "" ? " is-active" : "") +
+          '" data-tag="">不细分</button>' +
+        "</div>" +
+        customForm("新建细分…", true);
       pop.innerHTML =
         '<div class="tag-picker__title">选择分类</div>' +
         '<div class="tag-picker__chips">' + chips + noneChip +
         "</div>" +
-        '<form class="tag-picker__custom">' +
-          '<input type="text" class="tag-picker__input" placeholder="自定义标签…" maxlength="' +
-          MAX_TAG_LEN + '" />' +
-          '<button type="submit" class="tag-picker__add">添加</button>' +
-        "</form>";
+        customForm("自定义标签…", false) +
+        subHtml;
       document.body.appendChild(pop);
       positionPicker(pop, anchorEl);
       const input = pop.querySelector(".tag-picker__input");
@@ -425,18 +481,34 @@
       }
       activePicker = { cleanup: cleanup };
 
+      // 换父分类时把细分一并丢掉：「文档」是挂在效率工具下面才成立的
+      function pickTop(v) {
+        finish({ tag: v, sub: v === cur ? curSub : "" });
+      }
+
       pop.addEventListener("click", function (e) {
         const chip = e.target.closest(".tag-picker__chip");
         if (chip) {
           e.preventDefault();
-          finish(cleanTag(chip.getAttribute("data-tag")));  // "未分类" → ""
+          const v = cleanTag(chip.getAttribute("data-tag"));  // "未分类"/"不细分" → ""
+          if (chip.classList.contains("tag-picker__chip--sub")) {
+            finish({ tag: cur, sub: v });
+          } else {
+            pickTop(v);
+          }
         }
       });
-      pop.querySelector(".tag-picker__custom").addEventListener("submit", function (e) {
+      pop.addEventListener("submit", function (e) {
         e.preventDefault();
-        const v = cleanTag(input.value);
-        if (v) {
-          finish(v);
+        const form = e.target.closest(".tag-picker__custom");
+        const v = cleanTag(form.querySelector(".tag-picker__input").value);
+        if (!v) {
+          return;
+        }
+        if (form.hasAttribute("data-sub")) {
+          finish({ tag: cur, sub: v });
+        } else {
+          pickTop(v);
         }
       });
       setTimeout(function () {

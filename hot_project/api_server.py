@@ -73,6 +73,7 @@ class FavoriteIn(BaseModel):
     action: str                         # add / remove
     source_report: str = ""
     category: str | None = None         # None = 不改;"" = 归到未分类
+    subcategory: str | None = None      # 二级细分,只在 category 非空时有意义
     short_desc: str | None = None       # None = 按需自动生成;字符串(含空)= 直接采用
 
 
@@ -292,7 +293,8 @@ def favorite_update(body: FavoriteIn):
     try:
         items = favorites.set_favorite(body.user_id, body.repo, body.action,
                                        source_report=body.source_report,
-                                       short_desc=short, category=body.category)
+                                       short_desc=short, category=body.category,
+                                       subcategory=body.subcategory)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"user_id": body.user_id, "favorites": items}

@@ -1299,6 +1299,8 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
   z-index: 1000;
   width: 232px;
   max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);   /* 带细分那段可能挺高,矮屏上滚而不是撑出去 */
+  overflow-y: auto;
   padding: 12px;
   border-radius: 14px;
   background: var(--panel-strong, #fffaf1);
@@ -1343,6 +1345,19 @@ body.js-master .repo-detail.is-active { display: block; animation: panel-in 300m
 
 .tag-picker__chip--none {
   color: var(--muted, #6a6f79);
+}
+
+/* 细分是浮层的第二段,只在分类攒够条目时才出现 —— 划条线跟一级分开 */
+.tag-picker__title--sub {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(23, 50, 77, 0.16);
+  color: var(--brand-soft, #2f5b82);
+}
+
+.tag-picker__chip--sub {
+  font-size: 12px;
+  padding: 3px 10px;
 }
 
 .tag-picker__custom {

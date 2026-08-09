@@ -51,6 +51,10 @@ curl --proxy http://127.0.0.1:7890 https://ifconfig.co/json
   → `source /etc/profile.d/clash-for-linux.sh && clashon`。
 - **出口地区和节点名对不上** → 机场常贴错节点地区标签（实测选「🇦🇷 阿根廷Z01」出口实为香港）
   → 以 geoip 返回的 `country` 为准，不符就 `clashctl select` 换节点。
+- **git pull/push 特别慢（几十 KiB/s）** → git 全局 `http.proxy`/`https.proxy` 指向
+  clash（`git config --global --get http.proxy` 确认），慢的是当前节点而不是 git
+  → 先测节点：`curl --proxy http://127.0.0.1:7890 -o /dev/null -sS -w '%{speed_download} B/s\n' 'https://speed.cloudflare.com/__down?bytes=10000000'`，
+  慢就 `clashctl select` 换节点，换完用 geoip 确认出口。
 - **开代理后 Python 程序报 socks 错误**（httpx 报 `Using SOCKS proxy, but the 'socksio'
   package is not installed`；requests 报 `Missing dependencies for SOCKS support`）
   → `clashon` 会导出 `all_proxy=socks5://…`（`scripts/core/alias.sh`），而 Python HTTP 库
@@ -66,3 +70,5 @@ curl --proxy http://127.0.0.1:7890 https://ifconfig.co/json
 - 2026-08-05 WSL（装于 `/root/clash-for-linux`）：确认 `clashon` 导出 socks5 的
   `all_proxy`，Python 侧需 socksio/pysocks；本机项目 `.venv` 已装 socksio 1.0.0，
   系统 Python 未装（未动）。
+- 2026-08-09 WSL：git 走 7890 拉 GitHub 只有 66 KiB/s；实测当前节点（出口台湾
+  Akari Networks）Cloudflare 测速约 430 KB/s——链路通、节点慢，新增「git 慢」排查条目。

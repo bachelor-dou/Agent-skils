@@ -5,7 +5,11 @@
                               "favorited_at": "YYYY-MM-DDTHH:MM:SSZ",
                               "source_report": "2026-07-01.md",
                               "short_desc": "一句话概要",
-                              "category": "效率"}]}}
+                              "category": "效率",
+                              "subcategory": "文档"}]}}
+
+分类是两级的:`subcategory` 只在 `category` 之下有意义,离开父分类就没有归属,所以
+`category` 被清空时 `subcategory` 一并清掉(见 `set_favorite`)。
 
 收藏是**全局**的:某项目一旦被收藏,在任何包含它的报告里都显示为已收藏。
 
@@ -80,10 +84,12 @@ def all_repos() -> set[str]:
 
 def set_favorite(user_id: str, repo: str, action: str, *,
                  source_report: str = "", short_desc: str | None = None,
-                 category: str | None = None) -> list[dict]:
+                 category: str | None = None,
+                 subcategory: str | None = None) -> list[dict]:
     """add / remove 单个收藏,返回更新后的清单。非法输入抛 `ValueError`。
 
-    `short_desc` 与 `category` 同语义:`None` = 不改动(新增时存空串),字符串(含 `""`)= 覆盖。
+    `short_desc`、`category`、`subcategory` 同语义:`None` = 不改动(新增时存空串),
+    字符串(含 `""`)= 覆盖。父分类被清空时子分类跟着清空。
     """
     if not valid_user_id(user_id):
         raise ValueError("invalid user_id")
@@ -107,15 +113,21 @@ def set_favorite(user_id: str, repo: str, action: str, *,
                     existing["short_desc"] = short_desc
                 if category is not None:
                     existing["category"] = clean_category(category)
+                if subcategory is not None:
+                    existing["subcategory"] = clean_category(subcategory)
+                if not existing.get("category"):
+                    existing["subcategory"] = ""
             else:
                 if len(items) >= MAX_PER_USER:
                     raise ValueError("favorites limit reached")
+                cat = clean_category(category or "")
                 items.insert(0, {
                     "repo": repo,
                     "favorited_at": stamp(),
                     "source_report": source_report or "",
                     "short_desc": short_desc or "",
-                    "category": clean_category(category or ""),
+                    "category": cat,
+                    "subcategory": clean_category(subcategory or "") if cat else "",
                 })
 
         users[user_id] = items

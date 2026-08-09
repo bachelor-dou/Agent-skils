@@ -1380,21 +1380,42 @@ textarea {
   color: var(--accent);
 }
 
-/* 只有未分类项目才有这颗按钮：起新标签得打字,拖不出来 */
-.fav-item__tag {
-  flex: 0 0 auto;
-  white-space: nowrap;
-  border: 1px solid rgba(215, 136, 58, 0.35);
-  background: rgba(248, 216, 176, 0.35);
-  color: var(--accent);
-  border-radius: 999px;
-  padding: 3px 9px;
+/* 组内二级小标题：不折叠也不带按钮 —— 建/改细分走右键浮层。
+   色条沿用所在分组的 --fav-hue,一眼看出是这组内部再分的一层。 */
+.fav-sub {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0 1px;          /* 上下还有 .fav-group__items 的 5px gap 兜着 */
+  padding: 5px 9px;
+  border-left: 3px solid var(--fav-hue);
+  border-radius: 0 9px 9px 0;
+  background: rgba(23, 50, 77, 0.06);
   font-size: 11.5px;
-  cursor: pointer;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--brand);
 }
 
-.fav-item__tag:hover {
-  background: rgba(215, 136, 58, 0.2);
+.fav-sub:first-child {
+  margin-top: 0;
+}
+
+/* 坠底那一堆没细分的，标题压淡些，别跟真细分抢眼 */
+.fav-sub--loose {
+  border-left-color: rgba(106, 111, 121, 0.4);
+  background: rgba(23, 50, 77, 0.035);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.fav-sub__count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 收藏栏按分类分组：一组一张卡片,左侧色条区分分类 */
@@ -1568,6 +1589,8 @@ textarea {
   z-index: 1000;
   width: 232px;
   max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);   /* 带细分那段可能挺高,矮屏上滚而不是撑出去 */
+  overflow-y: auto;
   padding: 12px;
   border-radius: 14px;
   background: var(--panel-strong, #fffaf1);
@@ -1614,6 +1637,19 @@ textarea {
   color: var(--muted, #6a6f79);
 }
 
+/* 细分是浮层的第二段,只在分类攒够条目时才出现 —— 划条线跟一级分开 */
+.tag-picker__title--sub {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(23, 50, 77, 0.16);
+  color: var(--brand-soft, #2f5b82);
+}
+
+.tag-picker__chip--sub {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
 .tag-picker__custom {
   display: flex;
   gap: 6px;
@@ -1651,7 +1687,6 @@ textarea {
 
 .fav-item__copy,
 .fav-item__remove,
-.fav-item__tag,
 .tag-picker__chip,
 .tag-picker__add {
   transition: transform 130ms ease-out, background 160ms ease, color 160ms ease, border-color 160ms ease;
@@ -1662,7 +1697,6 @@ textarea {
 .panel-tab:active,
 .fav-item__copy:active,
 .fav-item__remove:active,
-.fav-item__tag:active,
 .tag-picker__chip:active,
 .tag-picker__add:active {
   transform: scale(0.94);
