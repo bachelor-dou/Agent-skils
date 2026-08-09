@@ -36,7 +36,7 @@ fi
 # 加载运行环境并重启服务。
 if pkill -f -- "$PROC_PAT" 2>/dev/null; then sleep 1; echo "已停止旧服务"; else echo "无正在运行的服务"; fi
 [ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; } || echo "警告:$ENV_FILE 不存在,缺 token / key"
-nohup "$VENV_PY" -m hot_project >>"$SERVER_OUT" 2>&1 &
+nohup "$VENV_PY" -m hot_project >"$SERVER_OUT" 2>&1 &
 PID=$!
 
 # 检查服务可用性。
