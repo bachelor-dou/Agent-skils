@@ -170,7 +170,31 @@ def save(name: str, text: str) -> Path | None:
     return path
 
 
-# ── 报告 Markdown → 结构化数据(纯解析,不碰文件系统) ──
+# ── 报告 Markdown 的格式:写与解析成对同源 ──
+# 生成端(service/report.py)写标题必须经这里的函数,不许自己拼 f-string ——
+# 附栏曾因写端加了 `## T1.` 而解析端不认识,整段在页面上静默消失。
+# 每对「写函数 ↔ 正则」都有守卫:test_report.py::test_writers_and_parsers_agree。
+
+# 周期 → (榜名, 增长字段名)。字段名必须写明是哪个窗口:Trending 的口径和我们的窗口增量
+# 不同源,月榜的数字更不能顶着「本周新增」出现。
+PERIOD_TEXT = {"weekly": ("周榜", "本周新增"), "monthly": ("月榜", "本月新增")}
+
+
+def heading(rank: int, repo: str) -> str:
+    """正文条目标题(和 `_HEADING` 成对)。"""
+    return f"## {rank}. {repo}"
+
+
+def trend_heading(rank: int, repo: str) -> str:
+    """附栏条目标题(和 `_TREND_HEADING` 成对)。T 前缀让它避开正文统计。"""
+    return f"## T{rank}. {repo}"
+
+
+def appendix_mark(period: str) -> str:
+    """附栏标题(和 `_APPENDIX` 成对)。幂等判断、渲染、解析分段共用这一份。"""
+    label, _ = PERIOD_TEXT.get(period, PERIOD_TEXT["weekly"])
+    return f"## 附:GitHub Trending {label}对照({period})"
+
 
 _HEADING = re.compile(r"##\s+(?P<rank>\d+)\.\s+(?P<repo>[\w.-]+/[\w.-]+)\s*$")
 # 附栏条目写成 `## T1. owner/repo`,和正文的纯数字排名分开,免得混进「上新/移出」、

@@ -8,7 +8,9 @@
   const PING_KEY = "gh-hot-favorites-ping";   // localStorage 跨标签页同步的回退通道
   const CHANNEL = "gh-hot-favorites";
   const listeners = new Set();
+  // 长度上限只是输入体验；真正的裁剪在服务端（favorites.py / FAVORITE_DESC_MAX）。
   const MAX_TAG_LEN = 20;
+  const DESC_MAX = 60;
   const SUB_MIN = 10;             // 分类攒够这么多条，浮层里才浮现「细分」那一栏
 
   let items = new Map();          // repo -> {repo, short_desc, category, ...}（内存缓存，保序）
@@ -121,6 +123,16 @@
     if (!resp.ok) {
       throw new Error("update favorite failed");
     }
+    return resp.json();
+  }
+
+  // POST 回的就是带上榜统计的权威清单：乐观更新到这里对账，
+  // 分类规则（如「子分类随父清空」）以服务端为准，本地那份只是预演。
+  function reconcile(data) {
+    if (data && Array.isArray(data.favorites)) {
+      loadItems(data.favorites);
+      notify();
+    }
   }
 
   async function migrateLegacy(uid) {
@@ -194,9 +206,8 @@
     items = next;
     notify();
     try {
-      await apiSet(userId(), name, "add", category);
+      reconcile(await apiSet(userId(), name, "add", category));
       broadcastChange();
-      await refresh();  // 概要与上榜次数由服务端补全，乐观插入的占位项里没有
     } catch (_e) {
       items.delete(name);
       notify();
@@ -209,7 +220,7 @@
     items.delete(name);
     notify();
     try {
-      await apiSet(userId(), name, "remove");
+      reconcile(await apiSet(userId(), name, "remove"));
       broadcastChange();
     } catch (_e) {
       const restore = new Map([[name, prev]]);
@@ -237,7 +248,8 @@
     return addFav(name, pick.tag);
   }
 
-  // subcategory 省略 = 沿用原细分，但换了父分类就丢掉（细分只在原父分类下说得通）
+  // subcategory 省略 = 沿用原细分，但换了父分类就丢掉（细分只在原父分类下说得通）。
+  // 这条规则的正身在服务端 set_favorite；这里只做乐观预演，成功后 reconcile 对账。
   async function setCategory(repo, category, subcategory) {
     const name = String(repo || "").trim();
     const it = items.get(name);
@@ -257,14 +269,14 @@
     it.subcategory = nextSub;
     notify();
     try {
-      await apiSet(userId(), name, "add", next, undefined, nextSub);
+      reconcile(await apiSet(userId(), name, "add", next, undefined, nextSub));
       broadcastChange();
     } catch (_e) {
       it.category = prev;
       it.subcategory = prevSub;
       notify();
     }
-    return it.category || "";
+    return getCategory(name);
   }
 
   // 分类改名 = 把该分类下每一项改写成新名字；改成已有名字就是合并
@@ -283,9 +295,10 @@
     notify();
     const uid = userId();
     let failed = false;
+    let last = null;
     for (const it of moved) {
       try {
-        await apiSet(uid, it.repo, "add", to);
+        last = await apiSet(uid, it.repo, "add", to);
       } catch (_e) {
         failed = true;
       }
@@ -293,6 +306,8 @@
     broadcastChange();
     if (failed) {
       await refresh();  // 有失败的就以服务端为准，别留下半真半假的分组
+    } else {
+      reconcile(last);
     }
     return to;
   }
@@ -318,20 +333,21 @@
       return "";
     }
     const prev = it.short_desc || "";
-    const next = String(text == null ? "" : text).trim().slice(0, 60);
+    const next = String(text == null ? "" : text).trim().slice(0, DESC_MAX);
     if (next === prev) {
       return prev;
     }
     it.short_desc = next;
     notify();
     try {
-      await apiSet(userId(), name, "add", null, next);
+      reconcile(await apiSet(userId(), name, "add", null, next));
       broadcastChange();
     } catch (_e) {
       it.short_desc = prev;
       notify();
     }
-    return it.short_desc;
+    const now = items.get(name);
+    return (now && now.short_desc) || "";
   }
 
   // ── 标签选择浮层（report / chat 两页共用；同一时刻只开一个）──
@@ -559,5 +575,7 @@
     setDesc: setDesc,
     subscribe: subscribe,
     migrateTo: migrateTo,
+    MAX_TAG_LEN: MAX_TAG_LEN,
+    DESC_MAX: DESC_MAX,
   };
 })(window);

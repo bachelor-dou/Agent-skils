@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hot_project import api_server, config
-from hot_project.tools import repo_tools
+from hot_project.service import favorites as favorite_service
 from hot_project.web import render, security, sessions
 
 REPORT = """# GitHub 热门项目 — 2026-07-30
@@ -115,6 +115,22 @@ def test_favorites_reject_a_malformed_user_id(client):
     assert client.get("/api/favorites", params={"user_id": "!!"}).status_code == 400
 
 
+def test_a_favorite_post_answers_with_the_same_authoritative_list_as_get(
+    client, monkeypatch, tmp_path,
+):
+    """前端拿 POST 响应直接对账、省掉一次 GET,前提是两者同形:
+    条目带上榜统计、顶层带 report_total。这条钉的就是这份前后端契约。
+    """
+    monkeypatch.setattr(config, "FAVORITES_PATH", tmp_path / "favorites.json")
+    posted = client.post("/api/favorites", json={
+        "user_id": "tester", "repo": "owner/name",
+        "action": "add", "short_desc": ""}).json()
+    assert posted == client.get("/api/favorites",
+                                params={"user_id": "tester"}).json()
+    assert "report_total" in posted
+    assert "report_count" in posted["favorites"][0]
+
+
 def test_changing_the_category_neither_costs_an_llm_call_nor_eats_the_summary(
     client, monkeypatch, tmp_path,
 ):
@@ -125,7 +141,7 @@ def test_changing_the_category_neither_costs_an_llm_call_nor_eats_the_summary(
     """
     monkeypatch.setattr(config, "FAVORITES_PATH", tmp_path / "favorites.json")
     generated = []
-    monkeypatch.setattr(repo_tools, "short_desc",
+    monkeypatch.setattr(favorite_service, "short_desc",
                         lambda *a, **k: generated.append(a) or "机器写的")
 
     add = {"user_id": "tester", "repo": "owner/name", "action": "add"}

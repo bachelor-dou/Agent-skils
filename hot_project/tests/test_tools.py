@@ -9,6 +9,7 @@ import json
 import pytest
 
 from hot_project import tools
+from hot_project.service import favorites as favorite_service
 from hot_project.tools import rank_tools, repo_tools
 from hot_project.tools.spec import Ctx, Param, Registry, Tool
 
@@ -273,7 +274,7 @@ class _ReadmeGH(_FakeGH):
 @pytest.fixture
 def _echo_condense(monkeypatch):
     """把浓缩换成回声,好看清到底喂了哪一档素材进去。"""
-    monkeypatch.setattr(repo_tools.describe, "condense",
+    monkeypatch.setattr(favorite_service.describe, "condense",
                         lambda repos, max_chars=70: [r["description"] for r in repos])
 
 
@@ -289,10 +290,10 @@ def test_the_summary_falls_back_until_it_finds_something_to_say(
 
     退让顺序也是有讲究的:库里那份四段介绍不用联网、还是现成的中文,所以排在 README 前面。
     """
-    assert repo_tools.short_desc("a/b", saved, gh) == expected
+    assert favorite_service.short_desc("a/b", saved, gh) == expected
 
 
 def test_no_token_means_no_readme_lookup_rather_than_a_crash(_echo_condense):
     class _NoTokens(_ReadmeGH):
         usable = False
-    assert repo_tools.short_desc("a/b", {}, _NoTokens()) == ""
+    assert favorite_service.short_desc("a/b", {}, _NoTokens()) == ""

@@ -29,7 +29,8 @@ from pydantic import BaseModel
 from . import config
 from .common import logs
 from .infra import llm
-from .infra.data_access import favorites, reports, universe
+from .infra.data_access import reports
+from .service import favorites as favorite_service
 from .tools import repo_tools
 from .web import render, security, sessions
 
@@ -268,36 +269,23 @@ def repo_describe(body: DescribeIn):
 
 @app.get("/api/favorites")
 def favorite_list(user_id: str):
-    if not favorites.valid_user_id(user_id):
-        raise HTTPException(status_code=400, detail="无效的 user_id")
-    counts, total = reports.appearance_counts()
-    return {"user_id": user_id, "report_total": total,
-            "favorites": [dict(item, report_count=counts.get(item.get("repo", ""), 0),
-                               report_total=total)
-                          for item in favorites.get(user_id)]}
+    try:
+        items, total = favorite_service.listing(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"user_id": user_id, "report_total": total, "favorites": items}
 
 
 @app.post("/api/favorites")
 def favorite_update(body: FavoriteIn):
-    """概要收藏时才生成,不在出报告时给几百个项目预生成。"""
-    short = None
-    if body.action == "add":
-        already = next((x for x in favorites.get(body.user_id)
-                        if x.get("repo") == body.repo), {})
-        if body.short_desc is not None:
-            short = body.short_desc.strip()[:repo_tools.FAVORITE_DESC_MAX]
-        elif not already:
-            from .provider.github import client as github
-            saved = universe.load().get(body.repo, {})
-            short = repo_tools.short_desc(body.repo, saved, github.shared()) or None
     try:
-        items = favorites.set_favorite(body.user_id, body.repo, body.action,
-                                       source_report=body.source_report,
-                                       short_desc=short, category=body.category,
-                                       subcategory=body.subcategory)
+        items, total = favorite_service.update(
+            body.user_id, body.repo, body.action, source_report=body.source_report,
+            category=body.category, subcategory=body.subcategory,
+            short_desc=body.short_desc)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return {"user_id": body.user_id, "favorites": items}
+    return {"user_id": body.user_id, "report_total": total, "favorites": items}
 
 
 # ── WebSocket ───────────────────────────────────────────────────

@@ -23,7 +23,7 @@ from markdown import Markdown
 from .. import config
 from ..infra.data_access import reports, universe
 from ..infra.data_access._file_io import StoreReadError
-from ..service.describe import SECTIONS
+from ..service.describe import LEGACY_SECTIONS, SECTIONS
 
 logger = logging.getLogger("hot_project")
 
@@ -255,10 +255,9 @@ def _diff_of(name: str, current: reports.Report) -> _Diff | None:
 # ══════════════════════════════════════════════════════════════
 # 描述与 DB 实时同步
 # ══════════════════════════════════════════════════════════════
-_LEGACY_SECTIONS = ("核心依赖与生态", "已知局限或注意事项")
 _DESC_HEAD = re.compile(
     r"^(?P<title>"
-    + "|".join(re.escape(t) for t in SECTIONS + _LEGACY_SECTIONS)
+    + "|".join(re.escape(t) for t in SECTIONS + LEGACY_SECTIONS)
     + r")[:：]\s*(?P<body>.*)$"
 )
 
@@ -346,7 +345,6 @@ TREND_ANCHOR = "trending-appendix"
 
 # 附栏条目的字段是生成端按顺序写死的,这里按名字上色,认不出的当增长口径处理
 _TREND_STAT_KINDS = {"总 Star": "star", "主语言": "language", "创建时间": "created"}
-_TREND_LABELS = {"weekly": "周榜", "monthly": "月榜"}
 
 
 class _Trend(NamedTuple):
@@ -400,7 +398,7 @@ def _trend_of(period: str, entries: list[reports.Entry],
     和侧栏项配对的,多塞或少塞一个就整页错位。已上榜的那些只渲染成一行锚点跳回正文,
     和 Markdown 里一致。
     """
-    label = _TREND_LABELS.get(period, period)
+    label = reports.PERIOD_TEXT.get(period, (period, ""))[0]  # 榜名和生成端同源
     anchor = f"{TREND_ANCHOR}-{period}"
     rows: list[str] = []
     listed: set[str] = set()

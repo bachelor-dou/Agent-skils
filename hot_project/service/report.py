@@ -1,6 +1,8 @@
 """周报生成 —— Top N 项目 → 一份 Markdown。
 
-写出来的格式由 `infra.data_access.reports` 解析读回,两边必须同时改;守卫在 `test_report.py`。
+写出来的格式由 `infra.data_access.reports` 解析读回。标题这类有格式含义的行必须经
+`reports.heading` / `trend_heading` / `appendix_mark` 写,它们和解析正则同住一处、
+成对维护;守卫在 `test_report.py`。
 
 描述按优先级取:DB 里没过期的缓存 → LLM 现生成 → 从元数据兜底拼一段。第三档不是摆设 ——
 一份「只有 star 数没有介绍」的报告仍然有用,而一次异常会让跑了两小时的流水线颗粒无收。
@@ -99,7 +101,7 @@ def _extract(text: str) -> dict[str, str]:
     return {k: v for k, v in found.items() if v}
 
 
-SECTION_NAMES = describe.SECTIONS + ("核心依赖与生态", "已知局限或注意事项")
+SECTION_NAMES = describe.SECTIONS + describe.LEGACY_SECTIONS
 
 
 def _fallback(name: str, saved: dict, prose: str, new_window: int) -> dict[str, str]:
@@ -235,7 +237,7 @@ def render(ranked: list[tuple[str, dict]], saved_by_name: dict[str, dict],
         age = age_days(saved.get("created_at", ""))
         topics = [t for t in saved.get("topics") or [] if t][:TOPICS_SHOWN]
 
-        out += [f"## {idx}. {name}", "", f"链接: https://github.com/{name}", "",
+        out += [reports.heading(idx, name), "", f"链接: https://github.com/{name}", "",
                 f"- 创建时间: {created or '未知'}"]
         if age is not None and age <= new_window:
             out.append(f"- 项目状态: NEW({new_window}天内)")
@@ -281,18 +283,7 @@ def generate(ranked: list[tuple[str, dict]], *, mode: str = "comprehensive",
 
 
 # ── Trending 对照附栏 ────────────────────────────────────────────────
-
-APPENDIX_MARK = "## 附:GitHub Trending"     # 各周期共用的前缀
-
-# 周期 → (榜名, 增长字段名)。字段名必须写明是哪个窗口:Trending 的口径和我们的窗口增量
-# 不同源,月榜的数字更不能顶着「本周新增」出现。
-PERIOD_TEXT = {"weekly": ("周榜", "本周新增"), "monthly": ("月榜", "本月新增")}
-
-
-def appendix_mark(period: str) -> str:
-    """某个周期的附栏标题。幂等判断和渲染共用这一份,免得两边写法漂移。"""
-    label, _ = PERIOD_TEXT.get(period, PERIOD_TEXT["weekly"])
-    return f"{APPENDIX_MARK} {label}对照({period})"
+# 附栏标题与周期文案在 reports.py,和解析正则成对;这里只负责内容。
 
 
 def _positions(ranked: list[tuple[str, dict]],
@@ -326,18 +317,18 @@ def render_trending(rows: list[dict], ranked: list[tuple[str, dict]],
 
     周期写进标题的括号里(`(weekly)` / `(monthly)`),解析端靠它把两段附栏分开归位。
     """
-    label, gained = PERIOD_TEXT.get(period, PERIOD_TEXT["weekly"])
+    label, gained = reports.PERIOD_TEXT.get(period, reports.PERIOD_TEXT["weekly"])
     by_name, by_id = _positions(ranked, saved_by_name)
     hits = sum(1 for r in rows
                if _position_of(r["full_name"], saved_by_name, by_name, by_id))
 
-    out = ["---", "", appendix_mark(period), "",
+    out = ["---", "", reports.appendix_mark(period), "",
            f"> Trending {label} {len(rows)} 个 | 已在本期榜单 {hits} 个 | "
            f"附栏补全 {len(rows) - hits} 个 | 抓取: {format_day(utc_today())}", ""]
 
     for i, row in enumerate(rows, 1):
         name = row["full_name"]
-        out += [f"## T{i}. {name}", ""]
+        out += [reports.trend_heading(i, name), ""]
         if pos := _position_of(name, saved_by_name, by_name, by_id):
             out += [f"已入选本期榜单 → 见正文 #{pos}。", ""]
             continue
@@ -373,7 +364,7 @@ def append_trending(path: str, rows: list[dict], ranked: list[tuple[str, dict]],
     text = reports.read(name)
     if text is None:
         return False
-    if appendix_mark(period) in text:
+    if reports.appendix_mark(period) in text:
         return True
 
     saved_by_name = universe.load()

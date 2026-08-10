@@ -1524,7 +1524,7 @@
         input.type = "text";
         input.className = "fav-item__desc-input";
         input.value = cur;
-        input.maxLength = 60;
+        input.maxLength = window.GitHubHotFavorites.DESC_MAX;
         input.placeholder = "一句话概要…";
         descEl.replaceWith(input);
         input.focus();
@@ -1565,7 +1565,7 @@
         input.type = "text";
         input.className = "fav-group__rename-input";
         input.value = old;
-        input.maxLength = 20;
+        input.maxLength = window.GitHubHotFavorites.MAX_TAG_LEN;
         nameEl.replaceWith(input);
         input.focus();
         input.select();

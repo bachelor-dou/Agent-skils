@@ -330,6 +330,18 @@ def test_both_trending_appendices_reach_the_rendered_page():
     assert html.count('<section class="repo-detail') == html.count('<a class="repo-nav__item')
 
 
+def test_writers_and_parsers_agree():
+    """写函数和解析正则成对同源的守卫:任何一边单独改格式,这里立刻红。
+
+    附栏曾因写端加了 `## T1.` 而解析端不认识,整段在页面上静默消失 —— 就防这个。
+    """
+    assert reports._HEADING.match(reports.heading(3, "owner/repo"))
+    assert reports._TREND_HEADING.match(reports.trend_heading(1, "owner/repo"))
+    for period in reports.PERIOD_TEXT:
+        m = reports._APPENDIX.match(reports.appendix_mark(period))
+        assert m and m.group("period") == period
+
+
 def test_a_listed_trending_repo_links_back_and_an_unlisted_one_is_rendered_in_full():
     appendix = report.render_trending(TRENDING_ROWS, RANKED, SAVED, {})
     assert "## T1. openai/whisper" in appendix
@@ -357,6 +369,6 @@ def test_append_trending_only_appends_once(report_dir, monkeypatch):
 
     assert report.append_trending(path, TRENDING_ROWS, RANKED)
     once = reports.read("2026-07-30.md")
-    assert report.APPENDIX_MARK in once
+    assert reports.appendix_mark("weekly") in once
     assert report.append_trending(path, TRENDING_ROWS, RANKED)
     assert reports.read("2026-07-30.md") == once
