@@ -264,11 +264,13 @@ def _paragraphs(text: str) -> list[str]:
 
 
 def generate(ranked: list[tuple[str, dict]], *, mode: str = "comprehensive",
-             growth_days: int = config.GROWTH_CALC_DAYS,
-             growth_threshold: int = config.STAR_GROWTH_THRESHOLD,
-             min_star: int = config.MIN_STAR, created_days: int | None = None,
+             growth_days: int, growth_threshold: int, min_star: int,
+             created_days: int | None = None,
              topic: str | None = None, gh=None, progress=None) -> str:
-    """生成并落盘,返回文件路径(写失败返回空串)。"""
+    """生成并落盘,返回文件路径(写失败返回空串)。
+
+    门槛三件套必填,理由同 `ranking.run`:策略由入口定,这里不替调用方翻 config。
+    """
     saved_by_name = universe.load()
     descs, writeback = descriptions(ranked, saved_by_name, gh=gh, progress=progress)
     if writeback:

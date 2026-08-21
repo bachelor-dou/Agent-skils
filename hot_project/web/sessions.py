@@ -104,6 +104,7 @@ def count() -> int:
 # ── 断线期间的回复 ──────────────────────────────────────────────
 
 def stash(session_id: str, reply: str) -> None:
+    """存进来的必须是 `web.protocol` 生成的线上帧,重连时原样补发。"""
     with _pending_lock:
         _pending.setdefault(session_id, []).append(reply)
 

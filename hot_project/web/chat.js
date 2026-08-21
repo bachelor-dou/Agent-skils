@@ -1,6 +1,7 @@
     const SESSION_STORAGE_KEY = "gh-hot-session-id";
     const SESSION_LAST_ACTIVE_KEY = "gh-hot-session-last-active";
-    const SESSION_TTL_SECONDS = Number("__SESSION_TTL_SECONDS__") || 3600;
+    // 服务端在 chat.html 里注入真值(sessions.TTL_SECONDS);兜底只为直开静态文件时不炸。
+    const SESSION_TTL_SECONDS = Number(window.SESSION_TTL_SECONDS) || 3600;
     const SESSION_EXPIRED_TEXT = "上一会话已过期，已自动开启新会话。可以直接开始新的提问。";
     const messagesEl = document.getElementById("messages");
     const inputEl = document.getElementById("composer-input");
@@ -39,6 +40,8 @@
     const CHAT_HISTORY_KEY = "gh-hot-chat-history";
     const MODEL_KEY = "gh-hot-model-id";
     const LITE_KEY = "gh-hot-lite-id";
+    const THINKING_KEY = "gh-hot-thinking";
+    const THINKING_BASE = "high"; // 默认档，各家都有；更深那一档叫什么由后端给
     const MAX_CHAT_HISTORY = 100; // 聊天历史最多保留的消息数，防止 localStorage 撑爆
 
     const escapeHtml = window.HotCommon.escapeHtml;
@@ -58,6 +61,7 @@
     let selectedModelId = ""; // 当前选用主模型 id（硬切换）
     let availableLiteModels = []; // 跨平台共享子模型池 [{id:"平台id:模型名", label}]
     let selectedLiteId = ""; // 当前选用子模型 id；空=自动（跟随主模型平台）
+    let thinkingLevel = THINKING_BASE; // 当前思考档：默认档，或这家更深的那一档
 
     restoreMessages();
     if (initialSessionExpired) {
@@ -240,6 +244,26 @@
       return selectedLiteId || "";
     }
 
+    // 存的档位可能是「更深」，但换平台后这家未必有更深那一档 —— 那就落回默认档。
+    // 不能把这家不认的档位发出去：翻译表里查不到就一个思考参数都不发，等于静默不思考。
+    function getSelectedThinking() {
+      return thinkingLevel === deeperLevel() ? thinkingLevel : THINKING_BASE;
+    }
+
+    function currentModel() {
+      return availableModels.find((m) => m.id === selectedModelId) || {};
+    }
+
+    // 后端直接给出「更深那一档要传什么」；空串 = 这家最深就是默认档，不给这组选项
+    function deeperLevel() {
+      return currentModel().thinking_deeper || "";
+    }
+
+    // 同一档在这家的原名（azure 是 xhigh）：菜单上写平台自己的说法，用户才对得上文档
+    function deeperLabel() {
+      return currentModel().thinking_deeper_label || deeperLevel();
+    }
+
     let pendingMainId = ""; // 主菜单中当前展开子菜单的主模型 id
 
     async function setupModelSelector() {
@@ -265,6 +289,7 @@
       try {
         stored = localStorage.getItem(MODEL_KEY) || "";
         storedLite = localStorage.getItem(LITE_KEY) || "";
+        thinkingLevel = localStorage.getItem(THINKING_KEY) || THINKING_BASE;
       } catch (_e) {}
       selectedModelId = availableModels.some((m) => m.id === stored) ? stored : availableModels[0].id;
       selectedLiteId = availableLiteModels.some((m) => m.id === storedLite) ? storedLite : "";
@@ -294,12 +319,11 @@
     }
 
     function updateButtonLabel() {
-      const cur = availableModels.find((m) => m.id === selectedModelId);
       const sub = availableLiteModels.find((m) => m.id === selectedLiteId);
-      const mainLabel = cur ? cur.label : "模型";
-      modelCurrentEl.textContent = availableLiteModels.length
-        ? `${mainLabel} · ${sub ? sub.label : "自动"}`
-        : mainLabel;
+      const parts = [currentModel().label || "模型"];
+      if (availableLiteModels.length) parts.push(sub ? sub.label : "自动");
+      if (getSelectedThinking() !== THINKING_BASE) parts.push(deeperLabel());
+      modelCurrentEl.textContent = parts.join(" · ");
     }
 
     function openMainMenu() {
@@ -313,8 +337,8 @@
           return `<button type="button" class="model-option${active}" data-model="${escapeHtml(m.id)}">` +
             `<span>${escapeHtml(m.label)}</span>${tail}</button>`;
         })
-        .join("");
-      modelMenu.querySelectorAll(".model-option").forEach((row) => {
+        .join("") + thinkingGroupHtml();
+      modelMenu.querySelectorAll(".model-option[data-model]").forEach((row) => {
         row.addEventListener("click", (e) => {
           e.stopPropagation();
           const mid = row.getAttribute("data-model");
@@ -325,9 +349,43 @@
           }
         });
       });
+      modelMenu.querySelectorAll(".model-option[data-thinking]").forEach((row) => {
+        row.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectThinking(row.getAttribute("data-thinking"));
+        });
+      });
       modelMenu.hidden = false;
       modelButton.setAttribute("aria-expanded", "true");
       positionUp(modelMenu, modelButton);
+    }
+
+    // 单选而不是开关：两行始终可点，从更深切回默认是正常路径。挂在主菜单末尾是因为它
+    // 跟着当前主模型走 —— 换到没有更深档的平台，这一组自己就消失了。
+    function thinkingGroupHtml() {
+      const deep = deeperLevel();
+      if (!deep) return "";
+      const cur = getSelectedThinking();
+      return '<div class="model-menu__group">思考</div>' +
+        [[THINKING_BASE, THINKING_BASE], [deep, deeperLabel()]].map(([lv, text]) =>
+          `<button type="button" class="model-option${lv === cur ? " is-active" : ""}" ` +
+          `data-thinking="${escapeHtml(lv)}"><span>${escapeHtml(text)}</span>` +
+          '<span class="model-option__tick model-option__tick--think">✓</span></button>').join("");
+    }
+
+    function selectThinking(level) {
+      if (level === getSelectedThinking()) {
+        closeMenus();
+        return;                 // 点的是已选中那档：白重连一次会打断正在进行的回答
+      }
+      thinkingLevel = level;
+      try {
+        localStorage.setItem(THINKING_KEY, level);
+      } catch (_e) {}
+      updateButtonLabel();
+      closeMenus();
+      closeSocket(false);
+      connectWebSocket();   // 档位在 WS 连接参数里，改了必须重连才生效
     }
 
     function openSubMenu(mainId, anchorRow) {
@@ -1068,6 +1126,7 @@
       if (uid) params.set("user_id", uid);
       if (getSelectedModel()) params.set("model", getSelectedModel());
       if (getSelectedLite()) params.set("lite", getSelectedLite());
+      if (getSelectedThinking()) params.set("thinking", getSelectedThinking());
       const qs = params.toString();
       const url = `${protocol}//${window.location.host}/ws/chat/${encodeURIComponent(currentSessionId)}`
         + (qs ? `?${qs}` : "");
@@ -1141,9 +1200,8 @@
           }
         }
 
-        const normalizedText = normalizeAgentReplyText(event.data);
-        if (resolveActiveRequest(normalizedText)) return;
-        renderUnsolicited(normalizedText);
+        // 服务端(web/protocol.py)只发信封帧；解析不出来的帧丢弃，不做裸字符串兜底。
+        console.warn("忽略无法识别的 WS 帧", event.data);
       });
 
       socket.addEventListener("close", (event) => {
@@ -1197,7 +1255,7 @@
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, message, user_id: (window.HotUser && window.HotUser.getId()) || "", model: getSelectedModel(), lite: getSelectedLite() }),
+        body: JSON.stringify({ session_id: sessionId, message, user_id: (window.HotUser && window.HotUser.getId()) || "", model: getSelectedModel(), lite: getSelectedLite(), thinking: getSelectedThinking() }),
       });
 
       if (!response.ok) {

@@ -23,7 +23,7 @@ GH_TRENDING = ROOT / "hot_project" / "provider" / "github" / "trending.py"
 GROWTH = ROOT / "hot_project" / "service" / "growth.py"
 LLM_WIRE = ROOT / "hot_project" / "infra" / "llm" / "protocol.py"
 LLM_CLIENT = ROOT / "hot_project" / "infra" / "llm" / "client.py"
-LLM_SCHEMES = ROOT / "hot_project" / "infra" / "llm" / "schemes.py"
+LLM_API = ROOT / "hot_project" / "infra" / "llm" / "api.py"
 ENV = ROOT / "hot_project" / "common" / "env.py"
 SCORING = ROOT / "hot_project" / "service" / "ranking.py"
 REPORT_PARSE = ROOT / "hot_project" / "infra" / "data_access" / "reports.py"
@@ -34,6 +34,7 @@ REPO_TOOLS = ROOT / "hot_project" / "tools" / "repo_tools.py"
 RANK_TOOLS = ROOT / "hot_project" / "tools" / "rank_tools.py"
 HISTORY = ROOT / "hot_project" / "agent" / "history.py"
 AGENT_LOOP = ROOT / "hot_project" / "agent" / "loop.py"
+DESCRIBE = ROOT / "hot_project" / "service" / "describe.py"
 SECURITY = ROOT / "hot_project" / "web" / "security.py"
 SESSIONS = ROOT / "hot_project" / "web" / "sessions.py"
 REPORTS_STORE = ROOT / "hot_project" / "infra" / "data_access" / "reports.py"
@@ -51,6 +52,7 @@ REPORT_TESTS = "hot_project/tests/test_report.py"
 TOOL_TESTS = "hot_project/tests/test_tools.py"
 AGENT_TESTS = "hot_project/tests/test_agent.py"
 WEB_TESTS = "hot_project/tests/test_web.py"
+DESCRIBE_TESTS = "hot_project/tests/test_describe.py"
 
 # (说明, 文件, 原文片段, 改坏后的片段, 测试文件, 应当变红的测试)
 MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
@@ -73,10 +75,8 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "发现任务附带覆盖已有条目",
         STORE / "universe.py",
-        """            if name in projects:
-                continue
-            projects[name] = dict(info)""",
-        "            projects[name] = dict(info)",
+        "            if name in projects:\n                continue",
+        "            if False:\n                continue",
         STORE_TESTS,
         "test_discover_only_inserts_new",
     ),
@@ -89,7 +89,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         "test_display_refresh_never_overwrites_existing",
     ),
     (
-        "star 没变也重写整库",
+        "没有实际变化也重写整库",
         STORE / "universe.py",
         "    if not changed:\n        tx.abort()\n        return 0",
         "    if not changed:\n        return 0",
@@ -135,7 +135,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "后来的快照覆盖最早的(基线越用越新,增长越算越小)",
         STORE / "snapshots.py",
-        "            if name not in stars:",
+        "            if key not in stars:",
         "            if True:",
         STORE_TESTS,
         "test_the_baseline_takes_each_repos_earliest_measurement_in_the_window",
@@ -143,8 +143,8 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "基线天数报全局窗口而非逐仓实际(晚进库的仓库速率虚高,爆发加成凭空多一档)",
         STORE / "snapshots.py",
-        "                spans[name] = span",
-        "                spans[name] = days",
+        "                spans[key] = span",
+        "                spans[key] = days",
         STORE_TESTS,
         "test_the_baseline_takes_each_repos_earliest_measurement_in_the_window",
     ),
@@ -498,11 +498,11 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "给 azure 发它不认的 temperature(整个请求 400,不是被忽略)",
         LLM_WIRE,
-        """    if backend == AZURE:
+        """    if family == AZURE:
         if max_tokens is not None:
             body["max_completion_tokens"] = max_tokens
     else:""",
-        """    if backend == AZURE:
+        """    if family == AZURE:
         if max_tokens is not None:
             body["max_completion_tokens"] = max_tokens
         if temperature is not None:
@@ -593,7 +593,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "重复的平台 id 放行(选 A 却调到 B,静默发生)",
-        LLM_SCHEMES,
+        LLM_API,
         "        if mid in seen:",
         "        if False:",
         LLM_TESTS,
@@ -676,7 +676,7 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     (
         "探针天数不逐仓写回(3 天名义值除 5 天的增量,凭空造出一场爆发)",
         RANKING,
-        '        info["recent_days"] = base.days.get(name, base.span)',
+        '        info["recent_days"] = anchor_days if anchor_days is not None else base.span',
         '        info["recent_days"] = days',
         RANKING_TESTS,
         "test_the_probe_writes_back_each_repos_own_span",
@@ -800,16 +800,17 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "昂贵工具不问就跑(一句话触发几十分钟的全量出榜)",
-        RANK_TOOLS,
-        'if not (pending and stored.get("mode") == mode and (confirm or pending == signature)):',
-        "if False:",
+        SPEC,
+        '        if not (pending and stored.get("tool") == tool.name\n'
+        "                and (confirm or pending == signature)):",
+        "        if False:",
         TOOL_TESTS,
         "test_an_expensive_tool_asks_before_it_runs",
     ),
     (
         "确认后用模型复述的参数而非屏幕上那份(用户确认的和实际跑的不是一回事)",
-        RANK_TOOLS,
-        '        if "params" in stored:              # mode 已在上面比过\n'
+        SPEC,
+        '        if "params" in stored:              # tool 已在上面比过\n'
         '            params = stored["params"]',
         "        pass",
         TOOL_TESTS,
@@ -1031,9 +1032,10 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
     ),
     (
         "确认签名不认工具(先请求关键词榜、再拿 confirm=true 调综合榜就能绕过回显)",
-        RANK_TOOLS,
-        'if not (pending and stored.get("mode") == mode and (confirm or pending == signature)):',
-        "if not (pending and (confirm or pending == signature)):",
+        SPEC,
+        '        if not (pending and stored.get("tool") == tool.name\n'
+        "                and (confirm or pending == signature)):",
+        "        if not (pending and (confirm or pending == signature)):",
         TOOL_TESTS,
         "test_confirming_one_ranking_does_not_authorize_a_different_one",
     ),
@@ -1070,6 +1072,102 @@ MUTATIONS: list[tuple[str, Path, str, str, str, str]] = [
         WEB_TESTS,
         "test_spoofed_forwarded_headers_do_not_grow_the_table_forever",
     ),
+    (
+        "HTTP 那条路把请求里的选项整组丢掉(回答只是变差,没有任何报错)",
+        ROOT / "hot_project" / "api_server.py",
+        "    options = chat_options.parse(body.model_dump())",
+        "    options = chat_options.ChatOptions()",
+        WEB_TESTS,
+        "test_the_thinking_level_travels_from_the_request_to_the_agent",
+    ),
+    (
+        "WS 那条路把连接时的选项整组丢掉(而它才是浏览器默认走的主路径)",
+        ROOT / "hot_project" / "api_server.py",
+        "    options = chat_options.parse(websocket.query_params)",
+        "    options = chat_options.ChatOptions()",
+        WEB_TESTS,
+        "test_the_websocket_carries_the_options_into_the_conversation",
+    ),
+    (
+        "两条传输的规范化不再统一(空串被当成一个真的模型 id 传下去)",
+        ROOT / "hot_project" / "web" / "chat_options.py",
+        'model=str(source.get("model") or "") or None,',
+        'model=str(source.get("model") or ""),',
+        WEB_TESTS,
+        "test_the_two_transports_normalize_their_options_the_same_way",
+    ),
+    (
+        "档位交给浏览器时把 key 一起带出去",
+        LLM_API,
+        '"thinking_deeper": protocol.deeper(self.backend),',
+        '"thinking_deeper": protocol.deeper(self.backend), "key": self.key,',
+        WEB_TESTS,
+        "test_the_model_list_tells_the_page_who_can_think_deeper",
+    ),
+    (
+        "认不出的档位不兜回默认(空串等于不发参数,azure 平台默认就是不思考)",
+        LLM_WIRE,
+        "    return effort if effort in EFFORTS else EFFORT_DEFAULT",
+        "    return effort",
+        LLM_TESTS,
+        "test_an_empty_or_bogus_level_falls_back_to_thinking",
+    ),
+    (
+        "档位没真传到模型调用上(Agent 收下就扔了)",
+        AGENT_LOOP,
+        "self._effort = effort",
+        'self._effort = ""',
+        AGENT_TESTS,
+        "test_the_thinking_level_reaches_the_model_call",
+    ),
+    (
+        "开了思考不额外给 token(思维链把正文挤成空,上层当成这家失败了)",
+        LLM_WIRE,
+        "    return max(max_tokens, min(max_tokens + budget, WIRE_MAX_TOKENS))",
+        "    return max_tokens",
+        LLM_TESTS,
+        "test_thinking_is_never_allowed_to_eat_the_answer_s_tokens",
+    ),
+    (
+        "5.5/5.6 带工具时不撤掉思考参数(对话每一步都 400,而探活是绿的)",
+        LLM_WIRE,
+        "    if tools and tools_mute_thinking(backend, model):",
+        "    if False:",
+        LLM_TESTS,
+        "test_newer_azure_models_with_tools_must_not_mention_thinking_at_all",
+    ),
+    (
+        "流式解码又开始看响应头的脸色(硅基流动没写 charset,被猜成 ISO-8859-1,整屏乱码)",
+        LLM_WIRE,
+        '        resp.encoding = "utf-8"',
+        '        resp.encoding = resp.encoding or "utf-8"',
+        LLM_TESTS,
+        "test_a_stream_without_a_charset_header_still_decodes_as_utf8",
+    ),
+    (
+        "更深那一档在菜单上不显示平台原名(用户对不上人家的文档)",
+        LLM_WIRE,
+        '    return (fragment.get("reasoning_effort") or EFFORT_MAX) if fragment else ""',
+        '    return EFFORT_MAX if fragment else ""',
+        LLM_TESTS,
+        "test_the_deeper_level_is_offered_under_the_platform_s_own_name",
+    ),
+    (
+        "项目介绍退回不思考(介绍变泛,但一个字的报错都没有)",
+        DESCRIBE,
+        "temperature=0.2, effort=llm.EFFORT_MEDIUM)",
+        "temperature=0.2, effort=llm.EFFORT_OFF)",
+        DESCRIBE_TESTS,
+        "test_both_batch_calls_ask_the_model_to_think_at_the_batch_depth",
+    ),
+    (
+        "历史压缩退回不思考(摘要丢掉后面还要用的前提)",
+        AGENT_LOOP,
+        "effort=llm.EFFORT_MEDIUM)",
+        "effort=llm.EFFORT_OFF)",
+        AGENT_TESTS,
+        "test_compressing_the_history_thinks_at_the_batch_depth",
+    ),
 ]
 
 
@@ -1103,11 +1201,16 @@ def _run(test_file: str, test_name: str) -> bool:
 def _baseline_is_green() -> bool:
     """先确认干净的树本来是绿的。
 
+    先清 `__pycache__`:变异编译出的 .pyc 和还原后的源文件如果撞上同一个秒级 mtime 和
+    同样的字节数,Python 会继续用那份改坏的字节码 —— 表现就是基线红在一条谁也没瞄准的
+    测试上,而且换一次运行红的位置还不一样。
+
     这一步是被真事教出来的:某次跑到一半被 kill,一处 `if False:` 留在了 `pool.py` 里
     (限流预算被整个关掉),之后两轮变异检查照样报「全部有效」—— 因为每处变异都是拿
     「当时盘上的内容」当原文的,坏掉的那行成了新基准。这次只是碰巧有个变异瞄准同一行,
     才以「对不上原文」暴露出来;泄漏到没人瞄准的行上就永远没人管了。
     """
+    _clear_pycache()
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "hot_project/tests", "-q", "--no-header", "-x"],
         cwd=ROOT, capture_output=True, text=True, timeout=600,

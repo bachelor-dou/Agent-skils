@@ -121,18 +121,24 @@ def merge_profile(facts: dict, pack: dict) -> dict:
     return merged
 
 
-def describe(name: str, facts: dict, level: str = STANDARD) -> str:
+def describe(name: str, facts: dict, level: str = STANDARD,
+             *, client: llm.LLMClient | None = None) -> str:
     """生成一段中文介绍。LLM 没配、或全部平台失败 → 空串。
 
     空串是有意的:抛异常会让整份报告因为一个仓库的描述失败而作废。
+
+    `client` 不传就用进程共享的那份;测试传 stub 进来,从接口测 prompt 和解析,
+    不必 monkeypatch 模块属性。
     """
-    client = llm.get()
+    client = client or llm.get()
     if not client.configured():
         logger.warning("LLM 未配置,跳过描述生成。")
         return ""
+    # medium 而不是 off:一句介绍也要先读懂一堆事实,不思考的版本明显更泛;也不用 high ——
+    # 一份报告要跑几十个仓库,那点质量差不值几十倍的等待
     text = client.text(build_prompt(name, facts, level), lite=True,
                        max_tokens=_MAX_TOKENS.get(level, _MAX_TOKENS[STANDARD]),
-                       temperature=0.2, enable_thinking=False)
+                       temperature=0.2, effort=llm.EFFORT_MEDIUM)
     if not text:
         logger.warning("描述生成失败(所有平台都失败):%s", name)
     return text
@@ -141,16 +147,18 @@ def describe(name: str, facts: dict, level: str = STANDARD) -> str:
 _NUMBERED = re.compile(r"(\d+)\.\s*(.+)")
 CONDENSE_MIN_PARSED = 0.5       # 解析出的条数低于这个比例就整批回退
 
-def condense(repos: list[dict], max_chars: int = 70) -> list[str]:
+def condense(repos: list[dict], max_chars: int = 70,
+             *, client: llm.LLMClient | None = None) -> list[str]:
     """把一批项目的英文简介批量浓缩成中文短句。返回和输入等长。
 
     整批一次请求,代价是解析靠序号对齐;解析不出一半以上就整批回退截断原文。
+    `client` 同 `describe`:默认进程共享,测试注入 stub。
     """
     if not repos:
         return []
     fallback = [(r.get("description") or "")[:max_chars] for r in repos]
 
-    client = llm.get()
+    client = client or llm.get()
     if not client.configured():
         return fallback
 
@@ -162,7 +170,7 @@ def condense(repos: list[dict], max_chars: int = 70) -> list[str]:
         f"请将以下 {len(repos)} 个 GitHub 项目的描述各浓缩为不超过{max_chars}字的中文简介。\n"
         f"要求:保留核心功能和用途,去掉修饰语,每行格式为「序号. 浓缩描述」,不要项目名。\n\n"
         f"{listing}\n",
-        lite=True, max_tokens=2048, temperature=0.1, enable_thinking=False,
+        lite=True, max_tokens=2048, temperature=0.1, effort=llm.EFFORT_MEDIUM,
     )
     if not text:
         logger.warning("批量浓缩失败,回退截断原文。")

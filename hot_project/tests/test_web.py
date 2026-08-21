@@ -190,6 +190,45 @@ def test_refreshing_a_card_also_refreshes_its_star_and_growth(client, monkeypatc
     assert body["growth_calc_days"] == 6                           # 实际跨度,不是请求的 7
 
 
+def test_refresh_finds_the_baseline_of_a_renamed_repo_by_id(client, monkeypatch):
+    """基线按 databaseId 键存,改过名的仓库只有按 id 才查得到。
+
+    曾经的真 bug:刷新按钮只按名字查基线,改过名的仓库增长静默变 null,
+    看起来像「缺数据」。键规则的唯一归属在 `Baseline.get`。
+    """
+    from hot_project.infra.data_access import snapshots
+    from hot_project.provider.github import client as github
+    from hot_project.service import report
+
+    class _GH:
+        usable = True
+
+        def info(self, name):
+            return {"stargazers_count": 5200, "id": 777,
+                    "created_at": "2020-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(github, "shared", lambda: _GH())
+    monkeypatch.setattr(report, "regenerate", lambda name, gh: "项目定位与用途: 干活的。")
+    monkeypatch.setattr(snapshots, "earliest_in_window",
+                        lambda days, today=None: snapshots.Baseline(
+                            {777: 4000}, {777: 6}, date(2026, 7, 29), 6))
+
+    body = client.post("/api/repo-describe", json={"repo": "newowner/newname"}).json()
+    assert body["growth"] == 1200, "基线在 id 键下,必须按 id 查到"
+    assert body["growth_calc_days"] == 6
+
+
+def test_chat_page_injects_the_real_session_ttl(client):
+    """前端的会话过期判断读页面注入的 TTL,必须和 sessions.TTL_SECONDS 同源。
+
+    曾经的真缺陷:chat.js 里的占位符从没人替换(JS 是静态直出的),
+    TTL 静默退化成硬编码 3600,服务端改了前端不知道。
+    """
+    html = client.get("/").text
+    assert f"window.SESSION_TTL_SECONDS = {sessions.TTL_SECONDS};" in html
+    assert "__SESSION_TTL_SECONDS__" not in html, "占位符残留说明注入断了"
+
+
 def test_deleting_a_session_that_never_existed_is_a_404(client):
     assert client.delete("/api/sessions/nope").status_code == 404
 
@@ -348,6 +387,91 @@ def test_the_lock_survives_an_exception_in_the_block():
     assert not sessions.tool_lock.locked()
 
 
+def test_the_thinking_level_travels_from_the_request_to_the_agent(client, monkeypatch):
+    """网页选的档位要真的落到这一轮对话上。这一跳只有关键字名对不上的风险,而拼错了
+    没人报错 —— 要等用户发一条消息才 TypeError,所以钉在这里。"""
+    seen = {}
+
+    class _Agent:
+        def chat(self, message, **kwargs):
+            seen.update(kwargs)
+            return "好"
+
+    monkeypatch.setattr(sessions, "get", lambda _sid: _Agent())
+    resp = client.post("/api/chat", json={"message": "hi", "thinking": "max"})
+    assert resp.status_code == 200
+    assert seen["effort"] == "max"
+
+
+def test_the_two_transports_normalize_their_options_the_same_way():
+    """HTTP 给的是 body(键都在,值可能是空串),WS 给的是 query(没选的键直接缺席)。
+    两种形状必须规范化成同一个值,否则同一个选择走不同的路会有不同的行为。
+
+    空串在这里就消掉:它是「用户没点过那个开关」的产物,不该流到下游被当成一个模型 id。
+    """
+    import inspect
+
+    from hot_project.agent.loop import Agent
+    from hot_project.infra import llm as llm_module
+    from hot_project.web import chat_options
+
+    from_http = chat_options.parse(
+        {"user_id": "u1", "model": "azure01", "lite": "", "thinking": "max"})
+    from_ws = chat_options.parse({"user_id": "u1", "model": "azure01", "thinking": "max"})
+    assert from_http == from_ws              # 缺键和空串必须等价
+    blank = chat_options.parse({"model": "", "lite": "", "thinking": ""})
+    assert blank.model is None and blank.lite is None    # 空串不是一个模型 id
+
+    assert chat_options.parse({}).effort == llm_module.EFFORT_DEFAULT
+    assert chat_options.parse({"thinking": "错字"}).effort == llm_module.EFFORT_DEFAULT
+    assert chat_options.parse({"thinking": "off"}).effort == llm_module.EFFORT_OFF
+
+    # kwargs() 是直接展开给 Agent.chat 的,字段名对不上要等用户真发一条消息才 TypeError
+    assert set(chat_options.parse({}).kwargs()) <= set(inspect.signature(Agent.chat).parameters)
+
+
+def test_the_websocket_carries_the_options_into_the_conversation(client, monkeypatch):
+    """浏览器默认走 WebSocket,HTTP 只是 socket 不可用时的回退 —— 而主路径此前一条断言都没有。
+    连接时 query 里的选项要一路落到这一轮对话上。"""
+    seen = {}
+
+    class _Agent:
+        def chat(self, message, **kwargs):
+            seen.update(kwargs)
+            return "好"
+
+    monkeypatch.setattr(sessions, "get", lambda _sid: _Agent())
+    with client.websocket_connect("/ws/chat/s1?thinking=max&model=azure01") as ws:
+        ws.send_text("hi")
+        for _ in range(20):                  # 进度帧可能先到,取到最终帧就停
+            if ws.receive_json().get("type") in ("reply", "error"):
+                break
+    assert seen["effort"] == "max"
+    assert seen["model"] == "azure01"
+
+
+def test_the_model_list_tells_the_page_who_can_think_deeper(client, monkeypatch):
+    """网页靠这个字段决定要不要画「更深思考」开关,空串就是不画。
+    顺带钉住这个列表永远不带出 key —— 它是唯一把平台信息交给浏览器的地方。"""
+    from hot_project.infra.llm import Api, LLMClient
+    fake = LLMClient([
+        Api(id="p1", label="P1", backend="azure", url="https://p1.test",
+            model="m", key="secret-key-must-not-leak"),
+        Api(id="p2", label="P2", backend="anthropic", url="https://p2.test",
+            model="m", key="secret-key-must-not-leak"),
+        Api(id="p3", label="P3", backend="foundry", url="https://p3.test",
+            model="gpt-5.6-terra", key="secret-key-must-not-leak"),
+    ])
+    monkeypatch.setattr(api_server.llm, "get", lambda: fake)
+    resp = client.get("/api/models")
+    models = {m["id"]: m for m in resp.json()["models"]}
+    assert models["p1"]["thinking_deeper"] == "max"
+    assert models["p1"]["thinking_deeper_label"] == "xhigh"  # 显示用平台原名,发的仍是档位名
+    assert models["p2"]["thinking_deeper"] == ""        # 没登记的后端不给这组选项
+    assert models["p3"]["thinking_deeper"] == ""        # 5.5/5.6 对话不能思考,同样不给
+    assert "secret-key-must-not-leak" not in resp.text
+
+
 def test_a_busy_server_answers_chat_with_503(client, monkeypatch):
     """钉住 Busy → 503 的翻译层真的挂在 app 上,而不只是 guard 自己会抛。"""
     monkeypatch.setattr(sessions, "TOOL_LOCK_TIMEOUT", 0.05)
@@ -400,3 +524,16 @@ def test_defusing_payloads_does_not_break_ordinary_links(report_dir):
 def test_a_web_asset_name_cannot_escape_the_web_directory():
     with pytest.raises(OSError):
         render.asset_text("../config.py")
+
+
+def test_client_side_limits_match_the_server_constants():
+    """JS 里的限制是服务端常量的手抄副本(浏览器拿不到 Python 值),这里钉住不许漂移:
+    岔开后前端会放行服务端要拒的输入,用户填完才报错。"""
+    from hot_project.infra.data_access import favorites as store
+
+    favorites_js = (config.WEB_DIR / "favorites.js").read_text(encoding="utf-8")
+    user_js = (config.WEB_DIR / "user.js").read_text(encoding="utf-8")
+
+    assert f"MAX_TAG_LEN = {store.MAX_CATEGORY_LEN};" in favorites_js
+    assert f"DESC_MAX = {favorite_service.FAVORITE_DESC_MAX};" in favorites_js
+    assert store.USER_ID_RE.pattern in user_js

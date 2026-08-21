@@ -1,4 +1,4 @@
-"""hot_project —— GitHub 热门项目发现系统(服务端重构版)。设计与计划见 docs/superpowers/。
+"""hot_project —— GitHub 热门项目发现系统(服务端重构版)。
 
 分层由 tests/test_layering.py 自动守卫,上层依赖下层,下层永不 import 上层:
 

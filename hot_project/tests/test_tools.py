@@ -117,20 +117,25 @@ def test_a_none_default_does_not_become_a_literal_parameter():
     assert clean == {}
 
 
-# ── 确认守卫 ───────────────────────────────────────────────────────
+# ── 确认守卫(在 Registry.run,不在各 handler)──────────────────────
 
 class _State:
     def __init__(self):
         self.pending_confirmation_signature = None
         self.tool_state = {}
-        self.active_repo = None
 
 
 def test_an_expensive_tool_asks_before_it_runs():
     ctx = Ctx(state=_State())
-    out = tools.registry().get("comprehensive_ranking").run(ctx, {"top_n": 20})
+    out = tools.registry().run(ctx, "comprehensive_ranking", {"top_n": 20})
     assert out["needs_confirmation"] is True
     assert "Top 20" in out["message"]
+
+
+def test_an_expensive_tool_must_declare_a_confirm_param():
+    """守卫靠 `confirm=true` 放行;昂贵工具漏声明它,模型就永远确认不了。建表时就炸。"""
+    with pytest.raises(ValueError, match="confirm"):
+        Registry([Tool("slow", "很贵的工具" * 6, _noop, expensive=True)])
 
 
 def test_the_second_call_runs_the_parameters_that_were_shown(monkeypatch):
@@ -138,25 +143,26 @@ def test_the_second_call_runs_the_parameters_that_were_shown(monkeypatch):
     seen = {}
     monkeypatch.setattr(rank_tools, "_run", lambda ctx, mode, params: seen.update(params) or {})
 
-    tool = tools.registry().get("comprehensive_ranking")
+    registry = tools.registry()
     ctx = Ctx(state=_State())
-    tool.run(ctx, {"top_n": 20, "min_star": 500})
-    tool.run(ctx, {"top_n": 5, "confirm": True})        # 模型把 20 记成了 5
+    registry.run(ctx, "comprehensive_ranking", {"top_n": 20, "min_star": 500})
+    registry.run(ctx, "comprehensive_ranking", {"top_n": 5, "confirm": True})  # 20 被记成了 5
 
     assert seen["top_n"] == 20 and seen["min_star"] == 500
 
 
 def test_confirming_clears_the_pending_state_so_the_next_run_asks_again(monkeypatch):
     monkeypatch.setattr(rank_tools, "_run", lambda ctx, mode, params: {})
-    tool = tools.registry().get("comprehensive_ranking")
+    registry = tools.registry()
     ctx = Ctx(state=_State())
-    tool.run(ctx, {"top_n": 20})
-    tool.run(ctx, {"confirm": True})
-    assert tool.run(ctx, {"top_n": 30})["needs_confirmation"] is True
+    registry.run(ctx, "comprehensive_ranking", {"top_n": 20})
+    registry.run(ctx, "comprehensive_ranking", {"confirm": True})
+    assert registry.run(ctx, "comprehensive_ranking",
+                        {"top_n": 30})["needs_confirmation"] is True
 
 
 def test_confirming_one_ranking_does_not_authorize_a_different_one(monkeypatch):
-    """确认必须认「是哪张榜」,不能只看"有没有待确认的东西"。
+    """确认必须认「是哪个工具」,不能只看"有没有待确认的东西"。
 
     待确认槽是会话全局的一个格子。只看它非空的话:先请求关键词榜(参数回显给用户看),
     再拿 `confirm=true` 去调综合榜 —— 门就开了,而且跑的是模型这次传的参数,不是屏幕上
@@ -168,10 +174,10 @@ def test_confirming_one_ranking_does_not_authorize_a_different_one(monkeypatch):
     ctx = Ctx(state=_State())
     registry = tools.registry()
 
-    shown = registry.get("keyword_ranking").run(ctx, {"keywords": ["vector db"]})
+    shown = registry.run(ctx, "keyword_ranking", {"keywords": ["vector db"]})
     assert shown["needs_confirmation"] is True
 
-    other = registry.get("comprehensive_ranking").run(ctx, {"top_n": 200, "confirm": True})
+    other = registry.run(ctx, "comprehensive_ranking", {"top_n": 200, "confirm": True})
 
     assert ran == [], f"换个工具带 confirm 就绕过了确认:{ran}"
     assert other["needs_confirmation"] is True, "综合榜应当自己再回显一次"
@@ -215,6 +221,29 @@ class _FakeGH:
 
 def _repo(full_name):
     return {"full_name": full_name, "stargazers_count": 10, "description": ""}
+
+
+# ── add_favorite:和网页 ☆ 走同一条写路径 ────────────────────────
+
+def test_agent_re_add_does_not_overwrite_a_hand_written_desc(tmp_path, monkeypatch):
+    """收藏的不变式(概要只给新收藏生成、不覆盖用户手写的那句)只在 service.favorites
+    一份 —— agent 的 add_favorite 曾绕过它直写库,重复收藏会把手写概要冲掉。"""
+    from hot_project import config
+    from hot_project.infra.data_access import favorites as store
+    from hot_project.infra.data_access import universe
+
+    monkeypatch.setattr(config, "FAVORITES_PATH", tmp_path / "favorites.json")
+    monkeypatch.setattr(universe, "load", lambda: {"a/b": {"gh_desc": "x"}})
+    monkeypatch.setattr(favorite_service, "_auto_short", lambda repo: "自动生成的概要")
+    monkeypatch.setattr(favorite_service.reports, "appearance_counts", lambda: ({}, 0))
+
+    favorite_service.update("user123", "a/b", "add", short_desc="用户手写的一句")
+
+    got = repo_tools.add_favorite(
+        Ctx(gh=_FakeGH(known={"a/b"}), user_id="user123"), {"repo": "a/b"})
+
+    assert got["ok"] and got["short_desc"] == "用户手写的一句"
+    assert store.get("user123")[0]["short_desc"] == "用户手写的一句"
 
 
 def test_an_exact_name_that_exists_is_used_as_is():

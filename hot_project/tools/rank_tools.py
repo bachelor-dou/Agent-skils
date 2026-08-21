@@ -1,17 +1,16 @@
 """三张榜的 Agent 工具:综合、新项目、关键词。
 
-出榜要先实时取全库当前 star、再为 Top N 逐个调模型写介绍,一次几分钟,所以首次调用只回显
-参数、等用户回「开始」。回显和执行必须是同一份参数:参数存进会话,`confirm=true` 复调时用
-存下的那份 —— 模型复述参数时会漂移(少个 `min_star`、把 top_n 从 20 写成 10),而用户确认
-的是屏幕上那份。
+出榜要先实时取全库当前 star、再为 Top N 逐个调模型写介绍,一次几分钟,所以三张榜都标
+`expensive=True` —— 首次调用只回显参数、等用户回「开始」,这套守卫在 `Registry.run`,
+这里只提供回显文案(`confirmation`)和真正的执行逻辑。
 
 关键词榜多一步搜索:「哪些仓库和向量数据库有关」快照和 DB 里都没有,只能真去搜一遍。
 """
 
 from __future__ import annotations
 
-import json
 import logging
+from functools import partial
 
 from .. import config
 from ..infra.data_access import universe
@@ -22,11 +21,6 @@ logger = logging.getLogger("hot_project")
 
 LABEL = {"comprehensive": "综合热榜", "hot_new": "新项目热榜", "keyword": "关键词热榜"}
 KEYWORDS_SHOWN = 6      # 确认文案里列几个关键词
-
-
-def _signature(mode: str, params: dict) -> str:
-    return json.dumps({"mode": mode, **params}, ensure_ascii=False,
-                      sort_keys=True, default=str)
 
 
 def confirmation(mode: str, params: dict) -> str:
@@ -97,28 +91,10 @@ def _run(ctx, mode: str, params: dict) -> dict:
 
 
 def make(mode: str):
-    """造一张榜的 handler。三张榜除了模式之外完全一样。"""
+    """造一张榜的 handler。三张榜除了模式之外完全一样;确认守卫在 Registry,不在这。"""
 
     def handler(ctx, args: dict) -> dict:
-        params = dict(args)
-        confirm = bool(params.pop("confirm", False))
-        signature = _signature(mode, params)
-
-        pending = ctx.state.pending_confirmation_signature if ctx.state else None
-        stored = (ctx.state.tool_state.get("pending_ranking") or {}) if ctx.state else {}
-        if not (pending and stored.get("mode") == mode and (confirm or pending == signature)):
-            if ctx.state is not None:
-                ctx.state.pending_confirmation_signature = signature
-                ctx.state.tool_state["pending_ranking"] = {"mode": mode, "params": params}
-            return {"needs_confirmation": True, "mode": mode, "params": params,
-                    "message": confirmation(mode, params)}
-
-        if "params" in stored:              # mode 已在上面比过
-            params = stored["params"]       # 用回显过的那份,见模块头部
-        if ctx.state is not None:
-            ctx.state.pending_confirmation_signature = None
-            ctx.state.tool_state.pop("pending_ranking", None)
-        return _run(ctx, mode, params)
+        return _run(ctx, mode, args)
 
     return handler
 
@@ -156,7 +132,7 @@ TOOLS = (
          (*_COMMON, _threshold(config.STAR_GROWTH_THRESHOLD),
           Param("top_n", "int", f"返回前 N,默认 {config.HOT_PROJECT_COUNT}",
                 default=config.HOT_PROJECT_COUNT, min=1, max=200)),
-         expensive=True),
+         expensive=True, confirmation=partial(confirmation, "comprehensive")),
     Tool("hot_new_ranking",
          "【新项目热榜·昂贵】只看近 created_days 天内创建的新项目,按增长排序。"
          "执行前先回显参数等用户确认『开始』。默认不产报告文件,只把榜单返回给你。",
@@ -167,7 +143,7 @@ TOOLS = (
                 default=config.DAYS_SINCE_CREATED, min=1),
           Param("top_n", "int", f"返回前 N,默认 {config.HOT_NEW_PROJECT_COUNT}",
                 default=config.HOT_NEW_PROJECT_COUNT, min=1, max=200)),
-         expensive=True),
+         expensive=True, confirmation=partial(confirmation, "hot_new")),
     Tool("keyword_ranking",
          "【关键词热榜·昂贵】按关键词搜 GitHub,再对搜到的项目算增长排序。"
          "挑词前先调 get_keyword_catalog 看预设分组表:从相关组挑关键词,"
@@ -184,5 +160,5 @@ TOOLS = (
                         "所以默认不过滤、按增长量降序返回;一般无需设置。"),
           Param("top_n", "int", f"返回前 N,默认 {config.HOT_PROJECT_COUNT}",
                 default=config.HOT_PROJECT_COUNT, min=1, max=200)),
-         expensive=True),
+         expensive=True, confirmation=partial(confirmation, "keyword")),
 )

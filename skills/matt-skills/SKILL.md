@@ -11,6 +11,8 @@ description: >-
 配套：`skills/nodejs`（npx 需要）；Claude Code 插件方式则需 `skills/claude-code`
 
 仓库：<https://github.com/mattpocock/skills>（工程实践技能集：对齐、TDD、评审、架构等）
+方式 B 由发布版 `npx skills` 安装器读取仓库默认分支 `main`，不锁 Release/tag；
+`skills@x` 是安装器版本，不是 Matt 技能版本。
 
 ## 安装（上次实测命令）
 
@@ -49,8 +51,10 @@ ls ~/.agents/skills/    # 方式 B：能看到 ask-matt、tdd 等目录
 
 - **两种方式都装了 → 每个技能出现两份** → 只保留一种：插件方式 `claude plugins` 管理，
   文件方式删 `~/.agents/skills/` 下对应目录。
+- **`npx skills@latest check` 会直接更新** → 正式更新用 `npx skills@latest update -g`。
+- **远端已删除的技能仍留在本机** → 非交互更新只告警、不删除，需人工确认后再清理。
 
 ## 更新记录
 
-- 2026-08-05 WSL：本机实测在用（方式 B，装于 `~/.agents/skills/`，含 ask-matt、tdd、
-  code-review 等）。安装命令收录自官方 README。
+- 2026-08-05 WSL：方式 B 安装到 `~/.agents/skills/`。
+- 2026-08-17 WSL：从官方 `main` 更新并核对一致；记录 `check` 会更新、远端删除不自动清理。

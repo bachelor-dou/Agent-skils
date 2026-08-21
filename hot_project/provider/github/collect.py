@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from ...infra.exceptions import RetryableError
 from ...infra.tasks import Ctx, Task
 from . import request as gh
 from .tokens import Lease

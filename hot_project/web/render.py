@@ -1,7 +1,9 @@
-"""报告 Markdown → HTML 页面(服务端渲染)。
+"""报告 HTML 输出(服务端渲染)。
 
-只产出字符串,不认识 HTTP:状态码、缓存头、路由由 `api_server` 决定。结构化榜单走主从
-布局、每个字段单独 escape;其余 .md 退回通用 Markdown 渲染,那条路径要额外清洗原始 HTML。
+只管把算好的事实拼成标签:上期对比、描述覆盖、附栏归属这些**数据**在 `view_model.py`
+里算,这里照抄。不认识 HTTP:状态码、缓存头、路由由 `api_server` 决定。结构化榜单走
+主从布局、每个字段单独 escape;其余 .md 退回通用 Markdown 渲染,那条路径要额外清洗
+原始 HTML。
 
 榜单内容全部来自外部:凡是拼进 HTML 的都过 `escape`,凡是进 href/src 的都过 `_is_safe_url`
 协议白名单 —— 这是安全边界,不是代码风格。class 名和 DOM 形状被 report.css / report.js
@@ -16,14 +18,12 @@ import logging
 import re
 from html import escape, unescape
 from pathlib import Path
-from typing import NamedTuple
 
 from markdown import Markdown
 
 from .. import config
-from ..infra.data_access import reports, universe
-from ..infra.data_access._file_io import StoreReadError
-from ..service.describe import LEGACY_SECTIONS, SECTIONS
+from ..infra.data_access import reports
+from . import view_model as vm
 
 logger = logging.getLogger("hot_project")
 
@@ -134,26 +134,6 @@ def _sanitize_urls(html_text: str) -> str:
 # 文本零件
 # ══════════════════════════════════════════════════════════════
 
-_NON_ALNUM = re.compile(r"[^a-zA-Z0-9]+")
-_BLANK_LINE = re.compile(r"\n\s*\n")
-_TOPIC_SEP = re.compile(r"[，,]")
-
-
-def _slug(text: str) -> str:
-    """锚点 id。中文被整段吃掉是有意的:id 要能直接拼进 `href="#..."` 而不必再编码。
-    清完为空时兜底成 section —— 空 id 的标题点不到。
-    """
-    return _NON_ALNUM.sub("-", text.lower()).strip("-") or "section"
-
-
-def _paragraphs(text: str) -> list[str]:
-    return [block.strip() for block in _BLANK_LINE.split(text) if block.strip()]
-
-
-def _anchor(rank: int, repo: str) -> str:
-    """详情面板的锚点 id。附栏靠它跳回正文,公式只能有一份。"""
-    return f"repo-{rank}-{_slug(repo)}"
-
 
 def _stat(label: str, value: str, kind: str = "") -> str:
     class_name = f"repo-stat repo-stat--{kind}" if kind else "repo-stat"
@@ -165,161 +145,6 @@ def _stat(label: str, value: str, kind: str = "") -> str:
         '</div>'
         '</div>'
     )
-
-
-# ══════════════════════════════════════════════════════════════
-# 上期对比 —— 蓝色「上新」徽章 + 排名变化
-# ══════════════════════════════════════════════════════════════
-
-# 报告名 = 日期 + 类型/区间/方向尾缀:2026-07-07.md / 2026-07-07_NEW.md /
-# 2026-07-07_KEY_10d.md / 2026-07-07_KEY_向量库.md(方向可含中文)
-_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})(?P<suffix>.*)\.md$")
-
-
-class _Diff(NamedTuple):
-    prev_name: str
-    prev_ranks: dict[str, int]
-    added: int
-    removed: int
-
-
-@functools.lru_cache(maxsize=16)
-def _load_cached(name: str, mtime: float) -> reports.Report | None:
-    """解析上一期报告,按 (文件名, mtime) 缓存。
-
-    mtime 必须进 key(还只能当参数传,lru_cache 只认参数):同一天的报告会被重跑覆盖,
-    只按文件名缓存会一直拿着旧一期的排名。
-    """
-    return reports.load(name)
-
-
-def _mtime(name: str) -> float | None:
-    try:
-        return (reports.directory() / name).stat().st_mtime
-    except OSError:
-        return None
-
-
-def _title_prefix(report: reports.Report) -> str:
-    """标题去掉日期部分(「GitHub 热门项目 — 2026-07-01」→「GitHub 热门项目」)。"""
-    return (report.title or "").split("—")[0].strip()
-
-
-def _prev_report(
-    name: str, current: reports.Report
-) -> tuple[str, reports.Report] | None:
-    """同尾缀(同类榜)且日期更早的最近一份报告。
-
-    还要再比一次标题前缀:旧命名规则下关键词榜和综合榜的尾缀会混叠,拿错会算出一整页假「上新」。
-    """
-    m = _NAME.match(name)
-    if not m:
-        return None
-    day, suffix = m.group("date"), m.group("suffix")
-
-    earlier: list[tuple[str, str]] = []
-    for item in reports.listing():
-        pm = _NAME.match(item.name)
-        if not pm or item.name == name:
-            continue
-        if pm.group("suffix") != suffix or pm.group("date") >= day:
-            continue
-        earlier.append((pm.group("date"), item.name))
-
-    for _, fname in sorted(earlier, reverse=True):
-        mtime = _mtime(fname)
-        if mtime is None:
-            continue
-        report = _load_cached(fname, mtime)
-        if report is None or _title_prefix(report) != _title_prefix(current):
-            continue
-        return fname, report
-    return None
-
-
-def _diff_of(name: str, current: reports.Report) -> _Diff | None:
-    prev = _prev_report(name, current)
-    if prev is None:
-        return None
-    prev_name, prev_report = prev
-    prev_ranks = {e.repo: e.rank for e in prev_report.entries}
-    now = {e.repo for e in current.entries}
-    return _Diff(
-        prev_name,
-        prev_ranks,
-        added=sum(1 for repo in now if repo not in prev_ranks),
-        removed=sum(1 for repo in prev_ranks if repo not in now),
-    )
-
-
-# ══════════════════════════════════════════════════════════════
-# 描述与 DB 实时同步
-# ══════════════════════════════════════════════════════════════
-_DESC_HEAD = re.compile(
-    r"^(?P<title>"
-    + "|".join(re.escape(t) for t in SECTIONS + LEGACY_SECTIONS)
-    + r")[:：]\s*(?P<body>.*)$"
-)
-
-_desc_cache: tuple[float, dict[str, str]] | None = None
-
-
-def _desc_index() -> dict[str, str]:
-    """{仓库: desc},只含非空的。
-
-    DB 读不出来时退回上一份索引:描述只是覆盖层,不该让整页渲染失败。
-    """
-    global _desc_cache
-    try:
-        mtime = config.DB_PATH.stat().st_mtime
-    except OSError:
-        return {}
-    if _desc_cache and _desc_cache[0] == mtime:
-        return _desc_cache[1]
-
-    try:
-        records = universe.load()
-    except StoreReadError as e:
-        logger.warning("DB 描述索引加载失败:%s", e)
-        return _desc_cache[1] if _desc_cache else {}
-
-    index: dict[str, str] = {}
-    for repo, info in records.items():
-        desc = (info.get("desc") or "").strip() if isinstance(info, dict) else ""
-        if desc:
-            index[repo] = desc
-    _desc_cache = (mtime, index)
-    logger.info("DB 描述索引已刷新:%d 条非空描述", len(index))
-    return index
-
-
-def _desc_sections(desc: str) -> dict[str, str]:
-    """DB 里「标题:内容」分段的 desc → {标题: 内容}。
-
-    标题限定为已知小节名:正文里本来就有冒号(「支持 Python:3.10 以上」),放开会把正文切碎。
-    """
-    sections: dict[str, str] = {}
-    current = ""
-    for raw in desc.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if head := _DESC_HEAD.match(line):
-            current = head.group("title")
-            sections[current] = head.group("body").strip()
-        elif current:
-            sections[current] = f"{sections[current]} {line}".strip()
-    return sections
-
-
-def section_payload(desc: str) -> list[dict]:
-    """一份 desc → 报告页那四段的 JSON,给「刷新介绍」按钮就地替换用。
-
-    切分必须和整页渲染同一套,否则刷新前后排版会不一致。
-    """
-    sections = _desc_sections(desc)
-    return [{"title": title, "paragraphs": _paragraphs(body)}
-            for title in SECTIONS if (body := sections.get(title, "").strip())]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -337,32 +162,22 @@ _LANG_COLORS = {
 }
 
 
-# 侧栏序号淡蓝的分界。60 是八期历史里「周涨 2,000+」个数的稳定区间(51-64,中位 58),
-# 61 名往后基本只剩存量大仓的慢涨。纯展示分区,不影响出榜数量。
-NAV_HOT_CUTOFF = 60
-
-TREND_ANCHOR = "trending-appendix"
-
 # 附栏条目的字段是生成端按顺序写死的,这里按名字上色,认不出的当增长口径处理
 _TREND_STAT_KINDS = {"总 Star": "star", "主语言": "language", "创建时间": "created"}
 
 
-class _Trend(NamedTuple):
-    label: str              # 周榜 / 月榜
-    panel: str              # 附栏面板(和正文面板同级,排在最后)
-    nav: str                # 侧栏入口(必须和 panel 同时出现)
-    chip: str               # 头部信息条
-    repos: frozenset[str]   # 附栏点到的仓库,正文里的那些要挂角标
-
-
 def _trend_card(entry: reports.Entry) -> str:
-    """没上榜的附栏条目 → 一张完整卡片。复用正文的 stat / panel 样式,不另起一套。"""
+    """没上榜的附栏条目 → 一张完整卡片。复用正文的 stat / panel 样式,不另起一套。
+
+    主题和介绍段落的事实来自 view_model(和正文条目同一份切分、同一层 DB 覆盖),
+    这里只管 HTML 化。
+    """
     stats = "".join(
         _stat(label, value,
               _TREND_STAT_KINDS.get(label, "growth" if "新增" in label else ""))
         for label, value in entry.metadata.items() if label != "主题标签"
     )
-    topics = [t.strip() for t in _TOPIC_SEP.split(entry.metadata.get("主题标签", "")) if t.strip()]
+    topics = vm.entry_topics(entry.metadata)
     topics_html = (
         f'<div class="repo-detail__topics">'
         + "".join(f'<span class="repo-topic">{escape(t)}</span>' for t in topics[:6])
@@ -370,9 +185,9 @@ def _trend_card(entry: reports.Entry) -> str:
     ) if topics else ""
     sections = "".join(
         f'<section class="repo-panel"><h3>{escape(s["title"])}</h3>'
-        + "".join(f"<p>{escape(p)}</p>" for p in _paragraphs(s["content"]))
+        + "".join(f"<p>{escape(p)}</p>" for p in s["paragraphs"])
         + '</section>'
-        for s in entry.sections
+        for s in vm.card_sections(entry)
     )
     link = _safe_href(entry.link or f"https://github.com/{entry.repo}")
     return (
@@ -390,38 +205,30 @@ def _trend_card(entry: reports.Entry) -> str:
     )
 
 
-def _trend_of(period: str, entries: list[reports.Entry],
-              ranks: dict[str, int]) -> _Trend:
-    """一个周期的附栏 → 一个独立面板 + 一个侧栏入口。
+def _trend_html(view: vm.TrendView) -> tuple[str, str, str]:
+    """一个周期的附栏 → (面板, 侧栏入口, 头部 chip)。
 
     每个周期单独成一个面板,也不把附栏条目混进正文面板列表:`report.js` 是按下标把面板
     和侧栏项配对的,多塞或少塞一个就整页错位。已上榜的那些只渲染成一行锚点跳回正文,
     和 Markdown 里一致。
     """
-    label = reports.PERIOD_TEXT.get(period, (period, ""))[0]  # 榜名和生成端同源
-    anchor = f"{TREND_ANCHOR}-{period}"
     rows: list[str] = []
-    listed: set[str] = set()
-
-    for entry in entries:
-        # 生成端只给了「见正文 #N」那一行 = 已上榜,没有任何字段
-        if entry.metadata:
-            rows.append(f'<li class="trend-row trend-row--full">{_trend_card(entry)}</li>')
+    for row in view.rows:
+        if row.card:
+            rows.append(f'<li class="trend-row trend-row--full">{_trend_card(row.entry)}</li>')
             continue
-        listed.add(entry.repo)
-        rank = ranks.get(entry.repo)
         target = (
-            f'<a class="trend-row__hit" href="#{_anchor(rank, entry.repo)}">榜内 #{rank}</a>'
-            if rank else '<span class="trend-row__hit">已入选本期榜单</span>'
+            f'<a class="trend-row__hit" href="#{vm.anchor(row.rank, row.entry.repo)}">榜内 #{row.rank}</a>'
+            if row.rank else '<span class="trend-row__hit">已入选本期榜单</span>'
         )
         rows.append(
             '<li class="trend-row">'
-            f'<span class="trend-row__no">T{entry.rank}</span>'
-            f'<span class="trend-row__name">{escape(entry.repo)}</span>'
+            f'<span class="trend-row__no">T{row.entry.rank}</span>'
+            f'<span class="trend-row__name">{escape(row.entry.repo)}</span>'
             f'{target}</li>'
         )
 
-    total, hits = len(entries), len(listed)
+    label, anchor, total, hits = view.label, view.anchor, view.total, view.hits
     panel = (
         f'<section class="repo-detail trend-panel" id="{anchor}">'
         '<header class="repo-detail__head">'
@@ -447,99 +254,71 @@ def _trend_of(period: str, entries: list[reports.Entry],
         f'Trending {escape(label)} {total}: 榜内 {hits} · 补全 {total - hits}'
         '</span>'
     )
-    return _Trend(label, panel, nav, chip, frozenset(listed))
-
-
-def _trending(report: reports.Report) -> list[_Trend]:
-    """报告里的每段附栏各出一块。顺序跟着报告走(周榜在前、月榜在后)。"""
-    ranks = {e.repo: e.rank for e in report.entries}
-    return [_trend_of(period, entries, ranks)
-            for period, entries in report.trending.items() if entries]
+    return panel, nav, chip
 
 
 def _structured_html(
-    report: reports.Report, diff: _Diff | None, trends: list[_Trend] | None = None
+    views: list[vm.EntryView], trend_blocks: list[tuple[str, str]]
 ) -> tuple[str, str]:
     """返回 (详情面板集合, 侧栏项目列表)。
 
-    两块 HTML 共用同一轮计算(排名差、语言、增长、上新),拆开就要来回传十个中间值,
-    而且两边算出不一样的结论时没人会发现。
+    两块 HTML 出自同一份 `EntryView`,拆开也不会算出不一样的结论 —— 事实都在
+    view-model 里算好了,这里只挑格子、拼标签、escape。
     """
     article_parts: list[str] = []
     nav_items: list[str] = []
-    prev_ranks = diff.prev_ranks if diff else None
-    desc_index = _desc_index()
-    on_trending: dict[str, list[str]] = {}      # 仓库 → 在哪几个榜上,同时上榜就两个都列
-    for item in trends or []:
-        for repo in item.repos:
-            on_trending.setdefault(repo, []).append(item.label)
 
-    for entry in report.entries:
-        metadata = entry.metadata
-        overrides = _desc_sections(desc_index.get(entry.repo, ""))
-        anchor = _anchor(entry.rank, entry.repo)
-
-        repo_link = _safe_href(entry.link or f"https://github.com/{entry.repo}")
+    for view in views:
+        repo_link = _safe_href(view.link)
         readme_link = _safe_href(f"{repo_link}#readme") if repo_link != "#" else "#"
 
-        topics = [t.strip() for t in _TOPIC_SEP.split(metadata.get("主题标签", "")) if t.strip()]
-        language = metadata.get("主语言", "")
-        status_value = metadata.get("项目状态", "")
-        growth_label = next((k for k in metadata if "增长" in k), "")
-        growth_value = reports.growth_of(metadata)
-
         stat_items: list[str] = []
-        if metadata.get("总 Star"):
-            stat_items.append(_stat("总 Star", metadata["总 Star"], "star"))
-        if growth_label and growth_value:
-            stat_items.append(_stat(growth_label, growth_value, "growth"))
-        if language:
-            stat_items.append(_stat("主语言", language, "language"))
+        if view.star:
+            stat_items.append(_stat("总 Star", view.star, "star"))
+        if view.growth_label and view.growth_value:
+            stat_items.append(_stat(view.growth_label, view.growth_value, "growth"))
+        if view.language:
+            stat_items.append(_stat("主语言", view.language, "language"))
         created_extra = (
-            f' <span class="repo-stat__tag repo-stat__tag--new" title="{escape(status_value)}">NEW</span>'
-            if status_value else ""
+            f' <span class="repo-stat__tag repo-stat__tag--new" title="{escape(view.status)}">NEW</span>'
+            if view.status else ""
         )
         stat_items.append(
             '<div class="repo-stat repo-stat--created">'
             '<div class="repo-stat__body">'
             '<span class="repo-stat__label">创建时间</span>'
-            f'<strong class="repo-stat__value">{escape(metadata.get("创建时间", "未知"))}{created_extra}</strong>'
+            f'<strong class="repo-stat__value">{escape(view.created)}{created_extra}</strong>'
             '</div>'
             '</div>'
         )
 
-        section_items: list[str] = []
-        for section in entry.sections:
-            title = section["title"]
-            content = overrides.get(title) or section["content"]
-            paragraphs = _paragraphs(content) or ["暂无补充信息，可进入仓库查看 README。"]
-            section_items.append(
-                f'<section class="repo-panel" data-section="{escape(title)}">'
-                f'<h3 id="{anchor}-{_slug(title)}">{escape(title)}</h3>'
-                + "".join(f"<p>{escape(p)}</p>" for p in paragraphs)
-                + '</section>'
-            )
+        section_items = [
+            f'<section class="repo-panel" data-section="{escape(s["title"])}">'
+            f'<h3 id="{view.anchor}-{vm.slug(s["title"])}">{escape(s["title"])}</h3>'
+            + "".join(f"<p>{escape(p)}</p>" for p in s["paragraphs"])
+            + '</section>'
+            for s in view.sections
+        ]
 
         topics_html = ""
-        if topics:
-            tags_html = "".join(f'<span class="repo-topic">{escape(t)}</span>' for t in topics[:6])
+        if view.topics:
+            tags_html = "".join(f'<span class="repo-topic">{escape(t)}</span>'
+                                for t in view.topics[:6])
             topics_html = f'<div class="repo-detail__topics">{tags_html}</div>'
 
         actions_html = (
             '<div class="repo-detail__actions">'
             f'<a class="repo-action" href="{escape(repo_link)}" target="_blank" rel="noreferrer">打开仓库 ↗</a>'
             f'<a class="repo-action repo-action--ghost" href="{escape(readme_link)}" target="_blank" rel="noreferrer">查看 README</a>'
-            f'<button type="button" class="repo-action repo-action--ghost repo-trend-btn" data-repo="{escape(entry.repo)}">📈 star 走势</button>'
+            f'<button type="button" class="repo-action repo-action--ghost repo-trend-btn" data-repo="{escape(view.repo)}">📈 star 走势</button>'
             '</div>'
             '<div class="repo-trend" hidden></div>'
         )
 
-        is_fresh = prev_ranks is not None and entry.repo not in prev_ranks
-        delta = prev_ranks[entry.repo] - entry.rank if prev_ranks is not None and not is_fresh else 0
         delta_html = nav_delta = ""
-        if delta:
-            way, word, arrow = ("up", "上升", "↑") if delta > 0 else ("down", "下降", "↓")
-            magnitude = abs(delta)
+        if view.delta:
+            way, word, arrow = ("up", "上升", "↑") if view.delta > 0 else ("down", "下降", "↓")
+            magnitude = abs(view.delta)
             delta_html = (
                 f'<span class="repo-detail__delta repo-detail__delta--{way}" '
                 f'title="较上期{word} {magnitude} 名">{arrow}{magnitude}</span>'
@@ -547,22 +326,21 @@ def _structured_html(
             nav_delta = (
                 f'<span class="repo-nav__delta repo-nav__delta--{way}">{arrow}{magnitude}</span>'
             )
-        fresh_badge = '<span class="repo-detail__fresh" title="上期报告中没有的项目">上新</span>' if is_fresh else ""
-        new_badge = '<span class="repo-detail__new" title="新项目">NEW</span>' if status_value else ""
-        fresh_attr = ' data-fresh="1"' if is_fresh else ""
-        trend_labels = on_trending.get(entry.repo, [])
+        fresh_badge = '<span class="repo-detail__fresh" title="上期报告中没有的项目">上新</span>' if view.is_fresh else ""
+        new_badge = '<span class="repo-detail__new" title="新项目">NEW</span>' if view.status else ""
+        fresh_attr = ' data-fresh="1"' if view.is_fresh else ""
         trend_badge = (
             f'<span class="repo-detail__trend" title="同时在 GitHub Trending '
-            f'{escape("、".join(trend_labels))}上">TRENDING</span>'
-            if trend_labels else ""
+            f'{escape("、".join(view.trend_labels))}上">TRENDING</span>'
+            if view.trend_labels else ""
         )
 
         article_parts.append(
-            f'<section class="repo-detail" id="{anchor}" data-repo="{escape(entry.repo)}" data-rank="{entry.rank}"{fresh_attr}>'
+            f'<section class="repo-detail" id="{view.anchor}" data-repo="{escape(view.repo)}" data-rank="{view.rank}"{fresh_attr}>'
             '<header class="repo-detail__head">'
-            f'<span class="repo-detail__rank">#{entry.rank}</span>'
+            f'<span class="repo-detail__rank">#{view.rank}</span>'
             f'{delta_html}'
-            f'<h2>{escape(entry.repo)}</h2>'
+            f'<h2>{escape(view.repo)}</h2>'
             f'{fresh_badge}'
             f'{new_badge}'
             f'{trend_badge}'
@@ -575,23 +353,20 @@ def _structured_html(
         )
 
         lang_dot = ""
-        if language:
-            color = _LANG_COLORS.get(language.strip().lower(), "#8b94a7")
-            lang_dot = f'<span class="repo-nav__lang"><i style="background:{color}"></i>{escape(language)}</span>'
-        growth_chip = f'<span class="repo-nav__growth">{escape(growth_value)}</span>' if growth_value else ""
-        new_chip = '<span class="repo-nav__new">NEW</span>' if status_value else ""
-        fresh_chip = '<span class="repo-nav__fresh">上新</span>' if is_fresh else ""
-        trend_chip = '<span class="repo-nav__trend">TRENDING</span>' if trend_labels else ""
-        search_blob = " ".join(
-            [entry.repo, language] + topics
-            + (["trending", *trend_labels] if trend_labels else [])).lower()
-        hot_class = " repo-nav__item--hot" if entry.rank <= NAV_HOT_CUTOFF else ""
+        if view.language:
+            color = _LANG_COLORS.get(view.language.strip().lower(), "#8b94a7")
+            lang_dot = f'<span class="repo-nav__lang"><i style="background:{color}"></i>{escape(view.language)}</span>'
+        growth_chip = f'<span class="repo-nav__growth">{escape(view.growth_value)}</span>' if view.growth_value else ""
+        new_chip = '<span class="repo-nav__new">NEW</span>' if view.status else ""
+        fresh_chip = '<span class="repo-nav__fresh">上新</span>' if view.is_fresh else ""
+        trend_chip = '<span class="repo-nav__trend">TRENDING</span>' if view.trend_labels else ""
+        hot_class = " repo-nav__item--hot" if view.hot else ""
         nav_items.append(
-            f'<a class="repo-nav__item{hot_class}" href="#{anchor}" data-panel="{anchor}" '
-            f'data-repo="{escape(entry.repo)}" data-search="{escape(search_blob)}"{fresh_attr}>'
-            f'<span class="repo-nav__rank">{entry.rank}</span>'
+            f'<a class="repo-nav__item{hot_class}" href="#{view.anchor}" data-panel="{view.anchor}" '
+            f'data-repo="{escape(view.repo)}" data-search="{escape(view.search_blob)}"{fresh_attr}>'
+            f'<span class="repo-nav__rank">{view.rank}</span>'
             '<span class="repo-nav__body">'
-            f'<span class="repo-nav__name">{escape(entry.repo)}</span>'
+            f'<span class="repo-nav__name">{escape(view.repo)}</span>'
             f'<span class="repo-nav__meta">{fresh_chip}{new_chip}{trend_chip}'
             f'{growth_chip}{nav_delta}{lang_dot}</span>'
             '</span>'
@@ -599,9 +374,9 @@ def _structured_html(
         )
 
     # 面板和侧栏项在 report.js 里是按下标配对的:附栏这两块只能一起加,也只能加在最后。
-    for item in trends or []:
-        article_parts.append(item.panel)
-        nav_items.append(item.nav)
+    for panel, nav in trend_blocks:
+        article_parts.append(panel)
+        nav_items.append(nav)
 
     toc_html = (
         f'<nav class="repo-nav" id="repo-nav">{"".join(nav_items)}</nav>'
@@ -681,9 +456,13 @@ def _plain_page(name: str, markdown: str) -> str:
 
 
 def _structured_page(name: str, report: reports.Report) -> str:
-    diff = _diff_of(name, report)
-    trends = _trending(report)
-    article_html, toc_html = _structured_html(report, diff, trends)
+    diff = vm.diff_of(name, report)
+    trends = vm.trending_views(report)
+    views = vm.entry_views(report, diff, trends)
+
+    rendered_trends = [_trend_html(t) for t in trends]
+    article_html, toc_html = _structured_html(
+        views, [(panel, nav) for panel, nav, _ in rendered_trends])
 
     extra_chips: list[str] = []
     if diff:
@@ -693,7 +472,7 @@ def _structured_page(name: str, report: reports.Report) -> str:
             f'上新 {diff.added} · 移出 {diff.removed}'
             '</span>'
         )
-    extra_chips.extend(item.chip for item in trends)
+    extra_chips.extend(chip for _, _, chip in rendered_trends)
 
     return page(
         _REPORT_TEMPLATE,

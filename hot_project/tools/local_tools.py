@@ -11,7 +11,7 @@ import logging
 
 from .. import config
 from ..infra.data_access import snapshots, universe
-from ..provider.github import trending as trending_api
+from ..provider.github import client as github
 from ..service import describe
 from .spec import Param, Tool
 
@@ -66,8 +66,8 @@ def recall_tool_result(ctx, args: dict) -> dict:
 
 def fetch_trending(ctx, args: dict) -> dict:
     """抓 GitHub Trending。`all` = 日/周/月三榜合并去重。"""
-    period = args.get("trending_range", trending_api.DEFAULT_PERIOD)
-    periods = trending_api.PERIODS if period == "all" else (period,)
+    period = args.get("trending_range", github.DEFAULT_PERIOD)
+    periods = github.PERIODS if period == "all" else (period,)
 
     merged: dict[str, dict] = {}
     for one in periods:
@@ -103,6 +103,6 @@ TOOLS = (
          "【Trending】获取 GitHub Trending 列表。all = 日/周/月三榜合并去重。",
          fetch_trending,
          (Param("trending_range", "enum", "daily / weekly(默认) / monthly / all",
-                default=trending_api.DEFAULT_PERIOD,
-                choices=(*trending_api.PERIODS, "all")),)),
+                default=github.DEFAULT_PERIOD,
+                choices=(*github.PERIODS, "all")),)),
 )

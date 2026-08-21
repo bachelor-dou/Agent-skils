@@ -8,15 +8,16 @@
 import json
 
 import pytest
+import requests
 
 from hot_project.infra.llm import protocol
 from hot_project.infra.llm.client import LLMClient
-from hot_project.infra.llm.schemes import Scheme, build
+from hot_project.infra.llm.api import Api, build
 
 
-def scheme(sid="p1", backend="openai", key="k", lite=()):
-    return Scheme(id=sid, label=sid, backend=backend, url=f"https://{sid}.test",
-                  model=f"{sid}-main", key=key, lite_models=list(lite))
+def api(sid="p1", backend="openai", key="k", lite=()):
+    return Api(id=sid, label=sid, backend=backend, url=f"https://{sid}.test",
+               model=f"{sid}-main", key=key, lite_models=list(lite))
 
 
 class Recorder:
@@ -117,7 +118,7 @@ def test_lite_models_split_and_dedupe():
 
 
 def test_a_platform_without_a_key_is_not_usable():
-    assert not scheme(key="").usable
+    assert not api(key="").usable
 
 
 # ── 后端参数白名单 ────────────────────────────────────────────────
@@ -125,20 +126,109 @@ def test_a_platform_without_a_key_is_not_usable():
 def test_azure_gets_max_completion_tokens_and_no_temperature():
     """发了 azure 不认的参数不是被忽略,是整个请求 400。"""
     body = protocol.payload("azure", "m", [], max_tokens=100, temperature=0.5,
-                        enable_thinking=True, thinking_budget=64)
+                            effort="high")
     assert body["max_completion_tokens"] == 100
     assert "max_tokens" not in body
     assert "temperature" not in body
-    assert "enable_thinking" not in body
+    assert "enable_thinking" not in body      # azure 只认 reasoning_effort
     assert "thinking_budget" not in body
 
 
 def test_openai_gets_the_full_parameter_set():
+    """这里只管「哪些参数该出现」。有意用 off:开了思考 max_tokens 要额外给量,
+    那笔算术归下面的配额测试,混在一起两个意图都读不清。"""
     body = protocol.payload("openai", "m", [], max_tokens=100, temperature=0.5,
-                        enable_thinking=True, thinking_budget=64)
+                            effort="off")
     assert body["max_tokens"] == 100
     assert body["temperature"] == 0.5
-    assert body["enable_thinking"] is True
+    assert body["enable_thinking"] is False
+
+
+# ── 思考档位 ──────────────────────────────────────────────────────
+
+def test_every_backend_translates_every_level():
+    """档位是网页直接传进来的键:任何一档在任何后端都必须译得出参数,否则用户选了
+    「更深思考」却发出一个不带思考的请求,而且没人报错。"""
+    for backend in ("azure", "openai"):
+        for effort in protocol.EFFORTS:
+            body = protocol.payload(backend, "m", [], effort=effort)
+            assert "reasoning_effort" in body or "enable_thinking" in body, (backend, effort)
+
+
+def test_the_openai_side_asks_for_a_budget_and_never_an_effort():
+    """百炼的 thinking_budget 和 reasoning_effort 同时出现直接报错,而两家的 effort 取值
+    还各不相同 —— 统一只发预算,这条路才对 qwen 和 glm 同时成立。"""
+    for effort in protocol.EFFORTS:
+        assert "reasoning_effort" not in protocol.payload("openai", "m", [], effort=effort)
+
+
+def test_thinking_off_is_a_real_switch_not_a_missing_parameter():
+    """`off` 必须显式发出关闭指令:漏发等于用平台默认,而两边的默认都不是「不思考」
+    (azure 5.1 起默认 none,百炼 qwen3.5 以上默认开)。"""
+    assert protocol.payload("azure", "m", [], effort="off")["reasoning_effort"] == "none"
+    assert protocol.payload("openai", "m", [], effort="off")["enable_thinking"] is False
+
+
+def test_the_batch_level_thinks_but_stays_shallower_than_a_conversation():
+    """内部批量调用(项目介绍 / 批量浓缩 / 历史压缩)走的中间档。两个条件都得成立:真的
+    在思考(这三处曾经是显式关掉,总结明显更泛),又明显浅于对话档 —— 一份报告要跑几十个
+    仓库,一次压缩卡在用户和回答之间,深度翻上去就是几十倍的等待。"""
+    assert protocol.payload("azure", "m", [], effort="medium")["reasoning_effort"] == "medium"
+    mid = protocol.payload("openai", "m", [], effort="medium")
+    assert mid["enable_thinking"] is True
+    assert mid["thinking_budget"] < protocol.payload(
+        "openai", "m", [], effort=protocol.EFFORT_HIGH)["thinking_budget"]
+
+
+def test_the_deeper_level_is_offered_under_the_platform_s_own_name():
+    """菜单上写平台自己的说法(azure 的最深档叫 xhigh),用户才对得上人家的文档。
+    但要发回来的值仍然是我们的档位名 —— 把展示名当档位传进来会被 `level()` 当错字,
+    静默退回默认档,用户点了最深却拿到默认深度。"""
+    assert protocol.deeper_label("azure", "gpt-5.4") == "xhigh"
+    assert protocol.deeper_label("azure", "gpt-5.5") == ""      # 对话不能思考,连名字都不给
+    assert protocol.deeper_label("foundry", "gpt-5.6-terra") == ""
+    assert protocol.deeper_label("openai") == protocol.EFFORT_MAX
+    assert protocol.deeper_label("gemini") == ""            # 没有更深档就没有名字
+    assert protocol.level("xhigh") == protocol.EFFORT_DEFAULT
+
+
+def test_an_empty_or_bogus_level_falls_back_to_thinking():
+    """空档位曾经等于「一个思考参数都不发」,而两边的平台默认都不是「思考」(azure 5.1 起
+    默认 none)。于是漏传就是静默不思考:回答只是变差,没有任何报错。认不出的值一律落回
+    默认档 —— 想关思考只有显式传 `off` 一条路。"""
+    for given in ("", "hgih", "extreme"):
+        assert protocol.payload("azure", "m", [], effort=given)["reasoning_effort"] == "high"
+        assert protocol.payload("openai", "m", [], effort=given)["enable_thinking"] is True
+
+
+def test_an_unknown_backend_sends_no_thinking_parameter_at_all():
+    """白名单:没登记的后端一个思考参数都不发(乱发是 400,不是被忽略)。"""
+    body = protocol.payload("gemini", "m", [], effort="max")
+    assert "enable_thinking" not in body and "reasoning_effort" not in body
+    assert protocol.deeper("gemini") == ""       # 也就不该给它那个开关
+
+
+def test_thinking_is_never_allowed_to_eat_the_answer_s_tokens():
+    """思考和正文抢同一个上限。实测过一次后果:摘要那 600 的上限被思维链一个人用光
+    (正文 0 字、finish_reason=length),而空回复在上层就是「这家失败了」—— 摘要静默
+    回退成旧的,没有任何报错。所以开了思考就要在正文之外额外给量。"""
+    deep = protocol.payload("azure", "m", [], max_tokens=16384, effort="max")
+    assert deep["max_completion_tokens"] == protocol.DEEP_MIN_TOKENS
+    assert protocol.payload("azure", "m", [], max_tokens=16384,
+                            effort="high")["max_completion_tokens"] == 16384
+    mid = protocol.payload("openai", "m", [], max_tokens=600, effort="medium")
+    assert mid["max_tokens"] == 600 + mid["thinking_budget"], "预算要叠在正文之上,不是抢它的"
+    assert protocol.payload("openai", "m", [], max_tokens=600,
+                            effort="off")["max_tokens"] == 600, "不思考就不该多给"
+    assert protocol.payload("openai", "m", [], max_tokens=16384,
+                            effort="max")["max_tokens"] == protocol.WIRE_MAX_TOKENS
+
+
+def test_the_deeper_level_reaches_the_wire(post):
+    """翻译对了没用,还得真发出去 —— `request` 忘了带档位的话上面几个测试全绿。"""
+    rec = post(_ok("hi"))
+    LLMClient([api("p1")]).chat([], effort=protocol.deeper("openai"))
+    assert rec.calls[0][1]["thinking_budget"] == 32768
 
 
 def test_azure_authenticates_with_a_header_of_its_own():
@@ -146,12 +236,39 @@ def test_azure_authenticates_with_a_header_of_its_own():
     assert protocol.headers("openai", "k")["Authorization"] == "Bearer k"
 
 
+def test_foundry_sends_an_azure_body_with_a_bearer_key():
+    """Foundry 项目端点是两个轴的组合:认证像 openai(Bearer 项目 key),请求体像 azure。
+    弄反哪一边都不是被忽略 —— 前者 401,后者 400。"""
+    assert "api-key" not in protocol.headers("foundry", "k")
+    assert protocol.headers("foundry", "k")["Authorization"] == "Bearer k"
+    body = protocol.payload("foundry", "m", [], max_tokens=100, temperature=0.5, effort="high")
+    assert body["max_completion_tokens"] == 100
+    assert "temperature" not in body and "max_tokens" not in body
+    assert body["reasoning_effort"] == "high"
+    assert protocol.deeper("foundry", "gpt-5.6-terra") == ""   # 对话带工具不能思考,不给选项
+
+
+def test_newer_azure_models_with_tools_must_not_mention_thinking_at_all():
+    """gpt-5.5 起(terra 是 5.6)chat/completions 不许「工具 + reasoning_effort」并存,
+    整个请求 400,错误原文让去 /v1/responses;5.5 连显式 none 都拒,这个键必须整个缺席。
+    对话每一步都带工具表,探活不带 —— 于是「模型测试能通、问答用不了」。
+    gpt-5.4 实测没这堵墙,不许被殃及,不带工具的调用也照常思考。"""
+    tool = [{"type": "function", "function": {"name": "t"}}]
+    for backend, model in (("azure", "gpt-5.5"), ("foundry", "gpt-5.6-terra")):
+        body = protocol.payload(backend, model, [], tools=tool, effort="high")
+        assert "reasoning_effort" not in body, (backend, model)
+        assert protocol.payload(backend, model, [],
+                                effort="high")["reasoning_effort"] == "high"
+    assert protocol.payload("azure", "gpt-5.4", [], tools=tool,
+                            effort="high")["reasoning_effort"] == "high"
+
+
 # ── 回退顺序 ──────────────────────────────────────────────────────
 
 def test_an_internal_call_falls_through_to_the_next_platform(post):
     rec = post(_Resp(status=500, text="boom"), _Resp(status=500, text="boom"),
                _Resp(status=500, text="boom"), _ok("from second"))
-    client = LLMClient([scheme("p1"), scheme("p2")])
+    client = LLMClient([api("p1"), api("p2")])
     assert client.text("hi") == "from second"
     assert rec.urls[-1] == "https://p2.test"
 
@@ -159,28 +276,28 @@ def test_an_internal_call_falls_through_to_the_next_platform(post):
 def test_a_hard_switch_never_falls_back(post):
     """用户明确选了 A,悄悄给出 B 的答案是另一回事 —— 宁可返回 None。"""
     rec = post(*[_Resp(status=500, text="boom")] * 3)
-    client = LLMClient([scheme("p1"), scheme("p2")])
+    client = LLMClient([api("p1"), api("p2")])
     assert client.chat([{"role": "user", "content": "hi"}], model_id="p1") is None
     assert set(rec.urls) == {"https://p1.test"}
 
 
 def test_asking_for_a_platform_that_is_not_configured_fails_fast(post):
     rec = post()
-    assert LLMClient([scheme("p1")]).chat([], model_id="nope") is None
+    assert LLMClient([api("p1")]).chat([], model_id="nope") is None
     assert rec.calls == []
 
 
 def test_an_empty_reply_counts_as_failure(post):
     """200 但正文为空是最难查的一类失败:不换平台的话,整批描述静默变空。"""
     rec = post(_ok(""), _ok(""), _ok(""), _ok("real"))
-    assert LLMClient([scheme("p1"), scheme("p2")]).text("hi") == "real"
+    assert LLMClient([api("p1"), api("p2")]).text("hi") == "real"
     assert rec.urls[-1] == "https://p2.test"
 
 
 def test_a_reply_with_only_tool_calls_is_not_empty(post):
     """agent 那条路上模型只回 tool_calls、正文为空是正常的,不能当失败重试。"""
     post(_ok(None, tool_calls=[{"id": "1"}]))
-    data = LLMClient([scheme("p1")]).chat([], tools=[{"type": "function"}])
+    data = LLMClient([api("p1")]).chat([], tools=[{"type": "function"}])
     assert data["choices"][0]["message"]["tool_calls"]
 
 
@@ -188,7 +305,7 @@ def test_a_stream_of_only_tool_calls_is_not_empty_either(post):
     """流式下同理,而且这是 agent 用工具时的常态。当成空响应会重试三遍、重复调工具。"""
     rec = post(_sse({"choices": [{"delta": {"tool_calls": [
         {"index": 0, "id": "c1", "function": {"name": "search", "arguments": "{}"}}]}}]}))
-    data = LLMClient([scheme("p1")]).chat([], tools=[{"type": "function"}],
+    data = LLMClient([api("p1")]).chat([], tools=[{"type": "function"}],
                                           on_delta=lambda _p: None)
     assert data["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "search"
     assert len(rec.calls) == 1
@@ -197,7 +314,7 @@ def test_a_stream_of_only_tool_calls_is_not_empty_either(post):
 def test_lite_borrows_a_sub_model_from_another_platform(post):
     """主模型选 p1,但只有 p2 配了子模型 —— 便宜活儿该借 p2 干。"""
     rec = post(_ok("cheap"))
-    client = LLMClient([scheme("p1"), scheme("p2", lite=["tiny"])])
+    client = LLMClient([api("p1"), api("p2", lite=["tiny"])])
     assert client.text("hi", lite=True, model_id="p1") == "cheap"
     assert rec.calls[0][1]["model"] == "tiny"
 
@@ -205,13 +322,13 @@ def test_lite_borrows_a_sub_model_from_another_platform(post):
 def test_lite_falls_back_to_the_main_model_when_nobody_has_one(post):
     """全都没配子模型时退回主模型:贵,但至少调得通。"""
     rec = post(_ok("x"))
-    LLMClient([scheme("p1")]).text("hi", lite=True)
+    LLMClient([api("p1")]).text("hi", lite=True)
     assert rec.calls[0][1]["model"] == "p1-main"
 
 
 def test_an_unconfigured_platform_is_skipped_without_a_request(post):
     rec = post(_ok("x"))
-    LLMClient([scheme("p1", key=""), scheme("p2")]).text("hi")
+    LLMClient([api("p1", key=""), api("p2")]).text("hi")
     assert rec.urls == ["https://p2.test"]
 
 
@@ -221,9 +338,35 @@ def test_streaming_pieces_are_emitted_live_and_joined(post):
     post(_sse({"choices": [{"delta": {"content": "你"}}]},
               {"choices": [{"delta": {"content": "好"}}]}))
     seen = []
-    data = LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    data = LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert seen == ["你", "好"]
     assert data["choices"][0]["message"]["content"] == "你好"
+
+
+def test_a_stream_without_a_charset_header_still_decodes_as_utf8(monkeypatch):
+    """硅基流动的 SSE 头是裸的 text/event-stream(没写 charset),requests 按 RFC2616 的
+    老默认猜 ISO-8859-1 —— 每个中文字被逐字节错解,整屏乱码。SSE 规范本身固定 UTF-8,
+    解码必须钉死,不看响应头的脸色。
+
+    这条有意用**真的** requests.Response(假响应对象绕过了出错的那层解码),
+    并先断言前提成立:requests 对这种头确实会猜错。"""
+    import io
+
+    sse = ('data: {"choices":[{"delta":{"content":"中文测试"}}]}\n\n'
+           "data: [DONE]\n\n").encode("utf-8")
+    resp = requests.Response()
+    resp.status_code = 200
+    resp.raw = io.BytesIO(sse)
+    resp.headers["Content-Type"] = "text/event-stream"      # 和硅基流动一致:没有 charset
+    resp.encoding = requests.utils.get_encoding_from_headers(resp.headers)  # 适配层就是这么定的
+    assert resp.encoding == "ISO-8859-1", "前提变了:requests 不再猜错的话这条测试该退役"
+
+    monkeypatch.setattr(protocol.requests, "post", lambda *a, **k: resp)
+    seen = []
+    data, _ = protocol._stream(api("p1"), "m", {"model": "m", "messages": []},
+                               seen.append, timeout=5)
+    assert "".join(seen) == "中文测试"
+    assert data["choices"][0]["message"]["content"] == "中文测试"
 
 
 def test_tool_call_fragments_merge_by_index():
@@ -249,7 +392,7 @@ def test_a_leaked_toolcall_blob_never_reaches_the_user(post):
     leak = '{"tool_uses":[{"recipient_name":"functions.x","parameters":{}}]}真正的回答'
     post(_sse({"choices": [{"delta": {"content": leak}}]}))
     seen = []
-    LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert "".join(seen) == "真正的回答"
 
 
@@ -258,7 +401,7 @@ def test_an_answer_that_legitimately_starts_with_json_is_left_alone(post):
     answer = '{"name": "demo", "version": 1}'
     post(_sse({"choices": [{"delta": {"content": answer}}]}))
     seen = []
-    LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert "".join(seen) == answer
 
 
@@ -266,7 +409,7 @@ def test_an_unclosed_opening_brace_is_still_released_at_the_end(post):
     """收流结束仍卡在闸门里(花括号始终没闭合):放行,不能把用户的内容吞了。"""
     post(_sse({"choices": [{"delta": {"content": '{"half": '}}]}))
     seen = []
-    LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert "".join(seen) == '{"half": '
 
 
@@ -275,7 +418,7 @@ def test_prose_is_emitted_without_waiting_for_the_gate(post):
     post(_sse({"choices": [{"delta": {"content": "这"}}]},
               {"choices": [{"delta": {"content": "是答案"}}]}))
     seen = []
-    LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert seen[0] == "这"          # 第一片就出去了,没等第二片
 
 
@@ -291,7 +434,7 @@ def test_a_stream_that_already_emitted_is_never_retried(post):
     """重试会让前端看到重复的文字。宁可只返回已收到的部分。"""
     rec = post(_DiesMidStream(), _sse({"choices": [{"delta": {"content": "完整答案"}}]}))
     seen = []
-    LLMClient([scheme("p1"), scheme("p2")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1"), api("p2")]).chat([], on_delta=seen.append)
     assert seen == ["半"]
     assert len(rec.calls) == 1      # 没有第二次请求,也没换平台
 
@@ -299,7 +442,7 @@ def test_a_stream_that_already_emitted_is_never_retried(post):
 def test_a_stream_that_died_before_emitting_can_still_retry(post):
     rec = post(_Resp(status=500, text="boom"), _sse({"choices": [{"delta": {"content": "好"}}]}))
     seen = []
-    LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert seen == ["好"]
     assert len(rec.calls) == 2
 
@@ -309,7 +452,7 @@ def test_malformed_sse_lines_are_skipped_not_fatal(post):
                       f'data: {json.dumps({"choices": [{"delta": {"content": "ok"}}]})}',
                       "data: [DONE]"]))
     seen = []
-    LLMClient([scheme("p1")]).chat([], on_delta=seen.append)
+    LLMClient([api("p1")]).chat([], on_delta=seen.append)
     assert seen == ["ok"]
 
 
@@ -317,5 +460,5 @@ def test_the_connection_is_returned_on_every_path(post):
     """非 200 早退这条路上忘了 close,连接池会慢慢耗干 —— 症状出现在几小时之后。"""
     dead = _Resp(status=500, text="boom")
     post(dead, dead, dead)
-    LLMClient([scheme("p1")]).chat([], on_delta=lambda _p: None)
+    LLMClient([api("p1")]).chat([], on_delta=lambda _p: None)
     assert dead.closed

@@ -8,11 +8,11 @@ from __future__ import annotations
 import logging
 
 from .. import config
-from ..common.timeutil import age_days, utc_today
-from ..service import growth as growth_calc
-from ..infra.data_access import favorites, snapshots, universe
+from ..common.timeutil import utc_today
+from ..infra.data_access import favorites, universe
 from ..service import describe
 from ..service import favorites as favorite_service
+from ..service import repo_card
 from .spec import Param, Tool
 
 logger = logging.getLogger("hot_project")
@@ -62,44 +62,16 @@ def resolve(ctx, raw: str) -> tuple[str | None, dict | None]:
     }
 
 
-def _resolved(ctx, args: dict):
-    """解析 + 记住当前项目(后续追问「它怎么样」时能接上)。"""
-    name, payload = resolve(ctx, args.get("repo"))
-    if name is not None and ctx.state is not None:
-        ctx.state.active_repo = name
-    return name, payload
-
-
 # ── repo_growth ─────────────────────────────────────────────────────
 
-def live_growth(name: str, gh, days: int) -> dict:
-    """实时 star 减窗口内最早那份快照。agent 的 repo_growth 和报告页刷新按钮共用这一份。
-
-    `star=None` 是取不到当前 star,`growth=None` 是缺基线**算不出**(不是涨了 0);
-    `growth_calc_days` 是实际跨度,可能小于请求的 `days`。
-    """
-    info = gh.info(name) or {}
-    star = info.get("stargazers_count")
-    out = {"star": star, "growth": None, "growth_basis": "", "growth_calc_days": days}
-    if star is None:
-        return out
-
-    base = snapshots.earliest_in_window(days)
-    result = growth_calc.resolve(star, base.stars.get(name), base.days.get(name),
-                                 age_days(info.get("created_at", "")), base.span)
-    if result is not None:
-        out.update(growth=result.value, growth_basis=result.basis,
-                   growth_calc_days=result.window_days)
-    return out
-
-
 def repo_growth(ctx, args: dict) -> dict:
-    name, payload = _resolved(ctx, args)
+    """增长算法在 `service.repo_card.live_growth`(和报告页刷新按钮同一份)。"""
+    name, payload = resolve(ctx, args.get("repo"))
     if payload is not None:
         return payload
 
     days = args.get("growth_calc_days", config.GROWTH_CALC_DAYS)
-    got = live_growth(name, ctx.gh, days)
+    got = repo_card.live_growth(name, ctx.gh, days)
     if got["star"] is None:
         return {"error": f"拿不到 {name} 的当前 star。"}
     if got["growth"] is None:
@@ -117,7 +89,7 @@ def repo_growth(ctx, args: dict) -> dict:
 # ── describe_project ────────────────────────────────────────────────
 
 def describe_project(ctx, args: dict) -> dict:
-    name, payload = _resolved(ctx, args)
+    name, payload = resolve(ctx, args.get("repo"))
     if payload is not None:
         return payload
 
@@ -140,7 +112,7 @@ def describe_project(ctx, args: dict) -> dict:
 
 def repo_profile(ctx, args: dict) -> dict:
     """一次给全原始证据,不做归纳 —— 品类判断、优缺点、活跃度由模型自己从这些事实里读。"""
-    name, payload = _resolved(ctx, args)
+    name, payload = resolve(ctx, args.get("repo"))
     if payload is not None:
         return payload
 
@@ -200,12 +172,11 @@ def add_favorite(ctx, args: dict) -> dict:
     if not favorites.valid_user_id(ctx.user_id):
         return {"error": "当前会话未登录,无法收藏。请在网页右上角登录后重试。"}
 
-    name, payload = _resolved(ctx, args)
+    name, payload = resolve(ctx, args.get("repo"))
     if payload is not None:
         return payload
 
-    saved = universe.load().get(name)
-    if saved is None:
+    if universe.load().get(name) is None:
         info = ctx.gh.info(name)
         if not info:
             return {"error": f"没找到仓库 {name},无法收藏。"}
@@ -214,13 +185,14 @@ def add_favorite(ctx, args: dict) -> dict:
         universe.refresh_display({name: {
             "language": info.get("language") or "",
             "topics": info.get("topics") or [], "gh_desc": info.get("description") or ""}})
-        saved = universe.load().get(name, {})
 
-    short = favorite_service.short_desc(name, saved, ctx.gh)
+    # 收藏的不变式(概要只给新收藏生成、不覆盖用户手写的那句、分类规则)统一走
+    # service.favorites —— 网页 ☆ 和这里是同一条写路径。
     try:
-        favorites.set_favorite(ctx.user_id, name, "add", short_desc=short or None)
+        items, _total = favorite_service.update(ctx.user_id, name, "add")
     except ValueError as e:
         return {"error": str(e)}
+    short = next((x.get("short_desc", "") for x in items if x.get("repo") == name), "")
     return {"ok": True, "repo": name, "short_desc": short,
             "message": f"已将 {name} 加入你的收藏。"}
 

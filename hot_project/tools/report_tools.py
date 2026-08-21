@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from ..infra.data_access import reports
+from ..service import repo_card
 from .spec import Param, Tool
 
 logger = logging.getLogger("hot_project")
@@ -56,33 +57,11 @@ def analyze_report(ctx, args: dict) -> dict:
 
 
 def star_trend(ctx, args: dict) -> dict:
-    """从历次报告拼出一个项目的 star 轨迹。只覆盖上过榜的周;没上榜的那周就缺点。"""
+    """star 轨迹。实现在 `service.repo_card`(和网页「star 走势」按钮同一份)。"""
     repo = (args.get("repo") or "").strip()
     if not repo:
         return {"error": "缺少 repo。"}
-
-    series = []
-    for item, report in reports.load_all():
-        entry = report.find(repo)
-        if entry is None:
-            continue
-        series.append({"date": str(item.day), "repo": entry.repo, "rank": entry.rank,
-                       "star": reports.number_of(entry.metadata.get("总 Star", "")),
-                       "growth": reports.growth_of(entry.metadata)})
-
-    if not series:
-        return {"repo": repo, "points": 0,
-                "message": "这个项目没在历史报告里出现过,给不出 star 轨迹。"}
-
-    first, last = series[0]["star"], series[-1]["star"]
-    return {
-        "repo": series[-1]["repo"], "points": len(series),
-        "span": f"{series[0]['date']} → {series[-1]['date']}",
-        "star_change": (last - first) if first is not None and last is not None else None,
-        "series": series,
-        "hint": "series 按时间升序,star=当期总 star、rank=当期排名;据此判断在涨/见顶/退烧。"
-                "缺的那期表示当期未上榜。",
-    }
+    return repo_card.trend(repo)
 
 
 TOOLS = (

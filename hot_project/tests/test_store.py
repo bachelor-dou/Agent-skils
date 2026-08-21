@@ -208,26 +208,18 @@ def test_display_refresh_rejects_foreign_fields(sandbox):
         universe.refresh_display({"a/b": {"star": 999}})
 
 
-# ── 拦截 3:star 刷新只动 star,且只动已存在的仓库 ──
-
-
-def test_refresh_stars_ignores_unknown_repos(sandbox):
-    sandbox({"projects": {"a/b": {"star": 100, "desc": "x"}}})
-
-    updated = universe.refresh_stars({"a/b": 150, "never/seen": 9999})
-
-    projects = _read_db()["projects"]
-    assert updated == 1
-    assert projects["a/b"] == {"star": 150, "desc": "x"}
-    assert "never/seen" not in projects
+# ── 拦截 3:没有实际变化就绝不落盘 ──
 
 
 def test_no_change_writes_nothing(sandbox):
-    """star 没变就别重写:主库 30MB,白写一次要 0.8 秒还会在 git 里留个空改动。"""
-    path = sandbox({"projects": {"a/b": {"star": 100}}})
+    """没变化就别重写:主库 30MB,白写一次要 0.8 秒还会在 git 里留个空改动。
+
+    `refresh_display` 仅补空,已有值时零变更 —— 正好逼出 `_commit` 的中止分支。
+    """
+    path = sandbox({"projects": {"a/b": {"star": 100, "language": "Go"}}})
     before = path.stat().st_mtime_ns
 
-    assert universe.refresh_stars({"a/b": 100}) == 0
+    assert universe.refresh_display({"a/b": {"language": "Rust"}}) == 0
     assert path.stat().st_mtime_ns == before, "无变化却重写了文件"
 
 
@@ -245,7 +237,6 @@ def test_corrupt_db_is_never_overwritten(sandbox):
 
     for call in (
         lambda: universe.insert_discovered({"c/d": {"star": 600}}),
-        lambda: universe.refresh_stars({"a/b": 200}),
         lambda: universe.refresh_display({"a/b": {"language": "Go"}}),
         lambda: universe.write_descriptions({"a/b": {"desc": "x"}}),
         lambda: universe.evict({"a/b"}),

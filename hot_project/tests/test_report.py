@@ -14,7 +14,7 @@ from hot_project import cron_weekly_report as weekly
 from hot_project.common.timeutil import format_day, utc_today
 from hot_project.infra.data_access import reports
 from hot_project.service import report
-from hot_project.web import render
+from hot_project.web import render, view_model
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +130,7 @@ def test_the_refreshed_sections_are_split_the_same_way_the_page_renders_them():
     desc = ("项目定位与用途:一个语音识别模型。\n续行不能丢。\n"
             "解决的问题:多语言转写。\n"
             "核心依赖与生态:模型多写的字段,报告页不展示它。\n")
-    payload = render.section_payload(desc)
+    payload = view_model.section_payload(desc)
 
     assert [s["title"] for s in payload] == ["项目定位与用途", "解决的问题"]
     assert payload[0]["paragraphs"] == ["一个语音识别模型。 续行不能丢。"]
@@ -323,7 +323,7 @@ def test_both_trending_appendices_reach_the_rendered_page():
 
     assert "GitHub Trending 周榜对照" in html
     assert "GitHub Trending 月榜对照" in html
-    assert html.count(f'id="{render.TREND_ANCHOR}-') == 2
+    assert html.count(f'id="{view_model.TREND_ANCHOR}-') == 2
     assert 'href="#repo-1-openai-whisper"' in html      # 已上榜的一行跳回正文
     assert "uber/adr" in html                           # 没上榜的整卡补全
     assert "同时在 GitHub Trending 周榜、月榜上" in html   # 两个榜都在的挂一个角标,列全

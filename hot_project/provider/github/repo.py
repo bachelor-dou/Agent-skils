@@ -53,11 +53,7 @@ async def _get(client: httpx.AsyncClient, pool: TokenPool, path: str,
                         return None
                 if resp.status_code in (404, 422):
                     return None
-                if resp.status_code == 401:
-                    raise TokenInvalidError(f"HTTP 401: {resp.text[:200]}")
-                if resp.status_code in (403, 429):
-                    raise RateLimitError(gh._reset_at(resp.headers))
-                raise RetryableError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+                gh._classify(resp)      # 其余状态 → 异常,全项目唯一的翻译点在 request 里
         except (TokenInvalidError, RateLimitError, RetryableError, httpx.RequestError) as e:
             logger.debug("仓库端点第 %d/%d 次失败:%s(%s)", attempt + 1, ATTEMPTS, url, e)
             if attempt == ATTEMPTS - 1:

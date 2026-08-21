@@ -88,6 +88,20 @@ LLM_MODELS: list[dict] = [
         "desc": "三组专用",
     },
     {
+        "id": "azure03",
+        "label": "GPT-5.6-Terra",
+        "backend": "foundry",
+        # Foundry 项目端点的 OpenAI 兼容面:项目根地址后面接 /openai/v1,不带 api-version
+        # (这条路隐式版本化)。认证是项目 key 走 Bearer,不是 Azure OpenAI 资源那套 api-key。
+        "url": "https://group03-2471-resource.services.ai.azure.com/api/projects/group03-2471/openai/v1/chat/completions",
+        # Azure 里这个字段匹配的是**部署名**,不必等于底层模型名;部署不存在会回 404。
+        "model": "gpt-5.6-terra",
+        "lite_model": "",
+        "key_env": "LLM_F_KEY",
+        "enabled": 1,
+        "desc": "Foundry 三组",
+    },
+    {
         "id": "siliconflow",
         "label": "GLM-5.1(雷达)",
         "backend": "openai",
@@ -104,7 +118,10 @@ LLM_MODELS: list[dict] = [
         "backend": "openai",
         "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         "model": "glm-5.1",
-        "lite_model": "qwen3.6-35b-a3b",
+        # 这个 key 只开了 GLM 系:所有 qwen 都是 403 Model.AccessDenied(名字没错,模型清单里
+        # 有它 —— 百炼列的是整个目录,不是这个 key 的权限)。留空让它去借别家的子模型,
+        # 否则选中这个平台时它自己的子模型会排第一,每次摘要先白撞一个 403 再回退
+        "lite_model": "",
         "key_env": "LLM_D_KEY",
         "enabled": 1,
         "desc": "开源个人",

@@ -32,21 +32,26 @@ class Agent:
         self.tools = tools or default_registry()
         self.session = Session()
         self.ctx = Ctx(gh=gh if gh is not None else github.shared(), state=self.session)
-        self._model_id = ""
-        self._lite_id = ""
+        self._model_id: str | None = None
+        self._lite_id: str | None = None
+        self._effort = llm.EFFORT_DEFAULT
         self._on_delta = None
 
     # ── 一轮对话 ────────────────────────────────────────────────
 
     def chat(self, message: str, *, progress=None, user_id: str = "",
-             model: str = "", lite: str = "", on_delta=None) -> str:
+             model: str | None = None, lite: str | None = None,
+             effort: str = llm.EFFORT_DEFAULT, on_delta=None) -> str:
         if len(message) > MESSAGE_MAX_CHARS:
             return f"消息过长(超过 {MESSAGE_MAX_CHARS} 字符),请缩短后重试。"
 
         self.ctx.progress = progress
         self.ctx.user_id = user_id
-        self._model_id = model or ""
-        self._lite_id = lite or ""
+        # 空串和非法档位在 `web.chat_options` 就消掉了,认不出的档位由 LLM 层落回默认档;
+        # 这里不再兜一遍 —— 同一件事兜两处,迟早有一处忘了改
+        self._model_id = model
+        self._lite_id = lite
+        self._effort = effort
         self._on_delta = on_delta
 
         self.session.offload_old_results()      # 卸载上一轮的大结果,不碰本轮
@@ -72,7 +77,7 @@ class Agent:
 
     def _ask(self, *, tools=None) -> dict | None:
         data = self.llm.chat(list(self.session.messages), tools=tools,
-                             model_id=self._model_id or None,
+                             model_id=self._model_id, effort=self._effort,
                              on_delta=self._round_delta())
         if data is None:
             return None
@@ -94,10 +99,11 @@ class Agent:
         return confirm
 
     def run_tool(self, name: str, raw_args: str) -> dict:
-        """跑一个工具。任何失败都变成一个 dict 回给模型 —— 它能读懂并自己改。"""
-        tool = self.tools.get(name)
-        if tool is None:
-            return {"error": f"没有这个工具:{name}", "available": self.tools.names()}
+        """跑一个工具。任何失败都变成一个 dict 回给模型 —— 它能读懂并自己改。
+
+        校验、确认守卫、分发都在 `Registry.run`;这里只管模型给的 JSON 长什么样,
+        以及不让工具异常掀翻会话。
+        """
         try:
             args = json.loads(raw_args) if raw_args else {}
             if not isinstance(args, dict):
@@ -106,14 +112,8 @@ class Agent:
             return {"error": "tool arguments 必须是合法的 JSON object",
                     "raw": str(raw_args)[:300], "retryable": True}
 
-        clean, errors = tool.validate(args)
-        if errors:
-            return {"error": "参数校验失败,请按 invalid_arguments 修正后重试。",
-                    "invalid_arguments": errors, "retryable": True}
-
-        logger.info("[Agent] 调用 %s(%s)", name, clean)
         try:
-            return tool.run(self.ctx, clean)
+            return self.tools.run(self.ctx, name, args)
         except Exception as e:      # noqa: BLE001 —— 工具崩了要让模型知道,不能掀翻会话
             logger.exception("[Agent] 工具 %s 执行异常", name)
             return {"error": f"工具执行异常:{e}"}
@@ -158,9 +158,10 @@ class Agent:
             elif message.get("role") == "assistant" and content:
                 parts.append(f"[助手] {content[:400]}")
 
+        # medium:摘要要判断哪些细节后面还用得上,不思考就容易丢关键前提;但它卡在用户
+        # 发消息和模型回答之间,用 high 会让每次压缩都变成一次可感知的停顿
         text = self.llm.text(SUMMARIZE_PROMPT + "\n".join(parts), lite=True,
-                             model_id=self._model_id or None,
-                             lite_id=self._lite_id or None,
+                             model_id=self._model_id, lite_id=self._lite_id,
                              max_tokens=SUMMARY_MAX_TOKENS, temperature=0.1,
-                             enable_thinking=False)
+                             effort=llm.EFFORT_MEDIUM)
         return text or self.session.summary

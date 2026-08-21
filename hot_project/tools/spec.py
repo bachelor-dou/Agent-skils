@@ -9,10 +9,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger("hot_project")
 
 REQUIRED = object()     # default 取这个值 = 必填
 
@@ -76,7 +80,8 @@ class Tool:
     desc: str
     run: Callable[[Any, dict], dict]        # (ctx, args) -> dict
     params: tuple[Param, ...] = ()
-    expensive: bool = False                 # 昂贵工具执行前要用户确认
+    expensive: bool = False                 # 昂贵工具执行前要用户确认,守卫在 Registry.run
+    confirmation: Callable[[dict], str] | None = None   # 昂贵工具的参数回显文案
 
     def __post_init__(self) -> None:
         names = [p.name for p in self.params]
@@ -134,8 +139,20 @@ class Ctx:
     progress: Callable[[int, str], None] | None = None
 
 
+_PENDING = "pending_confirmation"       # tool_state 里的待确认槽,会话全局只有一格
+
+
+def _signature(name: str, params: dict) -> str:
+    return json.dumps({"tool": name, **params}, ensure_ascii=False,
+                      sort_keys=True, default=str)
+
+
 class Registry:
-    """工具表。名字 → 工具,分发只此一处。"""
+    """工具表。名字 → 工具,分发和执行策略只此一处。
+
+    `run` 是唯一入口:校验 → (昂贵工具)确认守卫 → 执行。守卫放在这而不是各 handler 里,
+    `expensive=True` 才是真约束 —— 标了就一定先回显参数等用户确认,忘写状态机这种事不存在。
+    """
 
     def __init__(self, tools: Sequence[Tool] = ()) -> None:
         self._tools: dict[str, Tool] = {}
@@ -145,7 +162,55 @@ class Registry:
     def add(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"工具重名:{tool.name}")
+        if tool.expensive and not any(p.name == "confirm" and p.kind == "bool"
+                                      for p in tool.params):
+            raise ValueError(f"昂贵工具 {tool.name} 没声明 confirm 参数,模型将永远无法确认执行")
         self._tools[tool.name] = tool
+
+    def run(self, ctx: Ctx, name: str, args: dict) -> dict:
+        """跑一个工具。任何失败都变成一个 dict 回给调用方(模型能读懂并自己改)。"""
+        tool = self._tools.get(name)
+        if tool is None:
+            return {"error": f"没有这个工具:{name}", "available": self.names()}
+        clean, errors = tool.validate(args)
+        if errors:
+            return {"error": "参数校验失败,请按 invalid_arguments 修正后重试。",
+                    "invalid_arguments": errors, "retryable": True}
+        logger.info("[Tools] 调用 %s(%s)", name, clean)
+        if tool.expensive:
+            return self._run_confirmed(ctx, tool, clean)
+        return tool.run(ctx, clean)
+
+    def _run_confirmed(self, ctx: Ctx, tool: Tool, params: dict) -> dict:
+        """昂贵工具的确认守卫:首次调用只回显参数,等用户回「开始」。
+
+        回显和执行必须是同一份参数:参数存进会话,`confirm=true` 复调时用存下的那份 ——
+        模型复述参数时会漂移(少个 `min_star`、把 top_n 从 20 写成 10),而用户确认的是
+        屏幕上那份。确认还必须认「是哪个工具」,换个工具带 confirm 不能开门。
+        """
+        confirm = bool(params.pop("confirm", False))
+        signature = _signature(tool.name, params)
+        state = ctx.state
+
+        pending = state.pending_confirmation_signature if state else None
+        stored = (state.tool_state.get(_PENDING) or {}) if state else {}
+        if not (pending and stored.get("tool") == tool.name
+                and (confirm or pending == signature)):
+            if state is not None:
+                state.pending_confirmation_signature = signature
+                state.tool_state[_PENDING] = {"tool": tool.name, "params": params}
+            message = (tool.confirmation(params) if tool.confirmation
+                       else f"将执行【{tool.name}】(昂贵操作),参数:{params}。"
+                            "确认无误请回复『开始』。")
+            return {"needs_confirmation": True, "tool": tool.name,
+                    "params": params, "message": message}
+
+        if "params" in stored:              # tool 已在上面比过
+            params = stored["params"]       # 用回显过的那份,见 docstring
+        if state is not None:
+            state.pending_confirmation_signature = None
+            state.tool_state.pop(_PENDING, None)
+        return tool.run(ctx, params)
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

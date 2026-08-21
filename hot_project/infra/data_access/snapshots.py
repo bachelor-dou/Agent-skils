@@ -6,7 +6,7 @@
 
 GitHub 已把 star 时间戳限权给仓库 admin,二分法和采样外推都报废,窗口增长只能靠
 「实时 star − 窗口内最早那份快照里的 star」。快照只出**基线**这一件事,当前值一律实时取
-(见 `tools/ranking.py`)。`not_found` 是 GitHub 明确查不到的名字
+(见 `service/ranking.py`)。`not_found` 是 GitHub 明确查不到的名字
 (改名/删库/转私有),淘汰判定直接用它;读取侧兼容没有 meta 的旧扁平格式(见 `load_stars`)。
 """
 
@@ -167,6 +167,15 @@ class Baseline(NamedTuple):
     days: dict[int | str, int]
     oldest: date | None
     span: int
+
+    def get(self, name: str, repo_id: int | None = None) -> tuple[int | None, int | None]:
+        """查一个仓库的 `(最早 star, 实际天数)`,查不到是 `(None, None)`。
+
+        「有 id 按 id 查,没 id 按名字」这条键规则只住在这里 —— 消费方别自己拼
+        key:改过名的仓库只有按 id 才查得到,只按名字查会静默丢基线。
+        """
+        key = repo_id or name
+        return self.stars.get(key), self.days.get(key)
 
 
 def earliest_in_window(days: int, today: date | None = None) -> Baseline:

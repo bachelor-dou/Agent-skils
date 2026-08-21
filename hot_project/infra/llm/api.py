@@ -1,4 +1,4 @@
-"""模型目录 → 可调用的方案表。
+"""模型目录 → 可直接调用的 API 表。
 
 `config.LLM_MODELS` 是手写的**声明**(字段可能缺、`enabled` 可能写成 `"0"`),这里把它
 归一成下游能无条件依赖的结构。归一化放在 infra 而不是 config,方向才是单一的:
@@ -13,11 +13,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ...common.env import truthy
+from . import protocol
 
 
 @dataclass
-class Scheme:
-    """一个可以直接拿去发请求的平台。
+class Api:
+    """一个可以直接拿去发请求的 LLM API 接入(平台条目,如 azure01 / aliyun02)。
 
     `key` 是明文,所以**不该**被整体序列化或打日志 —— 给前端列模型走 `public()`。
     """
@@ -37,10 +38,16 @@ class Scheme:
         return bool(self.key and self.url)
 
     def public(self) -> dict:
-        """给前端的视图:没有 key。"""
+        """给前端的视图:没有 key。
+
+        `thinking_deeper` 直接给「更深那一档要传什么」,空串就是这家没有 —— 前端照抄回来
+        当参数,不用自己拼档位名。`_label` 是同一档在这家的原名,只用来显示。
+        """
         return {
             "id": self.id, "label": self.label, "model": self.model,
             "lite_models": list(self.lite_models), "desc": self.desc,
+            "thinking_deeper": protocol.deeper(self.backend, self.model),
+            "thinking_deeper_label": protocol.deeper_label(self.backend, self.model),
         }
 
 
@@ -58,12 +65,12 @@ def _lite_names(raw: object) -> list[str]:
     return out
 
 
-def build(catalog: list[dict], resolve_key) -> list[Scheme]:
-    """模型目录 → 方案表。`resolve_key(env_name) -> str` 负责把机密取进来。
+def build(catalog: list[dict], resolve_key) -> list[Api]:
+    """模型目录 → API 表。`resolve_key(env_name) -> str` 负责把机密取进来。
 
     `enabled=0` 和缺 id 的条目不出现。id 撞车**报错**:它是选择链路的键,重复会让「选 A 调到 B」静默发生。
     """
-    out: list[Scheme] = []
+    out: list[Api] = []
     seen: set[str] = set()
     for entry in catalog:
         if not truthy(entry.get("enabled", True)):
@@ -77,7 +84,7 @@ def build(catalog: list[dict], resolve_key) -> list[Scheme]:
                 f"(azure01 / aliyun02),不要按模型名命名。"
             )
         seen.add(mid)
-        out.append(Scheme(
+        out.append(Api(
             id=mid,
             label=str(entry.get("label") or mid),
             backend=str(entry.get("backend") or "openai"),

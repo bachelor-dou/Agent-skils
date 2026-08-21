@@ -18,6 +18,9 @@ mkdir -p "$LOG_DIR"
 
 # 暂存已跟踪的本地改动。
 STASHED=0
+# 拉取卡住被 Ctrl+C / kill 时把改动放回来:实测中断发生在 stash 之后、pop 之前,
+# 改动会困在 stash 里,之后工作区看着"干净"极易误以为改动丢了。
+trap '[ "$STASHED" = 1 ] && git stash pop -q && echo "已恢复暂存改动(中断退出)"' INT TERM
 if ! git diff --quiet || ! git diff --cached --quiet; then
     git stash push -q -m "pull_restart $(date '+%F %T')"
     STASHED=1
@@ -26,10 +29,11 @@ fi
 
 # 快进拉取并恢复本地改动。--progress 让慢网络下能看到接收进度，避免误以为卡死。
 echo "正在从远程拉取更新…（网络慢时请耐心等待，下方会显示进度）"
-git pull --ff-only --progress || { echo "拉取失败(有未推送提交或已分叉),未重启。"; [ "$STASHED" = 0 ] || git stash pop -q; exit 1; }
+git pull --ff-only --progress || { echo "拉取失败(有未推送提交或已分叉),未重启。"; [ "$STASHED" = 0 ] || { git stash pop -q; STASHED=0; }; exit 1; }
 echo "已拉取合并"
 if [ "$STASHED" = 1 ]; then
     git stash pop -q || { echo "stash pop 冲突,改动仍在 git stash list,未重启。"; exit 1; }
+    STASHED=0
     echo "已恢复暂存改动"
 fi
 

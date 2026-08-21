@@ -1,6 +1,6 @@
 """LLM 出站 —— 多平台目录、顺序回退、流式。
 
-    schemes.py   目录归一化 + key 落地(config 只声明 key_env,真值在这里取)
+    api.py       目录归一化 + key 落地(config 只声明 key_env,真值在这里取);一个 Api = 一个平台接入
     protocol.py  线上协议:请求头 / 请求体 / 一次请求(含 SSE)。`if backend ==` 只在这里
     client.py    调用顺序:内部调用顺序回退,网页硬切换不回退
 
@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+from .api import Api, build
 from .client import LLMClient
-from .schemes import Scheme, build
+from .protocol import EFFORT_DEFAULT, EFFORT_MEDIUM, EFFORT_OFF, EFFORTS, level
 
-__all__ = ["LLMClient", "Scheme", "get", "build_from_config"]
+__all__ = ["LLMClient", "Api", "get", "build_from_config",
+           "EFFORTS", "EFFORT_OFF", "EFFORT_MEDIUM", "EFFORT_DEFAULT", "level"]
 
 _shared: LLMClient | None = None
 

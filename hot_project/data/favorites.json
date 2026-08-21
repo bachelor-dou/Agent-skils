@@ -2,11 +2,36 @@
   "users": {
     "dou": [
       {
+        "repo": "harry0703/MoneyPrinterTurbo",
+        "favorited_at": "2026-08-19T11:17:57Z",
+        "source_report": "2026-08-19.md",
+        "short_desc": "利用AI大模型一键生成高清短视频",
+        "category": "娱乐类工具",
+        "subcategory": ""
+      },
+      {
+        "repo": "ZhuLinsen/daily_stock_analysis",
+        "favorited_at": "2026-08-12T09:37:14Z",
+        "source_report": "2026-08-12.md",
+        "short_desc": "A/H/美股智能分析器，集行情、新闻、LLM决策仪表盘与推送于一体。",
+        "category": "娱乐类工具",
+        "subcategory": ""
+      },
+      {
+        "repo": "brightdata/cli",
+        "favorited_at": "2026-08-12T06:50:27Z",
+        "source_report": "2026-08-12.md",
+        "short_desc": "Bright Data 官方命令行工具，支持网页抓取、结构化搜索、浏览器控制、采集流程管理与 MCP 接入。",
+        "category": "效率工具",
+        "subcategory": ""
+      },
+      {
         "repo": "firecrawl/anydoc",
         "favorited_at": "2026-08-06T09:29:59Z",
         "source_report": "2026-08-06.md",
         "short_desc": "将Word、PDF等办公文档快速统一转换为干净的Markdown，支持CLI、Node/Python和浏览器离线使用。",
-        "category": "效率工具"
+        "category": "文档处理类",
+        "subcategory": ""
       },
       {
         "repo": "yc-software/qm",
@@ -20,7 +45,8 @@
         "favorited_at": "2026-08-05T06:13:21Z",
         "source_report": "2026-08-05.md",
         "short_desc": "PDF 检查、分类与文本提取的 Rust 库，可智能识别扫描件和文本型 PDF。",
-        "category": "效率工具"
+        "category": "文档处理类",
+        "subcategory": ""
       },
       {
         "repo": "mattpocock/skills",
@@ -188,7 +214,8 @@
         "favorited_at": "2026-07-19T12:43:13Z",
         "source_report": "2026-07-15.md",
         "short_desc": "供 AI 读写并自动化处理 Word、Excel、PPT",
-        "category": "效率工具"
+        "category": "文档处理类",
+        "subcategory": ""
       },
       {
         "repo": "multica-ai/multica",
@@ -202,7 +229,8 @@
         "favorited_at": "2026-07-16T02:38:25Z",
         "source_report": "2026-07-01.md",
         "short_desc": "单次处理长文档的 OCR 解析引擎。",
-        "category": "效率工具"
+        "category": "文档处理类",
+        "subcategory": ""
       }
     ]
   }

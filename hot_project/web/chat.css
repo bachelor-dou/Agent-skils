@@ -1100,6 +1100,11 @@ h1 {
   visibility: visible;
 }
 
+/* 思考那两行的对钩用浅绿：和模型行的橙色对钩区分开，它标的是深度，不是选中哪个平台 */
+.model-option__tick--think {
+  color: #6abf7a;
+}
+
 /* 轻量瞬时提示（模型不可用等一次性告知）：屏幕底部居中，几秒自动淡出 */
 .app-toast {
   position: fixed;
@@ -1136,6 +1141,16 @@ h1 {
 /* 当前已展开子菜单的主模型行高亮 */
 .model-option.is-open {
   background: rgba(215, 136, 58, 0.14);
+}
+
+/* 菜单内分组标题（思考开关与模型列表之间的分隔） */
+.model-menu__group {
+  margin-top: 6px;
+  padding: 8px 10px 4px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 textarea {

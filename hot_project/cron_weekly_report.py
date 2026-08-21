@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import sys
 
@@ -24,8 +23,6 @@ from .common.timeutil import format_day, utc_today
 from .infra import notify
 from .infra.data_access import reports
 from .provider.github import client as github
-from .provider.github import request as gh_request
-from .provider.github import trending
 from .service import ranking
 from .service import report as report_tool
 
@@ -78,14 +75,6 @@ def push(result: dict) -> None:
     notify.send(f"GitHub 周报 {format_day(utc_today())}", "\n\n".join(parts))
 
 
-async def _fetch_trending(period: str) -> list[dict]:
-    client = gh_request.build_client()
-    try:
-        return await trending.fetch_trending(client, period)
-    finally:
-        await client.aclose()
-
-
 def attach_trending(result: dict) -> None:
     """报告尾部接周榜和月榜两段 Trending 对照。
 
@@ -97,7 +86,7 @@ def attach_trending(result: dict) -> None:
         return
     for period in TRENDING_PERIODS:
         try:
-            rows = asyncio.run(_fetch_trending(period))
+            rows = github.shared().trending(period)
         except Exception:       # noqa: BLE001
             logger.exception("Trending %s 抓取失败,本期没有这段对照附栏。", period)
             continue

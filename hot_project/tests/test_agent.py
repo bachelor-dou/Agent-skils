@@ -12,6 +12,7 @@ from hot_project.agent import history
 from hot_project.agent.history import Session
 from hot_project.agent.loop import Agent
 from hot_project.agent.prompts import SYSTEM_PROMPT
+from hot_project.infra import llm as llm_module
 from hot_project.tools.spec import Param, Registry, Tool
 
 
@@ -134,14 +135,18 @@ class _LLM:
     def __init__(self, *replies):
         self.replies = list(replies)
         self.calls = []
+        self.kwargs = []
+        self.text_kwargs = []
 
     def chat(self, messages, **kwargs):
         self.calls.append(messages)
+        self.kwargs.append(kwargs)
         if not self.replies:
             return {"choices": [{"message": {"content": "没词了"}}]}
         return {"choices": [{"message": self.replies.pop(0)}]}
 
     def text(self, prompt, **kwargs):
+        self.text_kwargs.append(kwargs)
         return "摘要"
 
 
@@ -151,6 +156,28 @@ def _call(name, args="{}", cid="c1"):
 
 def _agent(llm, *tools):
     return Agent(client=llm, tools=Registry(tools), gh=object())
+
+
+def test_the_thinking_level_reaches_the_model_call():
+    """档位得真传到调用上,不传时是默认档(思考)。
+
+    非法值不在这里兜 —— 那是 `protocol.level` 的活(见 test_llm)。Agent 只负责转交,
+    同一件事兜两处,迟早有一处忘了改。"""
+    llm = _LLM({"content": "好"})
+    _agent(llm).chat("问", effort="max")
+    assert llm.kwargs[0]["effort"] == "max"
+
+    llm = _LLM({"content": "好"})
+    _agent(llm).chat("问")
+    assert llm.kwargs[0]["effort"] == llm_module.EFFORT_DEFAULT
+
+
+def test_compressing_the_history_thinks_at_the_batch_depth():
+    """压缩要判断哪些细节后面还用得上,不思考就容易丢掉关键前提(这里曾经是显式关掉的)。
+    但它卡在用户发消息和模型回答之间,用对话那一档会让每次压缩都变成一次可感知的停顿。"""
+    llm = _LLM()
+    _agent(llm)._summarize([{"role": "user", "content": "问"}])
+    assert llm.text_kwargs[0]["effort"] == llm_module.EFFORT_MEDIUM
 
 
 def test_a_plain_answer_needs_no_tools():
@@ -220,9 +247,9 @@ def test_even_a_crash_in_the_validator_still_leaves_a_reply_for_every_call():
 
 def test_a_tool_asking_for_confirmation_short_circuits_the_turn():
     """确认文案必须原样回给用户,不经模型转述 —— 转述会漏参数、会改数字。"""
-    tool = Tool("rank", "昂贵的榜单工具" * 6,
-                lambda ctx, a: {"needs_confirmation": True, "message": "将执行【综合热榜】"},
-                expensive=True)
+    tool = Tool("rank", "昂贵的榜单工具" * 6, lambda ctx, a: {"ran": True},
+                (Param("confirm", "bool", "确认", default=False),),
+                expensive=True, confirmation=lambda params: "将执行【综合热榜】")
     llm = _LLM(_call("rank"), {"content": "模型自己又说了一遍"})
     assert _agent(llm, tool).chat("出个榜") == "将执行【综合热榜】"
     assert len(llm.calls) == 1      # 没有第二次请求

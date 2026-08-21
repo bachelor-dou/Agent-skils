@@ -14,7 +14,7 @@ import pytest
 
 from hot_project import cron_daily_snapshot as cron
 from hot_project.infra.exceptions import RateLimitError, RetryableError, TokenInvalidError
-from hot_project.infra.tasks import TaskPool
+from hot_project.infra.tasks import Ctx, TaskPool
 from hot_project.provider.github import request as gh
 from hot_project.provider.github import collect
 from hot_project.provider.github import repo as repo_api
@@ -280,6 +280,22 @@ async def test_a_lone_null_without_not_found_counts_as_unanswered_not_as_deleted
     )
     assert sink.missing == set(), "没问到被当成了没了 —— 这条路通向清库"
     assert sink.failed == {"a/ghost"}
+
+
+async def test_the_unsplittable_null_guard_raises_retryable_not_nameerror(monkeypatch):
+    """守住 `StarBatch.run` 里 mid==0 的防御分支。
+
+    `fetch_stars` 的契约是单名批绝不返回 None,所以这条分支走 HTTP 接口触发不到 ——
+    也正因如此,它曾漏掉 `RetryableError` 的 import 而没人发现:一旦契约漂移,
+    触发时抛的会是 NameError 而不是可重试异常。这里直接喂 None 钉死它。
+    """
+    async def null_stars(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(collect.gh, "fetch_stars", null_stars)
+    batch = collect.StarBatch(collect.Harvest(), client=None, names=["a/one"])
+    with pytest.raises(RetryableError):
+        await batch.run(Ctx(token=None, submit=lambda t: None))
 
 
 async def test_an_incident_shaped_error_also_counts_as_unanswered():

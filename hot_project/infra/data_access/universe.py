@@ -46,6 +46,17 @@ def load() -> dict[str, dict]:
     return projects if isinstance(projects, dict) else {}
 
 
+def mtime() -> float | None:
+    """库文件最后落盘时间(Unix 秒);文件还不存在时为 None。
+
+    给调用方做缓存失效用 —— DB 文件在哪只有本层知道,别处不该摸 `config.DB_PATH`。
+    """
+    try:
+        return config.DB_PATH.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _check_fields(records: dict[str, dict], allowed: frozenset[str], who: str) -> None:
     for name, info in records.items():
         if not isinstance(info, dict):
@@ -79,8 +90,8 @@ def insert_discovered(records: dict[str, dict]) -> list[str]:
     """每日发现:把还不在 DB 里的仓库插进来,**已有条目一律不碰**。返回真正插进去的名字。
 
     「不碰已有」是正确性:发现阶段拿的是搜索粗字段,覆盖会盖掉后来补的完整数据。
-    更新 star 走 `refresh_stars`。判重在事务内,所以「哪些是新的」只有这里知道。
-    判重先看名字、再看 `id`:同一个 id 换了名字 → 改挂新名,不插重复。
+    已有仓库的 star 由每日快照负责,DB 不提供覆写接口。判重在事务内,所以「哪些是
+    新的」只有这里知道。判重先看名字、再看 `id`:同一个 id 换了名字 → 改挂新名,不插重复。
     """
     if not records:
         return []
@@ -110,27 +121,6 @@ def insert_discovered(records: dict[str, dict]) -> list[str]:
             logger.info("DB 发现阶段按 id 识别改名:%d 条已改挂新名。", renamed)
         _commit(tx, len(inserted) + renamed, "新增仓库")
         return inserted
-
-
-def refresh_stars(stars: dict[str, int]) -> int:
-    """覆写已有仓库的 star。不认识的仓库跳过(要入库请走 `insert_discovered`)。
-
-    **目前没有生产调用方** —— 当前 star 由快照负责。和 `insert_discovered` 分开是因为语义
-    相反,合成 upsert 就等于取消了那条「不碰已有」的保护。
-    """
-    if not stars:
-        return 0
-
-    with transaction(config.DB_PATH, default=_empty()) as tx:
-        projects = _open_projects(tx)
-        updated = 0
-        for name, star in stars.items():
-            info = projects.get(name)
-            if not isinstance(info, dict) or info.get("star") == star:
-                continue
-            info["star"] = star
-            updated += 1
-        return _commit(tx, updated, "star 刷新")
 
 
 def refresh_display(items: dict[str, dict]) -> int:
@@ -229,7 +219,7 @@ def apply_renames(renames: dict[str, tuple[str, int | None]]) -> int:
 def evict(names: set[str] | frozenset[str]) -> list[str]:
     """删除仓库,返回真正删掉的名字(已排序)。
 
-    该删谁由 `core/evict.py` 判定,这里只执行。没有宽限期和保护名单:重新涨过门槛会被再收回来。
+    该删谁由 `cron_daily_snapshot.decide` 判定,这里只执行。没有宽限期和保护名单:重新涨过门槛会被再收回来。
     """
     if not names:
         return []

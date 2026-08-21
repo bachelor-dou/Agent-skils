@@ -11,29 +11,29 @@ from __future__ import annotations
 import logging
 
 from . import protocol
-from .schemes import Scheme
+from .api import Api
 
 logger = logging.getLogger("hot_project")
 
 
 class LLMClient:
-    def __init__(self, schemes: list[Scheme]) -> None:
-        self.schemes = list(schemes)
+    def __init__(self, apis: list[Api]) -> None:
+        self.apis = list(apis)
 
-    def usable(self) -> list[Scheme]:
-        return [s for s in self.schemes if s.usable]
+    def usable(self) -> list[Api]:
+        return [a for a in self.apis if a.usable]
 
     def configured(self) -> bool:
         """有没有任何一个平台能用。没有就别走 LLM 那条路,直接回退。"""
         return bool(self.usable())
 
-    def resolve_lite(self, lite_id: str) -> tuple[Scheme, str] | None:
+    def resolve_lite(self, lite_id: str) -> tuple[Api, str] | None:
         """`"平台id:子模型名"` → `(平台, 子模型名)`。对不上返回 None。"""
         pid, _, name = lite_id.partition(":")
         sel = next((s for s in self.usable() if s.id == pid), None)
         return (sel, name) if sel and name in sel.lite_models else None
 
-    def _lite_order(self, preferred: Scheme | None) -> list[tuple[Scheme, str]]:
+    def _lite_order(self, preferred: Api | None) -> list[tuple[Api, str]]:
         """lite「自动」的候选顺序:先主模型所在平台的子模型,再按目录顺序借别家的。
 
         全都没配子模型时退回主模型 —— 贵,但至少调得通。
@@ -45,7 +45,7 @@ class LLMClient:
         return subs or [(s, s.model) for s in ordered]
 
     def _order(self, *, lite: bool, model_id: str | None,
-               lite_id: str | None) -> list[tuple[Scheme, str]] | None:
+               lite_id: str | None) -> list[tuple[Api, str]] | None:
         """这次调用要按什么顺序试。返回 None 表示指定的模型压根不可用。"""
         usable = self.usable()
         if lite and lite_id:
@@ -75,12 +75,15 @@ class LLMClient:
         lite_id: str | None = None,
         max_tokens: int | None = 16384,
         temperature: float | None = 0.3,
-        enable_thinking: bool | None = None,
-        thinking_budget: int | None = None,
+        effort: str = "",
         timeout: int = 300,
         attempts: int | None = None,
         on_delta=None,
     ) -> dict | None:
+        """`effort` 不传就是默认档(思考) —— 认不出的值由 `protocol.level` 统一落回默认档,
+        所以这条链上不可能出现「静默不思考」。内部批量调用显式降到 `EFFORT_MEDIUM`,
+        只有探活这类不看内容的调用才传 `EFFORT_OFF`。
+        """
         order = self._order(lite=lite, model_id=model_id, lite_id=lite_id)
         if not order:
             return None
@@ -94,16 +97,15 @@ class LLMClient:
                 emitted = True
                 inner(piece)
 
-        for scheme, model in order:
+        for api, model in order:
             data = protocol.request(
-                scheme, model, messages, tools=tools,
-                max_tokens=max_tokens, temperature=temperature,
-                enable_thinking=enable_thinking, thinking_budget=thinking_budget,
+                api, model, messages, tools=tools,
+                max_tokens=max_tokens, temperature=temperature, effort=effort,
                 timeout=timeout, attempts=attempts, on_delta=on_delta,
             )
             if data is not None:
                 return data
-            logger.warning("[LLM] %s(%s) 调用失败。", scheme.id, model)
+            logger.warning("[LLM] %s(%s) 调用失败。", api.id, model)
             if emitted:
                 logger.warning("[LLM] 已向前端外发过内容,不再换平台(否则文字会重复)。")
                 return None
@@ -124,10 +126,12 @@ class LLMClient:
         """预检:给选中的模型发一次极小请求,确认链路真的通。
 
         `max_tokens` 留足余量 —— reasoning 模型思考也吃输出配额,给太小会回空正文。
+        同理这里**必须**关思考:开着思考的预检会把 512 的额度全烧在思维链上,回空正文,
+        把一个好平台判成不可用。
         """
         return self.chat(
             [{"role": "user", "content": "ping"}],
             lite=bool(lite_id), model_id=model_id, lite_id=lite_id,
-            max_tokens=512, temperature=0.0, enable_thinking=False,
+            max_tokens=512, temperature=0.0, effort=protocol.EFFORT_OFF,
             timeout=timeout, attempts=1,        # 预检求快,不退避重试
         ) is not None

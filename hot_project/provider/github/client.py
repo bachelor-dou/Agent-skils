@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from ... import config
@@ -24,11 +25,20 @@ from . import repo as repo_api
 from . import request as gh
 from . import collect
 from . import trending as trending_api
+from .collect import (          # noqa: F401 —— 门面再导出:包外只认本模块,词汇也从这里拿
+    KEYWORD_SOURCE,
+    SEGMENT_SOURCE,
+    TRENDING_SOURCE,
+    Discovered,
+    Harvest,
+)
 from .tokens import CORE, SEARCH, TokenPool
+from .trending import DEFAULT_PERIOD, PERIODS  # noqa: F401 —— 同上
 
 logger = logging.getLogger("hot_project")
 
 SEARCH_WORKERS = 12
+FREE_WORKERS = 3
 
 _PACES = {collect.SEARCH_TOKEN: SEARCH, collect.CORE_TOKEN: CORE}
 
@@ -54,6 +64,10 @@ class GitHub:
                 await client.aclose()
 
         return asyncio.run(main())
+
+    def _task_pool(self, lanes: dict[str, int]) -> tasks.TaskPool:
+        """把 token 池接到任务池上 —— 任务只说自己要哪种 token,配速在这一处定,别处不再重复。"""
+        return tasks.TaskPool(lanes=lanes, leaser=lambda kind: self.pool.lease(_PACES[kind]))
 
     def info(self, name: str) -> dict | None:
         return self._run(lambda c: repo_api.info(c, self.pool, name))
@@ -84,18 +98,27 @@ class GitHub:
             logger.error("所有 token 都已失效,取不到当前 star。")
             return collect.Harvest()
 
+        groups = collect.batches(names)
+        logger.info("待采集 %d 个仓库,分 %d 批,并发 %d。",
+                    len(names), len(groups), collect.GRAPHQL_WORKERS)
+        started = time.time()
+
         async def harvest(client):
             sink = collect.Harvest()
-            async with tasks.TaskPool(
-                lanes={collect.GRAPHQL_LANE: collect.GRAPHQL_WORKERS},
-                leaser=lambda kind: self.pool.lease(_PACES[kind]),
+            async with self._task_pool(
+                {collect.GRAPHQL_LANE: collect.GRAPHQL_WORKERS}
             ) as pool:
-                for group in collect.batches(names):
+                for group in groups:
                     pool.submit(collect.StarBatch(sink, client, group))
                 await pool.join()
             return sink
 
-        return self._run(harvest)
+        sink = self._run(harvest)
+        logger.info(
+            "采集完成:取到 %d,GitHub 查不到 %d,没问到 %d,耗时 %.0fs。",
+            len(sink.stars), len(sink.missing), len(sink.failed), time.time() - started,
+        )
+        return sink
 
     def trending(self, period: str = trending_api.DEFAULT_PERIOD) -> list[dict]:
         """Trending 不吃 token,所以没有租约 —— 它抓的是普通网页。"""
@@ -119,9 +142,8 @@ class GitHub:
 
         async def sweep(client):
             sink = collect.Discovered()
-            async with tasks.TaskPool(
-                lanes={collect.SEARCH_LANE: min(SEARCH_WORKERS, self.pool.capacity)},
-                leaser=lambda kind: self.pool.lease(_PACES[kind]),
+            async with self._task_pool(
+                {collect.SEARCH_LANE: min(SEARCH_WORKERS, self.pool.capacity)}
             ) as pool:
                 for word in words:
                     pool.submit(collect.KeywordPage(sink, client, word, min_star))
@@ -129,6 +151,36 @@ class GitHub:
             if sink.failures:
                 logger.warning("关键词搜索有 %d 处失败,结果可能不全。", len(sink.failures))
             return sink.repos
+
+        return self._run(sweep)
+
+    def discover(self, words: list[str], *, min_star: int,
+                 max_star: int) -> collect.Discovered:
+        """三阶段发现:关键词、星段、Trending 一次性全提交 —— 互不依赖,分开跑只让 token 闲着。
+
+        每日发现新仓库走这里。失败的来源记在 `Discovered.failures` 里,不抛:漏一个关键词
+        明天还能补,拖垮整轮发现才是事故。
+        """
+        sink = collect.Discovered()
+        if not words:
+            return sink
+        if self.pool.capacity < 1:
+            logger.error("所有 token 都已失效,发现阶段无法进行。")
+            return sink
+
+        async def sweep(client):
+            async with self._task_pool({
+                collect.SEARCH_LANE: min(SEARCH_WORKERS, self.pool.capacity),
+                collect.GRAPHQL_LANE: collect.GRAPHQL_WORKERS,
+                collect.FREE_LANE: FREE_WORKERS,
+            }) as pool:
+                for word in words:
+                    pool.submit(collect.KeywordPage(sink, client, word, min_star))
+                pool.submit(collect.SegmentProbe(sink, client, min_star, max_star))
+                for period in trending_api.PERIODS:
+                    pool.submit(collect.TrendingPage(sink, client, period))
+                await pool.join()
+            return sink
 
         return self._run(sweep)
 

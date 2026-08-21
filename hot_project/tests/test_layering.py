@@ -66,21 +66,20 @@ def _layer_of(parts: list[str]) -> str | None:
     return name if name in ALLOWED else SCRIPTS
 
 
-def _imported_targets(
+def _import_candidates(
     tree: ast.Module, parts: list[str], is_pkg: bool
-) -> list[tuple[str, int]]:
-    """收集本文件 import 到的**包内**模块,返回 [(层名, 行号)]。
+) -> list[tuple[list[str], int]]:
+    """收集每条 import 可能指向的完整模块路径,返回 [(路径片段, 行号)]。
 
     `ImportFrom` 要连 `names` 一起解析,不能只看 `node.module`:`from .. import config`
     里被导入的层名在 alias 上,`node.module` 是空的。漏了这一支等于给守卫开了个后门 ——
     而且是最常用的那个写法(包里几处读配置都是 `from ... import config`)。
     """
-    found: set[tuple[str, int]] = set()
+    out: list[tuple[list[str], int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if target := _layer_of(alias.name.split(".")):
-                    found.add((target, node.lineno))
+                out.append((alias.name.split("."), node.lineno))
         elif isinstance(node, ast.ImportFrom):
             if node.level:                     # 相对 import:按当前模块位置解析
                 keep = len(parts) - node.level + (1 if is_pkg else 0)
@@ -88,10 +87,19 @@ def _imported_targets(
             else:                              # 绝对 import
                 base = []
             full = base + (node.module.split(".") if node.module else [])
-            candidates = [full] + [full + [alias.name] for alias in node.names]
-            for candidate in candidates:
-                if target := _layer_of(candidate):
-                    found.add((target, node.lineno))
+            out.append((full, node.lineno))
+            out.extend((full + [alias.name], node.lineno) for alias in node.names)
+    return out
+
+
+def _imported_targets(
+    tree: ast.Module, parts: list[str], is_pkg: bool
+) -> list[tuple[str, int]]:
+    """收集本文件 import 到的**包内**模块,返回 [(层名, 行号)]。"""
+    found: set[tuple[str, int]] = set()
+    for candidate, lineno in _import_candidates(tree, parts, is_pkg):
+        if target := _layer_of(candidate):
+            found.add((target, lineno))
     return sorted(found, key=lambda item: item[1])
 
 
@@ -224,6 +232,29 @@ def test_no_reverse_dependency():
                     f"{layer} 不该 import {target}"
                 )
     assert not violations, "反向依赖:\n" + "\n".join(violations)
+
+
+def test_outside_the_provider_only_its_client_facade_is_imported():
+    """provider.github 的内部模块(request/collect/tokens/trending/repo)只许 client 组合。
+
+    `client.py` 的文档一直写着「本包对外的唯一入口」,但没有守卫它就只是文档:两个 cron
+    曾各自重建 TaskPool 的车道/token 装配、绕开 `GitHub.trending` 直连内部模块 —— 重复的
+    装配正是从这种「就近 import」一次次长出来的。包外需要的类型和常量(`Discovered` /
+    `Harvest` / `PERIODS` / 来源名)由 client 门面再导出。
+    """
+    facade = "client"
+    violations = []
+    for path, parts, is_pkg, tree in _parsed():
+        if len(parts) < 2 or parts[1] in ("provider", "tests"):
+            continue
+        for candidate, lineno in _import_candidates(tree, parts, is_pkg):
+            if (candidate[:3] == [PACKAGE_NAME, "provider", "github"]
+                    and len(candidate) > 3 and candidate[3] != facade):
+                violations.append(
+                    f"{path.relative_to(PACKAGE_ROOT)}:{lineno} — "
+                    f"包外只能 import provider.github.{facade},不是 {candidate[3]}"
+                )
+    assert not violations, "provider 门面被绕开:\n" + "\n".join(violations)
 
 
 def test_growth_stays_pure():

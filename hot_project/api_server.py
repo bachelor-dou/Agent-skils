@@ -12,12 +12,8 @@ agent 一路是同步的,写成 `async def` 会把事件循环连同 WS 心跳�
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import queue
 import re
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -31,8 +27,8 @@ from .common import logs
 from .infra import llm
 from .infra.data_access import reports
 from .service import favorites as favorite_service
-from .tools import repo_tools
-from .web import render, security, sessions
+from .service import repo_card
+from .web import chat_options, protocol, pump, render, security, sessions, view_model
 
 logger = logging.getLogger("hot_project")
 
@@ -54,6 +50,7 @@ class ChatIn(BaseModel):
     user_id: str = ""
     model: str = ""
     lite: str = ""          # 子模型 id(「平台id:模型名」);空 = 跟随主模型平台
+    thinking: str = ""      # 思考档位;空 = 用默认档(高)
 
 
 class ChatOut(BaseModel):
@@ -100,9 +97,9 @@ async def _busy_to_503(request, exc: sessions.Busy) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": BUSY_DETAIL})
 
 
-def _page(name: str, missing: str) -> HTMLResponse:
+def _page(name: str, missing: str, replacements: dict[str, str] | None = None) -> HTMLResponse:
     try:
-        html = render.page(name, {})
+        html = render.page(name, replacements or {})
     except OSError:
         raise HTTPException(status_code=404, detail=missing) from None
     return HTMLResponse(html, headers=NO_CACHE)
@@ -118,7 +115,9 @@ async def status():
 @app.get("/", response_class=HTMLResponse)
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_page():
-    return _page("chat.html", "聊天页面不存在")
+    # TTL 的唯一真值在 sessions,前端的过期提示从这里注入,别在 JS 里硬编码。
+    return _page("chat.html", "聊天页面不存在",
+                 {"__SESSION_TTL_SECONDS__": str(sessions.TTL_SECONDS)})
 
 
 # ── 对话 ────────────────────────────────────────────────────────
@@ -128,9 +127,9 @@ def chat(body: ChatIn):
     """同步 `def` 是有意的,见文件头。"""
     logger.info("HTTP 对话:session=%s message=%s", body.session_id, body.message[:120])
     agent = sessions.get(body.session_id)
+    options = chat_options.parse(body.model_dump())
     with sessions.hold_tool_lock(f"HTTP 对话 {body.session_id}"):
-        reply = agent.chat(body.message, user_id=body.user_id,
-                           model=body.model, lite=body.lite)
+        reply = agent.chat(body.message, **options.kwargs())
     return ChatOut(session_id=body.session_id, reply=reply,
                    session_ttl_seconds=sessions.TTL_SECONDS,
                    session_expires_at=sessions.expires_at())
@@ -151,15 +150,14 @@ async def models():
 
     子模型跨平台融合成一个共享池:主/子选择解耦,同名的只留先出现的那个。
     """
-    schemes = llm.get().usable()
+    apis = llm.get().usable()
     pool, seen = [], set()
-    for scheme in schemes:
-        for name in scheme.lite_models:
+    for api in apis:
+        for name in api.lite_models:
             if name not in seen:
                 seen.add(name)
-                pool.append({"id": f"{scheme.id}:{name}", "label": name.rsplit("/", 1)[-1]})
-    return {"models": [{"id": s.id, "label": s.label} for s in schemes],
-            "lite_models": pool}
+                pool.append({"id": f"{api.id}:{name}", "label": name.rsplit("/", 1)[-1]})
+    return {"models": [a.public() for a in apis], "lite_models": pool}
 
 
 @app.post("/api/models/test")
@@ -228,9 +226,7 @@ def star_trend(repo: str):
     """报告卡片上「star 走势」按钮的数据源。"""
     if not REPO_NAME.match(repo or ""):
         raise HTTPException(status_code=400, detail="无效的仓库名")
-    from .tools.report_tools import star_trend as trend
-    from .tools.spec import Ctx
-    return trend(Ctx(), {"repo": repo})
+    return repo_card.trend(repo)
 
 
 class DescribeIn(BaseModel):
@@ -239,30 +235,21 @@ class DescribeIn(BaseModel):
 
 @app.post("/api/repo-describe")
 def repo_describe(body: DescribeIn):
-    """报告卡片「刷新介绍」:重跑描述生成并落库,顺带回传当下的 star 与窗口增长。
-
-    star/增长走 `live_growth`(实时 star 减最早快照),和 agent 的 repo_growth 同一份算法,
-    所以两边永远说同一个数。它拿不到就只回介绍,不能因此让刷新整个失败。
+    """报告卡片「刷新介绍」。编排在 `repo_card.refresh`;这里只做校验、锁、状态码、渲染。
 
     和对话共用同一把执行锁,不让并发刷新和出榜互相抢 token。同步 `def`,理由见文件头。
     """
     if not REPO_NAME.match(body.repo or ""):
         raise HTTPException(status_code=400, detail="无效的仓库名")
     from .provider.github import client as github
-    from .service import report
     if not (gh := github.shared()).usable:
         raise HTTPException(status_code=503, detail="没有可用的 GitHub token,无法刷新介绍。")
     with sessions.hold_tool_lock(f"刷新介绍 {body.repo}"):
-        desc = report.regenerate(body.repo, gh)
-    if not desc:
+        out = repo_card.refresh(body.repo, gh, config.GROWTH_CALC_DAYS)
+    if not (desc := out.pop("desc")):
         raise HTTPException(status_code=502,
                             detail=f"生成 {body.repo} 的介绍失败(LLM 未配置或全部平台不可用)。")
-    try:
-        stats = repo_tools.live_growth(body.repo, gh, config.GROWTH_CALC_DAYS)
-    except Exception:                       # noqa: BLE001
-        logger.warning("刷新 %s 的 star/增长失败,只回介绍。", body.repo, exc_info=True)
-        stats = {}
-    return {"repo": body.repo, "sections": render.section_payload(desc), **stats}
+    return {"repo": body.repo, "sections": view_model.section_payload(desc), **out}
 
 
 # ── 收藏 ────────────────────────────────────────────────────────
@@ -303,26 +290,19 @@ async def ws_chat(websocket: WebSocket, session_id: str):
         return
 
     await websocket.accept()
-    params = websocket.query_params
-    user_id, model, lite = (params.get(k, "") for k in ("user_id", "model", "lite"))
-    logger.info("WS 已连接:%s(user=%s model=%s lite=%s)",
-                session_id, user_id or "-", model or "-", lite or "-")
+    # 选项在连接时读一次:切模型或档位由前端重连,所以一条连接的选项是固定的
+    options = chat_options.parse(websocket.query_params)
+    logger.info("WS 已连接:%s(user=%s model=%s lite=%s 思考=%s)",
+                session_id, options.user_id or "-", options.model or "-",
+                options.lite or "-", options.effort)
 
-    for reply in sessions.take(session_id):
-        try:
-            await websocket.send_text(reply)
-        except Exception:       # noqa: BLE001
-            sessions.stash(session_id, reply)
-            break
+    await protocol.replay(websocket, session_id)
 
     def run(message: str, progress, on_delta) -> str:
         agent = sessions.get(session_id)
-        try:
-            with sessions.hold_tool_lock(f"WS 对话 {session_id}"):
-                return agent.chat(message, progress=progress, user_id=user_id,
-                                  model=model, lite=lite, on_delta=on_delta)
-        except sessions.Busy:
-            return BUSY_DETAIL
+        with sessions.hold_tool_lock(f"WS 对话 {session_id}"):
+            return agent.chat(message, progress=progress, on_delta=on_delta,
+                              **options.kwargs())
 
     try:
         while True:
@@ -335,73 +315,30 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 
 
 async def _pump(websocket, session_id: str, message: str, run) -> str | None:
-    """在线程里跑一轮对话,同时把进度和正文增量实时推出去。
+    """跑一轮对话并实时推进度/增量。线程和心跳的机械在 `web.pump`,帧的形状和补发
+    契约在 `web.protocol`;这里只把两者接起来:worker 的产出一律是线上帧。
 
-    连接断开**不中断 agent**(它可能正跑到出榜第三分钟),回复存进待发缓冲。
-    返回最终回复;连接已断、回复已缓存时返回 None。
+    返回送达的最终帧;连接已断、帧已进待发缓冲时返回 None。
     """
-    events: queue.Queue = queue.Queue()
-    DONE = object()
-    holder: dict[str, str] = {}
 
-    def worker() -> None:
+    def worker(emit) -> str:
         try:
-            holder["reply"] = run(
+            return protocol.reply(run(
                 message,
-                lambda percent, label: events.put(
-                    {"type": "progress", "percent": percent, "label": label}),
-                lambda text, reset=False: events.put(
-                    {"type": "delta", "text": text, "reset": reset}),
-            )
+                lambda percent, label: emit(protocol.progress(percent, label)),
+                lambda text, reset=False: emit(protocol.delta(text, reset)),
+            ))
+        except sessions.Busy:
+            return protocol.error(BUSY_DETAIL)
         except Exception as e:      # noqa: BLE001 —— 一轮失败要告诉前端,不能静默吞掉
             logger.exception("WS 对话异常:%s", session_id)
-            holder["reply"] = f"处理消息时出错:{e}"
-        finally:
-            events.put(DONE)
+            return protocol.error(f"处理消息时出错:{e}")
 
-    task = asyncio.create_task(asyncio.to_thread(worker))
-    alive = True
-    last_sent = time.time()
+    got = await pump.drive(websocket, worker, heartbeat=WS_HEARTBEAT, poll=WS_POLL)
+    logger.info("WS 回复完成:%s(%d 字)", session_id, len(got.result))
 
-    while True:
-        finished = False
-        try:
-            while True:
-                item = events.get_nowait()
-                if item is DONE:
-                    finished = True
-                    break
-                if alive:
-                    try:
-                        await websocket.send_text(json.dumps(item, ensure_ascii=False))
-                        last_sent = time.time()
-                    except Exception:       # noqa: BLE001
-                        alive = False       # 前端走了,不再推,但等 worker 跑完
-        except queue.Empty:
-            pass
-
-        if finished:
-            break
-        if alive and time.time() - last_sent >= WS_HEARTBEAT:
-            try:
-                await websocket.send_text(json.dumps({"type": "heartbeat"}))
-                last_sent = time.time()
-            except Exception:       # noqa: BLE001
-                alive = False
-        await asyncio.sleep(WS_POLL)
-
-    await task
-    reply = holder.get("reply", "")
-    logger.info("WS 回复完成:%s(%d 字)", session_id, len(reply))
-
-    if alive:
-        try:
-            await websocket.send_text(
-                json.dumps({"type": "reply", "reply": reply}, ensure_ascii=False))
-            return reply
-        except Exception:       # noqa: BLE001
-            pass
-    sessions.stash(session_id, reply)
+    if await protocol.deliver(websocket, session_id, got.result, alive=got.alive):
+        return got.result
     return None
 
 

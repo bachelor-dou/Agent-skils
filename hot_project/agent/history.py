@@ -36,7 +36,6 @@ class Session:
     messages: list[dict] = field(default_factory=list)
     summary: str = ""
     tool_state: dict = field(default_factory=dict)
-    active_repo: str | None = None
     pending_confirmation_signature: str | None = None
 
     def __post_init__(self) -> None:

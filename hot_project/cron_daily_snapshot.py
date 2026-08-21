@@ -16,64 +16,17 @@ star 时间戳已被 GitHub 限权,增长只能靠「今天的 star − T−N �
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import sys
-import time
 from typing import NamedTuple
 
 from . import config
 from .common import logs
 from .common.timeutil import utc_today
 from .infra.data_access import snapshots, universe
-from .infra.tasks import TaskPool
-from .provider.github import request as gh
-from .provider.github import collect
-from .provider.github import tokens as gh_tokens
-from .provider.github import trending
+from .provider.github import client as github
 
 logger = logging.getLogger("hot_project")
-
-SEARCH_WORKERS_CAP = 12
-FREE_WORKERS = 3
-
-
-def _make_pool(tokens: gh_tokens.TokenPool, search_workers: int) -> TaskPool:
-    """把 token 池接到任务池上 —— 任务只说自己要哪种 token,不认识 token 池,配速在这里定。"""
-    paces = {collect.SEARCH_TOKEN: gh_tokens.SEARCH, collect.CORE_TOKEN: gh_tokens.CORE}
-    return TaskPool(
-        lanes={
-            collect.SEARCH_LANE: search_workers,
-            collect.GRAPHQL_LANE: collect.GRAPHQL_WORKERS,
-            collect.FREE_LANE: FREE_WORKERS,
-        },
-        leaser=lambda kind: tokens.lease(paces[kind]),
-    )
-
-
-# ──────────────────────────────────────────────────────────
-# 第 2 步 发现
-# ──────────────────────────────────────────────────────────
-async def discover(
-    tokens: gh_tokens.TokenPool, client, min_star: int, max_star: int
-) -> collect.Discovered:
-    """三阶段收集,一次性全提交 —— 关键词、星段、Trending 无先后关系,分开跑只让 token 闲着。"""
-    sink = collect.Discovered()
-    words = [w for group in config.SEARCH_KEYWORDS.values() for w in group]
-
-    async with _make_pool(tokens, min(SEARCH_WORKERS_CAP, tokens.capacity)) as pool:
-        for word in words:
-            pool.submit(collect.KeywordPage(sink, client, word, min_star))
-        pool.submit(collect.SegmentProbe(sink, client, min_star, max_star))
-        for period in trending.PERIODS:
-            pool.submit(collect.TrendingPage(sink, client, period))
-        await pool.join()
-
-    logger.info(
-        "发现完成:%d 个关键词 + 星段 %d..%d + Trending,共扫到 %d 个仓库,失败 %d 处。",
-        len(words), min_star, max_star, len(sink.repos), len(sink.failures),
-    )
-    return sink
 
 
 def register(found: dict[str, dict], min_star: int) -> list[str]:
@@ -108,13 +61,13 @@ def phase_yield(sources: dict[str, set[str]], fresh: set[str]) -> tuple[int, int
         return len(seen & fresh)
 
     return (
-        hit(lambda s: s.startswith(collect.KEYWORD_SOURCE)),
-        hit(lambda s: s == collect.SEGMENT_SOURCE),
-        hit(lambda s: s == collect.TRENDING_SOURCE),
+        hit(lambda s: s.startswith(github.KEYWORD_SOURCE)),
+        hit(lambda s: s == github.SEGMENT_SOURCE),
+        hit(lambda s: s == github.TRENDING_SOURCE),
     )
 
 
-def log_yield(found: collect.Discovered, fresh: set[str]) -> None:
+def log_yield(found: github.Discovered, fresh: set[str]) -> None:
     """三个阶段各给 DB 带来多少新仓库,再点名产出最高的来源。只写日志,不影响流程。
 
     用来找白跑的关键词:判据要跨多天看,单天 0 新增很正常。
@@ -123,7 +76,7 @@ def log_yield(found: collect.Discovered, fresh: set[str]) -> None:
                     reverse=True)
     if not scored:
         return
-    words = [(n, s) for n, s in scored if s.startswith(collect.KEYWORD_SOURCE)]
+    words = [(n, s) for n, s in scored if s.startswith(github.KEYWORD_SOURCE)]
     barren = sum(1 for n, _ in words if n == 0)
 
     kw, seg, trend = phase_yield(found.sources, fresh)
@@ -132,31 +85,6 @@ def log_yield(found: collect.Discovered, fresh: set[str]) -> None:
     logger.info("发现来源产出(新入库数),前 %d:%s", TOP_SOURCES_LOGGED,
                 ", ".join(f"{s}={n}" for n, s in scored[:TOP_SOURCES_LOGGED]))
     logger.info("关键词 %d 个,其中今天 0 新增 %d 个。", len(words), barren)
-
-
-# ──────────────────────────────────────────────────────────
-# 第 4 步 采集
-# ──────────────────────────────────────────────────────────
-async def fetch_stars(
-    tokens: gh_tokens.TokenPool, client, names: list[str]
-) -> collect.Harvest:
-    """给每个仓库取一次当天的 star。"""
-    sink = collect.Harvest()
-    groups = collect.batches(names)
-    logger.info("待采集 %d 个仓库,分 %d 批,并发 %d。",
-                len(names), len(groups), collect.GRAPHQL_WORKERS)
-
-    started = time.time()
-    async with _make_pool(tokens, 1) as pool:
-        for group in groups:
-            pool.submit(collect.StarBatch(sink, client, group))
-        await pool.join()
-
-    logger.info(
-        "采集完成:取到 %d,GitHub 查不到 %d,没问到 %d,耗时 %.0fs。",
-        len(sink.stars), len(sink.missing), len(sink.failed), time.time() - started,
-    )
-    return sink
 
 
 # ──────────────────────────────────────────────────────────
@@ -201,7 +129,7 @@ MAX_MISSING_RATIO = 0.01
 MAX_MISSING_FLOOR = 200
 
 
-def retire(tracked: set[str], harvest: collect.Harvest, star_floor: int) -> list[str]:
+def retire(tracked: set[str], harvest: github.Harvest, star_floor: int) -> list[str]:
     plan = decide(tracked, harvest.stars, harvest.missing, star_floor=star_floor)
 
     ceiling = max(MAX_MISSING_FLOOR, int(len(tracked) * MAX_MISSING_RATIO))
@@ -226,7 +154,7 @@ def retire(tracked: set[str], harvest: collect.Harvest, star_floor: int) -> list
 
 
 # ──────────────────────────────────────────────────────────
-async def run(args: argparse.Namespace) -> int:
+def run(args: argparse.Namespace) -> int:
     today = utc_today()
 
     # ── 1. 幂等 ──────────────────────────────────────────
@@ -234,40 +162,42 @@ async def run(args: argparse.Namespace) -> int:
         logger.info("当天(%s)快照已存在,跳过。加 --force 强制重采。", today)
         return 0
 
-    secrets = config.github_tokens()
-    if not secrets:
+    gh = github.GitHub()
+    if not gh.usable:
         logger.error("没有配置 GitHub token(设置 GITHUB_TOKENS)。")
         return 1
-    tokens = gh_tokens.TokenPool(secrets)
 
-    client = gh.build_client()
-    try:
-        # ── 2. 发现 ──────────────────────────────────────
-        if args.skip_discovery or args.limit > 0:
-            logger.info("跳过发现阶段。")
-        else:
-            try:
-                found = await discover(tokens, client, config.MIN_STAR, config.MAX_STAR)
-                fresh = register(found.repos, config.MIN_STAR)
-                logger.info("其中 %d 个是 DB 里没有的,已入库。", len(fresh))
-                log_yield(found, set(fresh))
-            except Exception as e:      # noqa: BLE001 —— 发现失败绝不能拖累采集,见文件头
-                logger.exception("发现阶段失败,本次只采集 DB 现有项目(明天重试):%s", e)
+    # ── 2. 发现 ──────────────────────────────────────────
+    if args.skip_discovery or args.limit > 0:
+        logger.info("跳过发现阶段。")
+    else:
+        try:
+            words = [w for group in config.SEARCH_KEYWORDS.values() for w in group]
+            found = gh.discover(words, min_star=config.MIN_STAR,
+                                max_star=config.MAX_STAR)
+            logger.info(
+                "发现完成:%d 个关键词 + 星段 %d..%d + Trending,共扫到 %d 个仓库,失败 %d 处。",
+                len(words), config.MIN_STAR, config.MAX_STAR,
+                len(found.repos), len(found.failures),
+            )
+            fresh = register(found.repos, config.MIN_STAR)
+            logger.info("其中 %d 个是 DB 里没有的,已入库。", len(fresh))
+            log_yield(found, set(fresh))
+        except Exception as e:      # noqa: BLE001 —— 发现失败绝不能拖累采集,见文件头
+            logger.exception("发现阶段失败,本次只采集 DB 现有项目(明天重试):%s", e)
 
-        # ── 3. 读 DB ─────────────────────────────────────
-        tracked = set(universe.load())
-        if not tracked:
-            logger.error("DB 里没有任何项目,无从采集。")
-            return 1
-        names = sorted(tracked)
-        if args.limit > 0:
-            names = names[: args.limit]
-            logger.info("调试模式:只采前 %d 个仓库,不落盘。", len(names))
+    # ── 3. 读 DB ─────────────────────────────────────────
+    tracked = set(universe.load())
+    if not tracked:
+        logger.error("DB 里没有任何项目,无从采集。")
+        return 1
+    names = sorted(tracked)
+    if args.limit > 0:
+        names = names[: args.limit]
+        logger.info("调试模式:只采前 %d 个仓库,不落盘。", len(names))
 
-        # ── 4. 采集 ──────────────────────────────────────
-        harvest = await fetch_stars(tokens, client, names)
-    finally:
-        await client.aclose()
+    # ── 4. 采集 ──────────────────────────────────────────
+    harvest = gh.stars(names)
 
     # ── 4.5 改名归并:只留规范新名 ──────────────────────
     # 采集时免费捕获「旧名→规范新名」。落盘只存新名,DB 里的旧名记录并入新名,下一轮起
@@ -299,8 +229,8 @@ async def run(args: argparse.Namespace) -> int:
         today, harvest.stars, not_found=sorted(harvest.missing),
         expected=len(names) - dropped_dups,   # 旧名被并进新名,不再算作应测数,否则覆盖率虚降
         ids=harvest.ids,
-        throttle={"hits": tokens.stats["rate_limited"],
-                  "waited_seconds": round(tokens.stats["waited_seconds"], 1)},
+        throttle={"hits": gh.pool.stats["rate_limited"],
+                  "waited_seconds": round(gh.pool.stats["waited_seconds"], 1)},
     ) is None:
         logger.error("本次未落盘,明天重试(锚点可顺延到邻近快照)。")
         return 1
@@ -330,7 +260,7 @@ def main() -> int:
     log_path = logs.setup(config.LOG_DIR, "snapshot", day=utc_today())
     logger.info("=" * 70)
     logger.info("【每日 star 快照】日志:%s", log_path)
-    code = asyncio.run(run(args))
+    code = run(args)
     logger.info("=" * 70)
     return code
 

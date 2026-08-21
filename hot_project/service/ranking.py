@@ -75,8 +75,8 @@ def qualify(stars: dict[str, int], meta: dict[str, dict], base: snapshots.Baseli
             continue
         info = meta.get(name, {})
         created = info.get("created_at", "")
-        key = info.get("id") or name
-        result = growth_calc.resolve(star, base.stars.get(key), base.days.get(key),
+        base_star, base_days = base.get(name, info.get("id"))
+        result = growth_calc.resolve(star, base_star, base_days,
                                      age_days(created), base.span)
         if result is None:
             unresolved += 1
@@ -103,11 +103,11 @@ def recent(pool: dict[str, dict], days: int) -> int:
 
     hit = 0
     for name, info in pool.items():
-        anchor = base.stars.get(info.get("id") or name)
+        anchor, anchor_days = base.get(name, info.get("id"))
         if anchor is None or info["star"] < anchor:
             continue
         info["recent_growth"] = info["star"] - anchor
-        info["recent_days"] = base.days.get(info.get("id") or name, base.span)
+        info["recent_days"] = anchor_days if anchor_days is not None else base.span
         hit += 1
     logger.info("爆发探针基线 %s(%d 天):%d/%d 个候选可算。",
                 base.oldest, base.span, hit, len(pool))
@@ -185,13 +185,15 @@ def rank(candidates: dict[str, dict], mode: str, w: Weights) -> list[tuple[str, 
     return sorted(candidates.items(), key=lambda kv: kv[1]["_score"], reverse=True)
 
 
-def run(*, mode: str = "comprehensive", min_star: int = config.MIN_STAR,
-        growth_threshold: int = config.STAR_GROWTH_THRESHOLD,
-        growth_days: int = config.GROWTH_CALC_DAYS,
+def run(*, mode: str = "comprehensive", min_star: int, growth_threshold: int,
+        growth_days: int,
         created_days: int | None = None, top_n: int | None = None,
         topic: str | None = None, do_report: bool = True,
         gh=None, progress=None, pool: dict[str, dict] | None = None) -> dict:
     """跑一轮榜单。返回排名结果 + 漏斗。
+
+    门槛三件套(`min_star`/`growth_threshold`/`growth_days`)必填:它们是策略,由入口
+    (cron 参数、工具 schema 的默认值)决定,这里不替调用方翻 config —— 签名即契约。
 
     `pool` 给了就只在那批里排,否则排 DB 全库。它只提供名单和 `created_at`,star 一律现取。
     """
