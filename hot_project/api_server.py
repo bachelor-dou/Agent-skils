@@ -32,7 +32,6 @@ from .web import chat_options, protocol, pump, render, security, sessions, view_
 
 logger = logging.getLogger("hot_project")
 
-PORT = 8001
 NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache", "Expires": "0"}
 
@@ -345,7 +344,8 @@ async def _pump(websocket, session_id: str, message: str, run) -> str | None:
 def main() -> None:
     import uvicorn
     logs.setup(config.LOG_DIR, "web", console=True)
-    uvicorn.run("hot_project.api_server:app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("hot_project.api_server:app", host="0.0.0.0",
+                port=config.WEB_PORT, reload=False)
 
 
 if __name__ == "__main__":

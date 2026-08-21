@@ -11,9 +11,9 @@ LOG_DIR="$SCRIPT_DIR/logs"
 SERVER_OUT="$LOG_DIR/server.out"
 # 匹配 Web 服务进程，排除 cron 子模块。
 PROC_PAT="-m hot_project$"
-PORT=8001
 
 cd "$REPO"
+PORT="$("$VENV_PY" -c 'from hot_project import config; print(config.WEB_PORT)')"
 mkdir -p "$LOG_DIR"
 
 # 暂存已跟踪的本地改动。
