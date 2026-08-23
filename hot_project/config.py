@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .common.env import csv_list, text
 
-WEB_PORT: int = 8001
+WEB_PORT: int = 9001
 
 # ══════════════════════════════════════════════════════════════
 # 一、策略参数

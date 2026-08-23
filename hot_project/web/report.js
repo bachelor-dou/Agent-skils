@@ -106,6 +106,42 @@
     activate(indexFromHash(), { updateHash: false });
   });
 
+  // 手机端左右滑切换项目;阈值与 chat.js 的 Tab 滑动手势一致
+  var mainEl = document.querySelector(".main");
+  var mobileQuery = window.matchMedia("(max-width: 960px)");
+  var swipeStartX = null;
+  var swipeStartY = null;
+
+  if (mainEl) {
+    mainEl.addEventListener("touchstart", function (event) {
+      swipeStartX = null;
+      swipeStartY = null;
+      if (!mobileQuery.matches || event.touches.length !== 1
+          || document.body.classList.contains("sidebar-open")
+          || event.target.closest("button, a, input, textarea, .repo-trend")) {
+        return;
+      }
+      swipeStartX = event.touches[0].clientX;
+      swipeStartY = event.touches[0].clientY;
+    }, { passive: true });
+
+    mainEl.addEventListener("touchend", function (event) {
+      if (swipeStartX === null || swipeStartY === null) {
+        return;
+      }
+      var touch = event.changedTouches[0];
+      var deltaX = touch.clientX - swipeStartX;
+      var deltaY = touch.clientY - swipeStartY;
+      swipeStartX = null;
+      swipeStartY = null;
+      // 72px 起判,且横向位移须明显大于纵向,防上下滚动误触发
+      if (Math.abs(deltaX) < 72 || Math.abs(deltaX) < Math.abs(deltaY) * 1.3) {
+        return;
+      }
+      activate(activeIndex + (deltaX < 0 ? 1 : -1));
+    }, { passive: true });
+  }
+
   activate(indexFromHash(), { updateHash: false, scrollTop: false });
 })();
 

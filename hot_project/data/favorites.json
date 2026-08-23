@@ -2,6 +2,14 @@
   "users": {
     "dou": [
       {
+        "repo": "LaoFeng-mouse/flyingmouse-format",
+        "favorited_at": "2026-08-22T15:16:58Z",
+        "source_report": "2026-08-19.md",
+        "short_desc": "Windows离线文件转换工具，支持图片、文档、音视频、PDF、压缩包批量处理、OCR和CLI",
+        "category": "文档处理类",
+        "subcategory": ""
+      },
+      {
         "repo": "harry0703/MoneyPrinterTurbo",
         "favorited_at": "2026-08-19T11:17:57Z",
         "source_report": "2026-08-19.md",
