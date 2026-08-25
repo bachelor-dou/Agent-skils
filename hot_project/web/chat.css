@@ -55,6 +55,7 @@ body {
   max-width: var(--content-width);
   margin: 0 auto;
   min-height: calc(100vh - 36px);
+  min-height: calc(100dvh - 36px);
   position: relative;  /* sash 的定位上下文 */
   display: grid;
   --sidebar-w: 38%;
@@ -83,6 +84,7 @@ body {
   display: flex;
   flex-direction: column;
   max-height: calc(100vh - 36px);
+  max-height: calc(100dvh - 36px);
 }
 
 .sidebar-handle {
@@ -330,6 +332,7 @@ body {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   min-height: calc(100vh - 36px);
+  min-height: calc(100dvh - 36px);
 }
 
 .hero {
@@ -1197,6 +1200,7 @@ textarea {
 
 .report-panel {
   min-height: calc(100vh - 36px);
+  min-height: calc(100dvh - 36px);
 }
 
 .report-list {
@@ -1814,6 +1818,20 @@ textarea {
 .report-delete-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 两步删除的确认态：变红实心并常显，鼠标移开也不消失，直到超时回退 */
+.report-delete-btn.is-confirming {
+  opacity: 1;
+  pointer-events: auto;
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: #fff;
+}
+
+.report-delete-btn.is-confirming:hover {
+  background: #991b1b;
+  border-color: #991b1b;
 }
 
 @media (hover: none) {

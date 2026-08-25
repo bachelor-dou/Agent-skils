@@ -32,6 +32,23 @@
     return "https://github.com/" + encodeURIComponent(repo).replace(/%2F/g, "/");
   }
 
+  /* 轻量瞬时提示，chat / report 两页共用；样式在各自 CSS 的 .app-toast */
+  let toastTimer = null;
+  function toast(text) {
+    let el = document.getElementById("app-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "app-toast";
+      el.className = "app-toast";
+      el.setAttribute("role", "status");
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.classList.add("is-visible");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove("is-visible"); }, 3000);
+  }
+
   function applyRepoCopyState(button, state, repo) {
     const messages = {
       idle: "复制 " + repo,
@@ -64,5 +81,6 @@
     copyText: copyText,
     buildRepoUrl: buildRepoUrl,
     applyRepoCopyState: applyRepoCopyState,
+    toast: toast,
   };
 })(window);

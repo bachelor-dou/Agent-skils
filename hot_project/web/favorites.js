@@ -63,6 +63,13 @@
     });
   }
 
+  /* 失败不能只静默回滚：星标闪一下又弹回去，用户会以为是显示 bug。 */
+  function toast(msg) {
+    if (global.HotCommon && typeof global.HotCommon.toast === "function") {
+      global.HotCommon.toast(msg);
+    }
+  }
+
   function cleanTag(tag) {
     return String(tag || "").replace(/\s+/g, " ").trim().slice(0, MAX_TAG_LEN);
   }
@@ -170,6 +177,7 @@
           loadItems(await apiGet(uid));
         } catch (_e) {
           items = new Map();
+          toast("收藏加载失败，请刷新页面重试");
         }
         notify();
       })();
@@ -211,6 +219,7 @@
     } catch (_e) {
       items.delete(name);
       notify();
+      toast("收藏失败，请重试");
     }
     return items.has(name);
   }
@@ -229,6 +238,7 @@
       });
       items = restore;
       notify();
+      toast("取消收藏失败，请重试");
     }
     return items.has(name);
   }
@@ -275,6 +285,7 @@
       it.category = prev;
       it.subcategory = prevSub;
       notify();
+      toast("修改分类失败，已恢复原分类");
     }
     return getCategory(name);
   }
@@ -305,6 +316,7 @@
     }
     broadcastChange();
     if (failed) {
+      toast("部分条目改名失败，已按服务端数据恢复");
       await refresh();  // 有失败的就以服务端为准，别留下半真半假的分组
     } else {
       reconcile(last);
@@ -345,6 +357,7 @@
     } catch (_e) {
       it.short_desc = prev;
       notify();
+      toast("保存概要失败，已恢复原内容");
     }
     const now = items.get(name);
     return (now && now.short_desc) || "";

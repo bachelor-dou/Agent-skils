@@ -183,6 +183,27 @@
     if (countLabel) {
       countLabel.textContent = visible + "/" + navItems.length;
     }
+    renderFilterEmpty(visible === 0);
+  }
+
+  // 筛选结果为空时给一句话，别让侧栏静悄悄变白
+  function renderFilterEmpty(isEmpty) {
+    let el = document.getElementById("repo-filter-empty");
+    if (isEmpty && !el) {
+      el = document.createElement("p");
+      el.id = "repo-filter-empty";
+      el.className = "toc-empty";
+      const scroll = navItems[0].closest(".sidebar__scroll") || navItems[0].parentElement;
+      scroll.appendChild(el);
+    }
+    if (el) {
+      el.hidden = !isEmpty;
+      if (isEmpty) {
+        el.textContent = state.mode === "fav"
+          ? "还没有匹配的收藏项目"
+          : "没有匹配的项目，换个关键词试试";
+      }
+    }
   }
 
   input.addEventListener("input", function () {
@@ -433,6 +454,9 @@
       applyStats(detail, data);
     } catch (_e) {
       button.classList.add("is-error");
+      if (window.HotCommon) {
+        window.HotCommon.toast("刷新简介失败，请稍后重试");
+      }
       window.setTimeout(function () {
         button.classList.remove("is-error");
       }, 1600);
@@ -697,7 +721,7 @@
         const data = await resp.json();
         const body = (data.series && data.series.length)
           ? renderChart(data.series)
-          : '<p class="repo-trend__empty">' + (data.message || "暂无历史数据") + "</p>";
+          : '<p class="repo-trend__empty">' + escapeHtml(data.message || "暂无历史数据") + "</p>";
         panel.innerHTML = trendHeader(repo) + body;
         panel.dataset.loaded = "1";
       } catch (_e) {

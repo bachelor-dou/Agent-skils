@@ -205,7 +205,8 @@
               const body = document.createElement("div");
               if (entry.isHtml) {
                 body.className = "md-body";
-                body.innerHTML = entry.content;
+                // 写入时已经过 DOMPurify，这里再洗一遍防 localStorage 被篡改后回放注入
+                body.innerHTML = window.DOMPurify ? DOMPurify.sanitize(entry.content) : entry.content;
               } else {
                 body.textContent = entry.content;
               }
@@ -278,6 +279,7 @@
       } catch (_e) {
         availableModels = [];
         availableLiteModels = [];
+        showToast("模型列表加载失败，将使用默认模型");
       }
       if (!availableModels.length) {
         modelButton.style.display = "none";
@@ -491,19 +493,8 @@
       connectWebSocket();
     }
 
-    let toastTimer = null;
     function showToast(text) {
-      let el = document.getElementById("app-toast");
-      if (!el) {
-        el = document.createElement("div");
-        el.id = "app-toast";
-        el.className = "app-toast";
-        document.body.appendChild(el);
-      }
-      el.textContent = text;
-      el.classList.add("is-visible");
-      if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => el.classList.remove("is-visible"), 3000);
+      window.HotCommon.toast(text);
     }
 
     function setupComposer() {
@@ -1337,20 +1328,39 @@
           const reportName = btn.getAttribute("data-report");
           if (!reportName) return;
 
-          const confirmed = window.confirm("确定要删除报告 " + reportName + " 吗？\n删除后将无法恢复。");
-          if (!confirmed) return;
+          // 两步确认代替 window.confirm：首次点击按钮变红进入确认态，3 秒内再点才真删
+          if (btn.dataset.confirming !== "1") {
+            btn.dataset.confirming = "1";
+            btn.classList.add("is-confirming");
+            const hint = "再点一次确认删除（不可恢复）";
+            btn.title = hint;
+            btn.setAttribute("aria-label", hint);
+            btn._confirmTimer = window.setTimeout(function () {
+              delete btn.dataset.confirming;
+              btn.classList.remove("is-confirming");
+              btn.title = "删除报告";
+              btn.setAttribute("aria-label", "删除报告");
+            }, 3000);
+            return;
+          }
+          window.clearTimeout(btn._confirmTimer);
 
           btn.disabled = true;
           try {
             const resp = await fetch("/api/reports/" + encodeURIComponent(reportName), { method: "DELETE" });
             if (!resp.ok) {
               const data = await resp.json().catch(() => ({}));
-              throw new Error(data.detail || "删除失败");
+              throw new Error(data.detail || "服务端拒绝了请求");
             }
+            showToast("已删除报告 " + reportName);
             loadReports();
           } catch(err) {
-            window.alert("删除失败: " + err.message);
+            showToast("删除失败：" + err.message);
             btn.disabled = false;
+            delete btn.dataset.confirming;
+            btn.classList.remove("is-confirming");
+            btn.title = "删除报告";
+            btn.setAttribute("aria-label", "删除报告");
           }
         });
       });
@@ -1552,7 +1562,9 @@
                 copyBtn.classList.remove("is-copied");
                 copyBtn.textContent = "⧉";
               }, 1200);
-            }).catch(function () {});
+            }).catch(function () {
+              showToast("复制失败，请手动复制 " + repo);
+            });
           }
           return;
         }

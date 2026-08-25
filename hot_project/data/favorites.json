@@ -2,6 +2,22 @@
   "users": {
     "dou": [
       {
+        "repo": "t8y2/dbx",
+        "favorited_at": "2026-08-25T09:12:36Z",
+        "source_report": "2026-08-19.md",
+        "short_desc": "轻量跨平台数据库客户端，支持多种 SQL/NoSQL 数据库。",
+        "category": "效率工具",
+        "subcategory": ""
+      },
+      {
+        "repo": "hugohe3/ppt-master",
+        "favorited_at": "2026-08-25T08:42:54Z",
+        "source_report": "2026-08-19.md",
+        "short_desc": "AI将任意文档生成可编辑的PPTX，输出真实PowerPoint形状。",
+        "category": "文档处理类",
+        "subcategory": ""
+      },
+      {
         "repo": "LaoFeng-mouse/flyingmouse-format",
         "favorited_at": "2026-08-22T15:16:58Z",
         "source_report": "2026-08-19.md",
@@ -23,14 +39,6 @@
         "source_report": "2026-08-12.md",
         "short_desc": "A/H/美股智能分析器，集行情、新闻、LLM决策仪表盘与推送于一体。",
         "category": "娱乐类工具",
-        "subcategory": ""
-      },
-      {
-        "repo": "brightdata/cli",
-        "favorited_at": "2026-08-12T06:50:27Z",
-        "source_report": "2026-08-12.md",
-        "short_desc": "Bright Data 官方命令行工具，支持网页抓取、结构化搜索、浏览器控制、采集流程管理与 MCP 接入。",
-        "category": "效率工具",
         "subcategory": ""
       },
       {
