@@ -2,6 +2,22 @@
   "users": {
     "dou": [
       {
+        "repo": "FlashML-org/FreeToken",
+        "favorited_at": "2026-08-26T05:47:20Z",
+        "source_report": "2026-08-26.md",
+        "short_desc": "面向边缘设备的MoE推理引擎，支持本地运行大模型、桌面/CLI部署与API接入。",
+        "category": "推理框架",
+        "subcategory": ""
+      },
+      {
+        "repo": "arvids-unavailable/openGym",
+        "favorited_at": "2026-08-26T05:10:10Z",
+        "source_report": "2026-08-26.md",
+        "short_desc": "自托管健身和体重记录应用，支持训练计划、引导锻炼、离线PWA、多设备同步与数据自控。",
+        "category": "娱乐类工具",
+        "subcategory": ""
+      },
+      {
         "repo": "t8y2/dbx",
         "favorited_at": "2026-08-25T09:12:36Z",
         "source_report": "2026-08-19.md",

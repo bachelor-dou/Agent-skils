@@ -344,7 +344,7 @@ async def _pump(websocket, session_id: str, message: str, run) -> str | None:
 def main() -> None:
     import uvicorn
     logs.setup(config.LOG_DIR, "web", console=True)
-    uvicorn.run("hot_project.api_server:app", host="0.0.0.0",
+    uvicorn.run("hot_project.api_server:app", host="127.0.0.1",
                 port=config.WEB_PORT, reload=False)
 
 
